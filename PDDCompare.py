@@ -637,6 +637,11 @@ def run_comparison():
         conv_fwhm = float(conv_fwhm_entry.get())
     except ValueError:
         conv_fwhm = 0.0
+
+    try:
+        ms = float(marker_size_entry.get())
+    except ValueError:
+        ms = 6
     
     conv_apply = conv_apply_var.get()
  
@@ -798,8 +803,8 @@ def run_comparison():
         # If "None", do nothing
 
        
-        ax0.plot(y1,d1,'+r',ms=5)
-        ax0.plot(y2,d2,'.k',ms=6)  
+        ax0.plot(y1,d1,'+r',ms=ms)
+        ax0.plot(y2,d2,'.k',ms=ms)  
         if gam ==1:
             gx , gv = g(y1,d1,y2,d2,dd,dta,0,0,.01);#norm 0 is no norm in gamma code, 0 threshold InterpThreshold=0.01
             gx, gv = downsample_to_native(gx, gv, y1)
@@ -843,8 +848,8 @@ def run_comparison():
             ddx1=np.extract(np.abs(ddif)>dd,difx);ddv1=np.extract(np.abs(ddif)>dd,ddif);
             ddx2=np.extract(np.abs(ddif)<dd,difx);ddv2=np.extract(np.abs(ddif)<dd,ddif);
             ax0=plt.subplot(gs[0])
-            ax0.plot(y1,d1,'+r',ms=5)
-            ax0.plot(y2,d2,'.k',ms=6) 
+            ax0.plot(y1,d1,'+r',ms=ms)
+            ax0.plot(y2,d2,'.k',ms=ms) 
             ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.plot(ddx1,ddv1,'.r')
@@ -949,7 +954,7 @@ def run_comparison():
             current_gvfs = gvl[j] if j < len(gvl) else []
             mean_val = np.mean(current_gvfs) if len(current_gvfs) > 0 else 0.0
             max_val = max(current_gvfs) if len(current_gvfs) > 0 else 0.0
-            results.append((fs_val, prfs_val, mean_val, max_val))
+            results.append((fs_val, prfs_val, mean_val, max_val, current_gvfs))
 
         
         # Build report lines
@@ -961,9 +966,9 @@ def run_comparison():
         report_lines.append("-----------------------------------------------------")
         
         # Add each FS result
-        for fs_val, pr_val, mean_val, max_val in results:
-            fails = int(np.sum(np.asarray(current_gvfs) > 1))
-            total = len(current_gvfs)
+        for fs_val, pr_val, mean_val, max_val, gvfs_data in results:
+            fails = int(np.sum(np.asarray(gvfs_data) > 1))
+            total = len(gvfs_data)
             report_lines.append(f"{fs_val:<15.1f} | {pr_val:>12.2f} | {mean_val:>10.3f} | {max_val:>9.3f} | {fails}/{total}")
 
         
@@ -989,6 +994,8 @@ def run_comparison():
         figManager.window.showMaximized()
         fig.tight_layout()
         fig.subplots_adjust(hspace=.3)
+
+    plt.pause(0.001)
 
     
 # Initialize main window
@@ -1161,6 +1168,12 @@ ttk.Label(processing_frame, text="Cutoff Depth [cm] (filter shallower):").grid(r
 cutoff_depth_entry = ttk.Entry(processing_frame, width=10)
 cutoff_depth_entry.grid(row=9, column=1, padx=5)
 cutoff_depth_entry.insert(0, 0)
+
+# --- Marker size ---
+ttk.Label(processing_frame, text="Marker Size:").grid(row=10, column=0, sticky="w")
+marker_size_entry = ttk.Entry(processing_frame, width=10)
+marker_size_entry.grid(row=10, column=1, padx=5)
+marker_size_entry.insert(0, "6")
 
 
 # Criteria frame

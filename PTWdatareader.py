@@ -7,6 +7,10 @@ PTW CSV/MCC reader -> lets user pick which scans to write out.
 - Detects each BEGIN_DATA..END_DATA block as one scan (scan_id).
 - Shows selection dialog listing all scans found.
 - Writes only selected scans to Excel (Depth Scans / Profiles), preserving columns.
+
+UPDATE (2026-02-10):
+- Multi-file selection enabled (Browse selects multiple .mcc files)
+- Convert runs through all selected files and writes one Excel per file
 """
 import os, datetime, hashlib
 import tkinter as tk
@@ -14,23 +18,83 @@ from tkinter import filedialog, ttk, messagebox
 import pandas as pd
 import numpy as np
 
+# ---------------- Multi-file selection state ----------------
+SELECTED_FILES = []  # list of file paths
+
+INSTRUCTIONS_TEXT = (
+    "PTW Data Conversion Tool\n"
+    "------------------------\n"
+    "This tool reads PTW MCC files (*.mcc) and converts selected scans to Unified Beam Data Format.\n"
+    "\n"
+    "Instructions:\n"
+    "1) Click 'Browse' and select ONE or MULTIPLE .mcc files.\n"
+    "   - Use Ctrl or Shift to multi-select files.\n"
+    "2) Click 'Convert Data (choose scans)'.\n"
+    "3) Select which scans to export in the dialog window.\n"
+    "\n"
+    "\nLog:\n"
+)
+
+
 # ---------------- UI: file picker & main window ----------------
+def append_summary(msg: str):
+    summary_text.config(state=tk.NORMAL)
+    summary_text.insert(tk.END, msg + "\n")
+    summary_text.see(tk.END)
+    summary_text.config(state=tk.DISABLED)
+
+def clear_summary():
+    summary_text.config(state=tk.NORMAL)
+    summary_text.delete(1.0, tk.END)
+    summary_text.config(state=tk.DISABLED)
+
+
 def select_file():
-    file_path = filedialog.askopenfilename(filetypes=[("PTW MCC files", "*.mcc"), ("All files","*.*")])
-    if not file_path:
+    """Select one OR multiple .mcc files."""
+    global SELECTED_FILES
+    file_paths = filedialog.askopenfilenames(
+        filetypes=[("PTW MCC files", "*.mcc"), ("All files", "*.*")]
+    )
+    if not file_paths:
         return
+    SELECTED_FILES = list(file_paths)
+    display = SELECTED_FILES[0]
+    if len(SELECTED_FILES) > 1:
+        display = f"{SELECTED_FILES[0]}  (+{len(SELECTED_FILES)-1} more)"
     file_entry.delete(0, tk.END)
-    file_entry.insert(0, file_path)
-    status_label.config(text="Status: Ready")
-    summary_text.config(state=tk.NORMAL); summary_text.delete(1.0, tk.END); summary_text.config(state=tk.DISABLED)
+    file_entry.insert(0, display)
+    status_label.config(text=f"Status: Ready ({len(SELECTED_FILES)} file(s) selected)")
+
 
 def run_comparison():
-    fn = file_entry.get()
-    if not fn or not os.path.isfile(fn):
-        status_label.config(text="Status: Invalid file")
+    global SELECTED_FILES
+    if not SELECTED_FILES:
+        maybe = file_entry.get()
+        if maybe and os.path.isfile(maybe):
+            SELECTED_FILES = [maybe]
+    if not SELECTED_FILES:
+        status_label.config(text="Status: No valid file(s) selected")
         return
+    ok = 0; fail = 0; fail_list = []
+    for fn in SELECTED_FILES:
+        try:
+            process_one_file(fn)
+            ok += 1
+        except Exception as e:
+            fail += 1
+            fail_list.append((fn, str(e)))
+            messagebox.showerror("Error", f"{os.path.basename(fn)} failed:\n{e}")
+    status_label.config(text=f"Done. OK={ok}, Failed={fail}")
+    if len(SELECTED_FILES) > 1:
+        msg = f"Multi-file run complete.\n\nProcessed: {ok}\nFailed: {fail}"
+        if fail_list:
+            msg += "\n\nFailures:\n" + "\n".join([f"- {os.path.basename(a)}: {b}" for a, b in fail_list[:10]])
+        messagebox.showinfo("Done", msg)
 
-    # Count lines for progress
+
+def process_one_file(fn):
+    if not fn or not os.path.isfile(fn):
+        raise FileNotFoundError(f"Invalid file: {fn}")
     try:
         with open(fn, 'r', errors='ignore') as _f:
             total_lines = sum(1 for _ in _f)
@@ -38,13 +102,12 @@ def run_comparison():
         total_lines = 0
     processed_lines = 0
 
-    cols = ['Depth', 'Pos', 'Dose', 'FS', 'Axis', 'Energy', 'scan_id']  # +Energy
-
+    cols = ['Depth', 'Pos', 'Dose', 'FS', 'Axis', 'Energy', 'Detector', 'scan_id']
     df = pd.DataFrame(columns=cols)
 
-    # Header/meta extracted
     ssd_mm = None
-    detector_name = None
+    current_detector = None
+    scan_detector = "Detector (unspecified)"
 
     # live state
     data = False
@@ -94,6 +157,7 @@ def run_comparison():
             "pos_max_mm": pos_max,
             "dose_min": dose_min,
             "dose_max": dose_max,
+            "Detector": scan_detector,
         })
         cur_points = []
 
@@ -116,7 +180,7 @@ def run_comparison():
                         try: ssd_mm = float(s.split('=', 1)[1])
                         except Exception: pass
                     elif s.startswith('DETECTOR_NAME='):
-                        detector_name = s.split('=', 1)[1].strip()
+                        current_detector = s.split('=', 1)[1].strip()
                     elif s.upper().startswith('ENERGY='):
                         val = s.split('=', 1)[1].strip()
                         try:
@@ -150,6 +214,7 @@ def run_comparison():
 
                 if 'BEGIN_DATA' in s:
                     data = True
+                    scan_detector = current_detector if current_detector else "Detector (unspecified)"
                     scan_id += 1
                     total_scans += 1
                     cur_points = []
@@ -171,8 +236,7 @@ def run_comparison():
                             pos_mm = float(parts[0])
                             dose   = float(parts[1])
                             cur_points.append([pos_mm, dose])
-                            #df.loc[len(df)] = [depth, pos_mm, dose, fs, axis, energy_key, scan_id]
-                            rows.append([depth, pos_mm, dose, fs, axis, energy_key, scan_id])
+                            rows.append([depth, pos_mm, dose, fs, axis, energy_key, scan_detector, scan_id])
                         except Exception:
                             pass
                     continue
@@ -240,18 +304,16 @@ def run_comparison():
         # in case file didn’t end with END_DATA
         if data:
             _finalize_scan()
-        # BUILD DF ONCE (ADD THIS BLOCK)
         if rows:
             df = pd.DataFrame(rows, columns=cols)
         else:
             df = pd.DataFrame(columns=cols)
 
     except Exception as e:
-        messagebox.showerror("Read error", f"Failed to parse file:\n{e}")
-        return
+        raise RuntimeError(f"Failed to parse file:\n{fn}\n\n{e}")
 
     if df.empty:
-        status_label.config(text="Status: No data found")
+        status_label.config(text=f"Status: No data found in {os.path.basename(fn)}")
         return
 
     # ---- Unit conversion (mm -> cm) ----
@@ -259,10 +321,9 @@ def run_comparison():
     df['Depth'] = df['Depth'] / 10.0
     df['FS']    = df['FS'] / 10.0
 
-    # SSD & Detector
+    # SSD
     ssd_cm = (ssd_mm / 10.0) if ssd_mm is not None else None
     df['SSD'] = ssd_cm
-    df['Detector'] = detector_name if detector_name else "Detector (unspecified)"
 
     # ---- Show selection dialog so user chooses which scans to keep ----
     # Convert scans_info mm → cm for display
@@ -287,42 +348,44 @@ def run_comparison():
 
 
     # ---- UI summary ----
-    status_label.config(text="Processing complete (ready to save).")
+    status_label.config(text=f"Processing complete: {os.path.basename(fn)} (ready to save).")
 
     summary = []
+    summary.append(f"File: {os.path.basename(fn)}")
     summary.append(f"Total Scans Found: {len(scans_info)}")
     summary.append(f"Selected Scans: {len(selected_ids)}")
     summary.append(f"Scan Types: {scan_counts}")
     axes_present = sorted({s['Axis'] for s in scans_info})
     summary.append(f"Axes Present: {', '.join(axes_present) if axes_present else '—'}")
-    if ssd_cm is not None: summary.append(f"SSD: {ssd_cm:.1f} cm")
-    summary.append(f"Detector: {df['Detector'].iloc[0]}")
+    if ssd_cm is not None:
+        summary.append(f"SSD: {ssd_cm:.1f} cm")
+    det_list = sorted(set(df_sel['Detector'].astype(str)))
+    summary.append("Detector(s): " + ", ".join(det_list))
     summary.append("Will write: 'Depth Scans' (Axis=Z) and 'Profiles' (Axis X/Y/XY/YX)")
-    summary_text.config(state=tk.NORMAL)
-    summary_text.delete(1.0, tk.END)
-    summary_text.insert(tk.END, "\n".join(summary))
-    summary_text.config(state=tk.DISABLED)
+    append_summary("\n".join(summary))
+    append_summary("-" * 60)
 
     # ---- Save output ----
     try:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_filename = f"PTWOutput_{timestamp}.xlsx"
+        base = os.path.splitext(os.path.basename(fn))[0]
+        output_filename = f"{base}_PTWOutput_{timestamp}.xlsx"
         output_path = os.path.join(os.path.dirname(fn), output_filename)
         with pd.ExcelWriter(output_path) as writer:
-            # write chosen scans only
             pdd_tmr_df.drop(columns=["scan_id"]).to_excel(writer, sheet_name='Depth Scans', index=False)
             profiles_df.drop(columns=["scan_id"]).to_excel(writer, sheet_name='Profiles', index=False)
-
-            # write a "ScanSelection" tab for provenance
             sel_rows = [s for s in scans_info if s["scan_id"] in selected_ids]
             all_rows = [s for s in scans_info]
             pd.DataFrame(sel_rows).to_excel(writer, sheet_name="ScanSelection", index=False)
             pd.DataFrame(all_rows).to_excel(writer, sheet_name="ScanCatalog", index=False)
-
         status_label.config(text=f"Saved: {output_path}")
         print(f"Data saved successfully to {output_path}")
+        try:
+            os.startfile(output_path)   # Windows: opens Excel automatically
+        except Exception:
+            pass
     except Exception as e:
-        messagebox.showerror("Write error", f"An error occurred:\n{e}")
+        raise RuntimeError(f"Write error for {fn}:\n{e}")
 
 
 # ---------------- selection dialog ----------------
@@ -336,12 +399,11 @@ def scan_selection_dialog(parent, scans_info):
     dlg.transient(parent)
     dlg.grab_set()
 
-    # columns to show
-    cols = ("Keep", "ID", "Type", "Axis","Energy", "Depth(cm)", "FS(cm)", "npts", "Pos range (cm)", "Dose range")
+    cols = ("Keep", "ID", "Type", "Axis", "Energy", "Detector", "Depth(cm)", "FS(cm)", "npts", "Pos range (cm)", "Dose range")
     tree = ttk.Treeview(dlg, columns=cols, show="headings", height=16, selectmode="extended")
     for c in cols:
         tree.heading(c, text=c)
-    widths = [60, 50, 90, 60,80, 90, 80, 70, 150, 150]
+    widths = [60, 50, 90, 60, 80, 160, 90, 80, 70, 150, 150]
     for c, w in zip(cols, widths):
         tree.column(c, width=w, anchor="w")
 
@@ -355,7 +417,8 @@ def scan_selection_dialog(parent, scans_info):
     # insert rows
     for s in scans_info:
         row = (
-            "✔", s["scan_id"], s["Type"], s["Axis"],s.get("Energy",""),
+            "✔", s["scan_id"], s["Type"], s["Axis"], s.get("Energy", ""),
+            s.get("Detector", ""),
             f"{s['Depth_cm']:.2f}", f"{s['FS_cm']:.2f}",
             s["npts"],
             fmt_rng(s["pos_min_cm"], s["pos_max_cm"], 3),
@@ -413,11 +476,13 @@ def _select_all(tree, selected_ids, make_selected: bool):
 
 # ---------------- main window ----------------
 root = tk.Tk()
-root.title("PTW data conversion tool (select scans)")
+root.title("PTW data conversion tool")
+root.grid_rowconfigure(4, weight=1)
+root.grid_columnconfigure(0, weight=1)
 
 file_frame = ttk.Frame(root, padding="10")
 file_frame.grid(row=0, column=0, sticky="ew")
-ttk.Label(file_frame, text="Select File:").grid(row=0, column=0, sticky="w")
+ttk.Label(file_frame, text="Select File(s):").grid(row=0, column=0, sticky="w")
 file_entry = ttk.Entry(file_frame, width=60)
 file_entry.grid(row=0, column=1, padx=5)
 ttk.Button(file_frame, text="Browse", command=select_file).grid(row=0, column=2, padx=5)
@@ -425,11 +490,15 @@ ttk.Button(file_frame, text="Browse", command=select_file).grid(row=0, column=2,
 run_button = ttk.Button(root, text="Convert Data (choose scans)", command=run_comparison)
 run_button.grid(row=1, column=0, pady=8)
 
+clear_button = ttk.Button(root, text="Clear Log", command=clear_summary)
+clear_button.grid(row=2, column=0, pady=2)
+
 status_label = ttk.Label(root, text="Status: Ready")
-status_label.grid(row=2, column=0, columnspan=2, pady=4)
+status_label.grid(row=3, column=0, columnspan=2, pady=4)
 
 summary_text = tk.Text(root, width=70, height=10, wrap='word')
-summary_text.grid(row=3, column=0, columnspan=2, padx=10, pady=10)
+summary_text.grid(row=4, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+summary_text.insert(tk.END, INSTRUCTIONS_TEXT)
 summary_text.config(state=tk.DISABLED)
 
 def _on_close():

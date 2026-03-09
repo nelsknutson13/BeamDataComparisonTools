@@ -669,6 +669,8 @@ def run_comparison():
     total_points_cumulative = 0
     total_fails_cumulative = 0
     prl=[];gvl=[];gvtot=[];  comp_results=[]
+    dif_total = 0; dif_fails = 0
+    dist_total = 0; dist_fails = 0
     print("Comparison started...")
     df1=pd.read_excel(fn,sheet_name=sn1,header=0);
     df2=pd.read_excel(fn,sheet_name=sn2,header=0);   
@@ -847,24 +849,25 @@ def run_comparison():
             difx, ddif = downsample_to_native(difx, ddif, y1)
             ddx1=np.extract(np.abs(ddif)>dd,difx);ddv1=np.extract(np.abs(ddif)>dd,ddif);
             ddx2=np.extract(np.abs(ddif)<dd,difx);ddv2=np.extract(np.abs(ddif)<dd,ddif);
-            ax0=plt.subplot(gs[0])
-            ax0.plot(y1,d1,'+r',ms=ms)
-            ax0.plot(y2,d2,'.k',ms=ms) 
+            dif_total += len(ddif)
+            dif_fails += len(ddx1)
             ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.plot(ddx1,ddv1,'.r')
             ax1.plot(ddx2,ddv2,'.g')
-            ax1.set_ylabel('Dose Difference: ')
+            ax1.set_ylabel('Dose Difference [%]')
         if dist ==1:
-            dtax, dtav= dtafunc(y1,d1,y2,d2)
+            dtax, dtav= dtafunc(y1,d1,y2,d2,dta)
             dtax, dtav = downsample_to_native(dtax, dtav, y1)
             dtax1=np.extract(dtav>dta,dtax);dtav1=np.extract(dtav>dta,dtav);
             dtax2=np.extract(dtav<dta,dtax);dtav2=np.extract(dtav<dta,dtav);
+            dist_total += len(dtav)
+            dist_fails += len(dtax1)
             ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
-            ax1.plot(dtax1,dtav1,'.r')
-            ax1.plot(dtax2,dtav2,'.g')
-            ax1.set_ylabel('DTA [cm]: ')
+            ax1.plot(dtax1,dtav1*10,'.r')
+            ax1.plot(dtax2,dtav2*10,'.g')
+            ax1.set_ylabel('DTA [mm]')
         if comp ==1:
           
             dtax, dtav= dtafunc(y1,d1,y2,d2,dta)
@@ -991,7 +994,36 @@ def run_comparison():
             histd=np.histogram(gvtot,bins=np.arange(0,np.max(gvtot),bins),weights=weights,range=r);
             ax2.hist(gvtot,bins=np.arange(0,np.max(gvtot),bins),weights=weights,range=r)
         figManager = plt.get_current_fig_manager()#this makes full screen by default
-        figManager.window.showMaximized()
+        try:
+            figManager.window.showMaximized()
+        except AttributeError:
+            figManager.window.state('zoomed')
+        fig.tight_layout()
+        fig.subplots_adjust(hspace=.3)
+
+    if dif == 1:
+        dif_prtot = 100 * (dif_total - dif_fails) / dif_total if dif_total > 0 else 0
+        ax1.set_xlabel(
+            f'Points outside {dd:.1f}% : {dif_fails}/{dif_total}  Pass Rate : {dif_prtot:.2f}%'
+        )
+        figManager = plt.get_current_fig_manager()
+        try:
+            figManager.window.showMaximized()
+        except AttributeError:
+            figManager.window.state('zoomed')
+        fig.tight_layout()
+        fig.subplots_adjust(hspace=.3)
+
+    if dist == 1:
+        dist_prtot = 100 * (dist_total - dist_fails) / dist_total if dist_total > 0 else 0
+        ax1.set_xlabel(
+            f'Points outside {dta*10:.1f} mm : {dist_fails}/{dist_total}  Pass Rate : {dist_prtot:.2f}%'
+        )
+        figManager = plt.get_current_fig_manager()
+        try:
+            figManager.window.showMaximized()
+        except AttributeError:
+            figManager.window.state('zoomed')
         fig.tight_layout()
         fig.subplots_adjust(hspace=.3)
 

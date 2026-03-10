@@ -827,8 +827,8 @@ def run_comparison():
             ax0.set_ylim(0, max(1.05 * np.max(d1), 1.05 * np.max(d2)))
             ax0.set_xlim(0,30)
             ax1.set_xlim(0,30)
-            ax1.plot(gx1[1::1],gv1[1::1],'.r',ms=.5)
-            ax1.plot(gx2[1::1],gv2[1::1],'.g',ms=.5)
+            ax1.plot(gx1[1::1],gv1[1::1],'.r',ms=ms)
+            ax1.plot(gx2[1::1],gv2[1::1],'.g',ms=ms)
             ax1.set_ylim(0, max(1.5, np.max(gv) + 0.1))
             ax1.set_ylabel(r'$\Gamma$'+'['+ str(dd)+'%/'+ str(dta*10) + 'mm]')
             ax1.set_xlabel( 'Points with ' + r'$\Gamma$' +' > 1 : '+str(np.size((np.where(np.asarray(gvtot)>1))))+'/'+str(len(gvtot)) + '  Pass Rate : '+ str(prtot)+'%' )
@@ -853,8 +853,8 @@ def run_comparison():
             dif_fails += len(ddx1)
             ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
-            ax1.plot(ddx1,ddv1,'.r')
-            ax1.plot(ddx2,ddv2,'.g')
+            ax1.plot(ddx1,ddv1,'.r',ms=ms)
+            ax1.plot(ddx2,ddv2,'.g',ms=ms)
             ax1.set_ylabel('Dose Difference [%]')
         if dist ==1:
             dtax, dtav= dtafunc(y1,d1,y2,d2,dta)
@@ -865,8 +865,8 @@ def run_comparison():
             dist_fails += len(dtax1)
             ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
-            ax1.plot(dtax1,dtav1*10,'.r')
-            ax1.plot(dtax2,dtav2*10,'.g')
+            ax1.plot(dtax1,dtav1*10,'.r',ms=ms)
+            ax1.plot(dtax2,dtav2*10,'.g',ms=ms)
             ax1.set_ylabel('DTA [mm]')
         if comp ==1:
           
@@ -900,14 +900,14 @@ def run_comparison():
             ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax2.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
-            ax1.plot(dtax,dtav*10,'.g',ms=.5)
+            ax1.plot(dtax,dtav*10,'.g',ms=ms)
             ax1.set_ylabel('DTA [mm]')
             #ax2.set_xlabel(( 'Points outside of ' + str(dd)+'% & '+str(dta*10) +'mm ' +str(totalfail)+'/'+str(total) + '  Pass Rate : '+'%.2f' % prtot+'%' ))
-            ax2.plot(difx,difv,'.g',ms=.5)#convert to %
+            ax2.plot(difx,difv,'.g',ms=ms)#convert to %
             ax2.set_ylabel('Dose Difference [%] ')
             for n in totalfailloc:#plots the failing points
-                ax1.plot(dtax[n],dtav[n]*10,'.r',ms=.5)
-                ax2.plot(difx[n],difv[n],'.r',ms=.5)
+                ax1.plot(dtax[n],dtav[n]*10,'.r',ms=ms)
+                ax2.plot(difx[n],difv[n],'.r',ms=ms)
                 
         if gam ==1:
             print(f"FS {fsl[j]:<5}: PassRate={pr:.2f}%, Mean={np.mean(gvfs):.3f}, Max={max(gvfs):.3f}") 
@@ -944,6 +944,11 @@ def run_comparison():
             f'Points outside of {dd:.1f}% & {dta*10:.1f}mm '
             f'{total_fails_cumulative}/{total_points_cumulative}  Pass Rate : {overall_pass:.2f}%'
         )
+        figManager = plt.get_current_fig_manager()
+        try:
+            figManager.window.showMaximized()
+        except AttributeError:
+            figManager.window.state('zoomed')
         fig.tight_layout()
         fig.subplots_adjust(hspace=.3)
 
@@ -959,14 +964,15 @@ def run_comparison():
             max_val = max(current_gvfs) if len(current_gvfs) > 0 else 0.0
             results.append((fs_val, prfs_val, mean_val, max_val, current_gvfs))
 
-        
         # Build report lines
         report_lines = []
         report_lines.append("Gamma Analysis Results")
         report_lines.append(f"Criteria: {dd:.1f}% / {dta*10:.1f} mm")
-        report_lines.append("-----------------------------------------------------")
-        report_lines.append("Field Size [cm] | Pass Rate [%] | Gamma Mean | Gamma Max | Failing Points / Total Points")
-        report_lines.append("-----------------------------------------------------")
+        header = "Field Size [cm] | Pass Rate [%] | Gamma Mean | Gamma Max | Failing Points / Total Points"
+        sep = "-" * len(header)
+        report_lines.append(sep)
+        report_lines.append(header)
+        report_lines.append(sep)
         
         # Add each FS result
         for fs_val, pr_val, mean_val, max_val, gvfs_data in results:
@@ -974,20 +980,17 @@ def run_comparison():
             total = len(gvfs_data)
             report_lines.append(f"{fs_val:<15.1f} | {pr_val:>12.2f} | {mean_val:>10.3f} | {max_val:>9.3f} | {fails}/{total}")
 
-        
         # Add overall result
-        report_lines.append("-----------------------------------------------------")
+        report_lines.append(sep)
         fails_overall = int(np.sum(np.asarray(gvtot) > 1))
         total_overall = len(gvtot)
         report_lines.append(f"{'Overall':<15} | {prtot:>12.2f} | {np.mean(gvtot):>10.3f} | {max(gvtot):>9.3f} | {fails_overall}/{total_overall}")
-
-        
         # Convert list to one string (for report)
         report_text = "\n".join(report_lines)
-        
+
         # Print to console
         print(report_text)
-        
+
 
         if gam ==1:
             r=[0,1.5]

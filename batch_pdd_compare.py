@@ -290,16 +290,57 @@ def main():
             'Energy', 'FS', 'PassRate_pct', 'MeanDoseDiff_pct',
             'MeanDTA_mm', 'TotalPoints', 'FailPoints'
         ])
+
+        # ── build pivot table (pass rate % by energy × FS) ───────────
+        energy_order = [e for e in ['6X', '6FFF', '10X', '10FFF', '15X']
+                        if e in df_out['Energy'].unique()]
+        fss = sorted(df_out['FS'].unique())
+
+        def weighted_pass(g):
+            t = g['TotalPoints'].sum()
+            f = g['FailPoints'].sum()
+            return (t - f) / t * 100 if t > 0 else 0.0
+
+        pivot = df_out.pivot_table(
+            index='Energy', columns='FS',
+            values='PassRate_pct', aggfunc='first'
+        ).reindex(index=energy_order, columns=fss)
+
+        all_fs   = df_out.groupby('Energy').apply(weighted_pass).reindex(energy_order)
+        all_en   = df_out.groupby('FS').apply(weighted_pass).reindex(fss)
+        all_data = weighted_pass(df_out)
+
+        def fmt(v):
+            return f"{v:.1f}%" if not np.isnan(v) else "—"
+
+        fs_col_names = [f"{int(fs)} cm" if float(fs).is_integer() else f"{fs} cm"
+                        for fs in fss]
+        table_rows = []
+        for e in energy_order:
+            row = {'Energy': e}
+            for fs, col in zip(fss, fs_col_names):
+                row[col] = fmt(pivot.loc[e, fs])
+            row['All Field Sizes'] = fmt(all_fs[e])
+            table_rows.append(row)
+
+        footer = {'Energy': 'All Energies'}
+        for fs, col in zip(fss, fs_col_names):
+            footer[col] = fmt(all_en[fs])
+        footer['All Field Sizes'] = f"All Data: {fmt(all_data)}"
+        table_rows.append(footer)
+
+        df_table = pd.DataFrame(table_rows)
+
         try:
-            df_out.to_csv(SUMMARY_CSV, index=False)
+            df_table.to_csv(SUMMARY_CSV, index=False)
             print(f"\nSummary CSV saved: {SUMMARY_CSV}")
         except PermissionError:
             from datetime import datetime
             fallback = SUMMARY_CSV.replace('.csv', f'_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
-            df_out.to_csv(fallback, index=False)
+            df_table.to_csv(fallback, index=False)
             print(f"\nCSV locked (close it in Excel first next time).")
             print(f"Saved to fallback: {fallback}")
-        print(df_out.to_string(index=False))
+        print(df_table.to_string(index=False))
     else:
         print("\nNo results to save.")
 

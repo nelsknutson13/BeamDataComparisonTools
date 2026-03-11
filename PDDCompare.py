@@ -609,7 +609,7 @@ def run_comparison():
     
   
     #all of these set in gui intializing as 0
-    dif=0;dist=0;comp=0;gam=0;#iniates as unselected selected by gui
+    dif=0;dist=0;comp=0;gam=0;plot=0;#iniates as unselected selected by gui
   
 
     
@@ -630,6 +630,8 @@ def run_comparison():
         dif = 1
     elif selected_analysis == "dist":
         dist = 1
+    elif selected_analysis == "plot":
+        plot = 1
     
     # Set data processing variables based on user selection
    
@@ -1030,6 +1032,19 @@ def run_comparison():
         fig.tight_layout()
         fig.subplots_adjust(hspace=.3)
 
+    if plot == 1:
+        ax0.set_xlim(max(min(y1), min(y2)), min(max(y1), max(y2)))
+        ax0.set_ylim(0, max(1.05 * np.max(d1), 1.05 * np.max(d2)))
+        ax0.set_ylabel('Percentage Depth Dose [%]')
+        ax0.set_xlabel('Depth [cm]')
+        ax0.legend([sn1, sn2])
+        figManager = plt.get_current_fig_manager()
+        try:
+            figManager.window.showMaximized()
+        except AttributeError:
+            figManager.window.state('zoomed')
+        fig.tight_layout()
+
     plt.pause(0.001)
 
     
@@ -1115,8 +1130,19 @@ data_selection_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
 # Field Size Selection
 fsl_label = ttk.Label(data_selection_frame, text="Select Field Sizes")
 fsl_label.grid(row=0, column=0, sticky="w")
-fsl_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
+fsl_listbox = tk.Listbox(data_selection_frame, selectmode="extended", width=20, height=10, exportselection=0)
 fsl_listbox.grid(row=1, column=0, padx=5, pady=5)
+
+def toggle_fsl():
+    if fsl_listbox.curselection() == tuple(range(fsl_listbox.size())):
+        fsl_listbox.selection_clear(0, tk.END)
+        fsl_toggle_btn.config(text="Select All")
+    else:
+        fsl_listbox.selection_set(0, tk.END)
+        fsl_toggle_btn.config(text="Deselect All")
+
+fsl_toggle_btn = ttk.Button(data_selection_frame, text="Select All", command=toggle_fsl)
+fsl_toggle_btn.grid(row=2, column=0, pady=2)
 
 # Scan Types Selection
 scl_label = ttk.Label(data_selection_frame, text="Select Scan Types")
@@ -1127,11 +1153,12 @@ scl_listbox.grid(row=1, column=1, padx=5, pady=5)
 # Analysis type section with radio buttons
 analysis_frame = ttk.LabelFrame(main, text="Analysis Type", padding="10")
 analysis_frame.grid(row=3, column=0, sticky="ew")
-ttk.Radiobutton(analysis_frame, text="None",               variable=analysis_var, value="none").grid(row=0, column=0, sticky="w")
-ttk.Radiobutton(analysis_frame, text="Gamma",              variable=analysis_var, value="gam").grid(row=1, column=0, sticky="w")
-ttk.Radiobutton(analysis_frame, text="Composite Analysis", variable=analysis_var, value="comp").grid(row=2, column=0, sticky="w")
-ttk.Radiobutton(analysis_frame, text="Dose Difference",    variable=analysis_var, value="dif").grid(row=3, column=0, sticky="w")
-ttk.Radiobutton(analysis_frame, text="Distance to Agreement", variable=analysis_var, value="dist").grid(row=4, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Raw Data Only",        variable=analysis_var, value="none").grid(row=0, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Plots Only",           variable=analysis_var, value="plot").grid(row=1, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Gamma",                variable=analysis_var, value="gam").grid(row=2, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Composite Analysis",   variable=analysis_var, value="comp").grid(row=3, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Dose Difference",      variable=analysis_var, value="dif").grid(row=4, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Distance to Agreement",variable=analysis_var, value="dist").grid(row=5, column=0, sticky="w")
 
 # Data processing section with dropdowns and checkboxes
 processing_frame = ttk.LabelFrame(main, text="Data Processing", padding="10")

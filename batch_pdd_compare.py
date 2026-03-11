@@ -31,9 +31,10 @@ BASE_PATH = (
 SHEET1_NAME = "Measurement"   # reference / measured
 SHEET2_NAME = "MC"            # dataset to convolve
 
+ANALYSIS      = 'plot'        # 'comp', 'dif', 'dist', or 'plot'
 DD_CRITERIA   = 2.0           # dose difference threshold [%]
 DTA_CRITERIA  = 0.2           # DTA threshold [cm]  (2 mm)
-NORM          = 2             # 2 = normalize to fixed depth per energy
+NORM          = 2             # 1 = normalize to dmax, 2 = normalize to fixed depth per energy
 
 # Fixed normalization depth [cm] per energy folder name
 NORM_DEPTH = {
@@ -51,7 +52,6 @@ MARKER_SIZE   = 2             # plot marker size
 DPI           = 400           # figure output resolution
 
 RESULTS_DIR = os.path.join(BASE_PATH, "Results")
-SUMMARY_CSV = os.path.join(RESULTS_DIR, "pdd_comparison_summary.csv")
 # ─────────────────────────────────────────────
 
 
@@ -121,20 +121,30 @@ def run_one_file(xlsx_path, energy_label):
         return []
 
     # ── figure setup ─────────────────────────
-    fig, (ax0, ax1, ax2) = plt.subplots(
-        3, 1, figsize=(15, 11),
-        gridspec_kw={'height_ratios': [1.5, 1, 1]}
-    )
     plt.rcParams.update({'font.size': 12})
+    if ANALYSIS == 'comp':
+        fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 11),
+            gridspec_kw={'height_ratios': [1.5, 1, 1]})
+        ax1.set_ylabel('DTA [mm]')
+        ax2.set_ylabel('Dose Difference [%]')
+    elif ANALYSIS == 'dif':
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 8),
+            gridspec_kw={'height_ratios': [1.5, 1]})
+        ax1.set_ylabel('Dose Difference [%]')
+    elif ANALYSIS == 'dist':
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 8),
+            gridspec_kw={'height_ratios': [1.5, 1]})
+        ax1.set_ylabel('DTA [mm]')
+    else:  # 'plot'
+        fig, ax0 = plt.subplots(1, 1, figsize=(10, 6))
+
     ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
     ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
     ax0.legend()
     ax0.set_ylabel('Percentage Depth Dose [%]')
     ax0.set_xlabel('Depth [cm]')
-    ax1.set_ylabel('DTA [mm]')
-    ax2.set_ylabel('Dose Difference [%]')
 
-    comp_results = []
+    results = []
     total_points_cumulative = 0
     total_fails_cumulative  = 0
 
@@ -188,83 +198,128 @@ def run_one_file(xlsx_path, energy_label):
         ax0.plot(y1, d1, '+r', ms=MARKER_SIZE)
         ax0.plot(y2, d2, '.k', ms=MARKER_SIZE)
 
-        # ── composite metrics ─────────────
-        dtax, dtav = dtafunc(y1, d1, y2, d2, DTA_CRITERIA)
-        difx, difv = dosedif(y1, d1, y2, d2, 0)
-        dtax, dtav = downsample_to_native(dtax, dtav, y1)
-        difx, difv = downsample_to_native(difx, difv, y1)
-
-        dtafail  = np.where(np.abs(dtav) > DTA_CRITERIA)[0]
-        ddiffail = np.where(np.abs(difv) > DD_CRITERIA)[0]
-        fail_set = set(dtafail) & set(ddiffail)
-        totalfail = len(fail_set)
-        total     = len(dtav)
-
-        mean_dd  = float(np.mean(np.abs(difv))) if total > 0 else 0.0
-        mean_dta = float(np.mean(np.abs(dtav))) if total > 0 else 0.0
-        passrate = (total - totalfail) / total * 100 if total > 0 else 0.0
-
-        total_points_cumulative += total
-        total_fails_cumulative  += totalfail
-        comp_results.append({
-            'Energy': energy_label,
-            'FS':     fs_val,
-            'PassRate_pct':      round(passrate, 2),
-            'MeanDoseDiff_pct':  round(mean_dd,  3),
-            'MeanDTA_mm':        round(mean_dta * 10, 3),
-            'TotalPoints':       total,
-            'FailPoints':        totalfail,
-        })
-
-        print(f"  FS {fs_val:.1f} cm : Pass={passrate:.2f}%  "
-              f"MeanDD={mean_dd:.2f}%  MeanDTA={mean_dta*10:.2f}mm  "
-              f"Fail={totalfail}/{total}")
-
-        # ── subplot plots ─────────────────
+        # ── analysis metrics & subplot plots ──
         xlim = (max(float(y1.min()), float(y2.min())),
                 min(float(y1.max()), float(y2.max())))
-        for ax in (ax0, ax1, ax2):
-            ax.set_xlim(*xlim)
+        ax0.set_xlim(*xlim)
 
-        ax1.plot(dtax, dtav * 10, '.g', ms=0.5)
-        ax2.plot(difx, difv,      '.g', ms=0.5)
-        for n in fail_set:
-            ax1.plot(dtax[n], dtav[n] * 10, '.r', ms=0.5)
-            ax2.plot(difx[n], difv[n],      '.r', ms=0.5)
+        if ANALYSIS == 'plot':
+            ax0.set_ylim(0, max(1.05 * np.max(d1), 1.05 * np.max(d2)))
 
-    # ── figure summary label ──────────────────
+        elif ANALYSIS == 'comp':
+            dtax, dtav = dtafunc(y1, d1, y2, d2, DTA_CRITERIA)
+            difx, difv = dosedif(y1, d1, y2, d2, 0)
+            dtax, dtav = downsample_to_native(dtax, dtav, y1)
+            difx, difv = downsample_to_native(difx, difv, y1)
+            dtafail  = np.where(np.abs(dtav) > DTA_CRITERIA)[0]
+            ddiffail = np.where(np.abs(difv) > DD_CRITERIA)[0]
+            fail_set = set(dtafail) & set(ddiffail)
+            totalfail = len(fail_set)
+            total     = len(dtav)
+            mean_dd  = float(np.mean(np.abs(difv))) if total > 0 else 0.0
+            mean_dta = float(np.mean(np.abs(dtav))) if total > 0 else 0.0
+            passrate = (total - totalfail) / total * 100 if total > 0 else 0.0
+            total_points_cumulative += total
+            total_fails_cumulative  += totalfail
+            results.append({'Energy': energy_label, 'FS': fs_val,
+                'PassRate_pct': round(passrate, 2), 'MeanDoseDiff_pct': round(mean_dd, 3),
+                'MeanDTA_mm': round(mean_dta * 10, 3), 'TotalPoints': total, 'FailPoints': totalfail})
+            print(f"  FS {fs_val:.1f} cm : Pass={passrate:.2f}%  "
+                  f"MeanDD={mean_dd:.2f}%  MeanDTA={mean_dta*10:.2f}mm  Fail={totalfail}/{total}")
+            for ax in (ax1, ax2):
+                ax.set_xlim(*xlim)
+            ax1.plot(dtax, dtav * 10, '.g', ms=0.5)
+            ax2.plot(difx, difv,      '.g', ms=0.5)
+            for n in fail_set:
+                ax1.plot(dtax[n], dtav[n] * 10, '.r', ms=0.5)
+                ax2.plot(difx[n], difv[n],      '.r', ms=0.5)
+
+        elif ANALYSIS == 'dif':
+            difx, difv = dosedif(y1, d1, y2, d2, 0)
+            difx, difv = downsample_to_native(difx, difv, y1)
+            ddiffail = np.where(np.abs(difv) > DD_CRITERIA)[0]
+            totalfail = len(ddiffail)
+            total     = len(difv)
+            mean_dd  = float(np.mean(np.abs(difv))) if total > 0 else 0.0
+            passrate = (total - totalfail) / total * 100 if total > 0 else 0.0
+            total_points_cumulative += total
+            total_fails_cumulative  += totalfail
+            results.append({'Energy': energy_label, 'FS': fs_val,
+                'PassRate_pct': round(passrate, 2), 'MeanDoseDiff_pct': round(mean_dd, 3),
+                'TotalPoints': total, 'FailPoints': totalfail})
+            print(f"  FS {fs_val:.1f} cm : Pass={passrate:.2f}%  "
+                  f"MeanDD={mean_dd:.2f}%  Fail={totalfail}/{total}")
+            ax1.set_xlim(*xlim)
+            ax1.plot(difx, difv, '.g', ms=0.5)
+            for n in ddiffail:
+                ax1.plot(difx[n], difv[n], '.r', ms=0.5)
+
+        elif ANALYSIS == 'dist':
+            dtax, dtav = dtafunc(y1, d1, y2, d2, DTA_CRITERIA)
+            dtax, dtav = downsample_to_native(dtax, dtav, y1)
+            dtafail  = np.where(np.abs(dtav) > DTA_CRITERIA)[0]
+            totalfail = len(dtafail)
+            total     = len(dtav)
+            mean_dta = float(np.mean(np.abs(dtav))) if total > 0 else 0.0
+            passrate = (total - totalfail) / total * 100 if total > 0 else 0.0
+            total_points_cumulative += total
+            total_fails_cumulative  += totalfail
+            results.append({'Energy': energy_label, 'FS': fs_val,
+                'PassRate_pct': round(passrate, 2), 'MeanDTA_mm': round(mean_dta * 10, 3),
+                'TotalPoints': total, 'FailPoints': totalfail})
+            print(f"  FS {fs_val:.1f} cm : Pass={passrate:.2f}%  "
+                  f"MeanDTA={mean_dta*10:.2f}mm  Fail={totalfail}/{total}")
+            ax1.set_xlim(*xlim)
+            ax1.plot(dtax, dtav * 10, '.g', ms=0.5)
+            for n in dtafail:
+                ax1.plot(dtax[n], dtav[n] * 10, '.r', ms=0.5)
+
+    # ── figure summary label & title ──────────
     if total_points_cumulative > 0:
         overall_pass = 100 * (1 - total_fails_cumulative / total_points_cumulative)
     else:
         overall_pass = 0.0
 
-    ax2.set_xlabel(
-        f'Points outside {DD_CRITERIA:.1f}% & {DTA_CRITERIA*10:.1f}mm  '
-        f'{total_fails_cumulative}/{total_points_cumulative}  '
-        f'Pass Rate: {overall_pass:.2f}%'
-    )
-    fig.suptitle(f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  '
-                 f'Composite {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm', fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])  # leave room for suptitle
+    if ANALYSIS == 'comp':
+        ax2.set_xlabel(f'Points outside {DD_CRITERIA:.1f}% & {DTA_CRITERIA*10:.1f}mm  '
+                       f'{total_fails_cumulative}/{total_points_cumulative}  '
+                       f'Pass Rate: {overall_pass:.2f}%')
+        title_tag = f'Composite {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm'
+    elif ANALYSIS == 'dif':
+        ax1.set_xlabel(f'Points outside {DD_CRITERIA:.1f}%  '
+                       f'{total_fails_cumulative}/{total_points_cumulative}  '
+                       f'Pass Rate: {overall_pass:.2f}%')
+        title_tag = f'Dose Difference {DD_CRITERIA:.0f}%'
+    elif ANALYSIS == 'dist':
+        ax1.set_xlabel(f'Points outside {DTA_CRITERIA*10:.1f}mm  '
+                       f'{total_fails_cumulative}/{total_points_cumulative}  '
+                       f'Pass Rate: {overall_pass:.2f}%')
+        title_tag = f'DTA {DTA_CRITERIA*10:.0f}mm'
+    else:
+        title_tag = 'Plots Only'
+
+    fig.suptitle(f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}', fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.subplots_adjust(hspace=0.45)
 
     # ── save figure ───────────────────────────
-    stem    = os.path.splitext(os.path.basename(xlsx_path))[0]
-    out_png = os.path.join(
-        RESULTS_DIR,
-        f"{energy_label}_{stem}_Composite_DD{int(DD_CRITERIA)}pct_DTA{int(DTA_CRITERIA*10)}mm.png"
-    )
+    stem     = os.path.splitext(os.path.basename(xlsx_path))[0]
+    safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
+    out_png  = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{safe_tag}.png")
     fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
     plt.close(fig)
     print(f"  Figure saved: {out_png}")
 
-    return comp_results
+    return results
 
 
 # ── main ─────────────────────────────────────
 
 def main():
+    from datetime import datetime
     os.makedirs(RESULTS_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_csv = os.path.join(RESULTS_DIR, f"pdd_comparison_summary_{timestamp}.csv")
     all_results = []
 
     energy_dirs = sorted([
@@ -332,11 +387,11 @@ def main():
         df_table = pd.DataFrame(table_rows)
 
         try:
-            df_table.to_csv(SUMMARY_CSV, index=False)
-            print(f"\nSummary CSV saved: {SUMMARY_CSV}")
+            df_table.to_csv(summary_csv, index=False)
+            print(f"\nSummary CSV saved: {summary_csv}")
         except PermissionError:
             from datetime import datetime
-            fallback = SUMMARY_CSV.replace('.csv', f'_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+            fallback = summary_csv.replace('.csv', f'_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
             df_table.to_csv(fallback, index=False)
             print(f"\nCSV locked (close it in Excel first next time).")
             print(f"Saved to fallback: {fallback}")

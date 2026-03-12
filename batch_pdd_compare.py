@@ -121,22 +121,20 @@ def run_one_file(xlsx_path, energy_label):
         return []
 
     # ── figure setup ─────────────────────────
-    plt.rcParams.update({'font.size': 12})
     if ANALYSIS == 'comp':
         fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 11),
             gridspec_kw={'height_ratios': [1.5, 1, 1]})
+        plt.rcParams.update({'font.size': 20})
         ax1.set_ylabel('DTA [mm]')
         ax2.set_ylabel('Dose Difference [%]')
-    elif ANALYSIS == 'dif':
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 8),
+    elif ANALYSIS in ('dif', 'dist'):
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 9),
             gridspec_kw={'height_ratios': [1.5, 1]})
-        ax1.set_ylabel('Dose Difference [%]')
-    elif ANALYSIS == 'dist':
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 8),
-            gridspec_kw={'height_ratios': [1.5, 1]})
-        ax1.set_ylabel('DTA [mm]')
+        plt.rcParams.update({'font.size': 18})
+        ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
     else:  # 'plot'
-        fig, ax0 = plt.subplots(1, 1, figsize=(10, 6))
+        fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
+        plt.rcParams.update({'font.size': 16})
 
     ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
     ax0.plot([], '.k', ms=10, label=SHEET2_NAME)

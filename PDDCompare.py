@@ -653,18 +653,18 @@ def run_comparison():
     
      
     if comp ==1 or gam==1:
+        plt.rcParams.update({'font.size': 20})
         gs = gridspec.GridSpec(3,1,height_ratios=[1.5,1,1])
-        fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 8), gridspec_kw={'height_ratios': [1.5, 1, 1]})
-        plt.rcParams.update({'font.size': 16})
+        fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 11), gridspec_kw={'height_ratios': [1.5, 1, 1]})
     elif dif==1 or dist==1:
+        plt.rcParams.update({'font.size': 18})
         gs = gridspec.GridSpec(2,1,height_ratios=[1.5,1])
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 8), gridspec_kw={'height_ratios': [1.5, 1]})
-        plt.rcParams.update({'font.size': 16})
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 9), gridspec_kw={'height_ratios': [1.5, 1]})
     else:
+        plt.rcParams.update({'font.size': 16})
         #for no analysis
         gs = gridspec.GridSpec(1, 1)
         fig, ax0 = plt.subplots(1, 1, figsize=(10, 5))
-        plt.rcParams.update({'font.size': 16})
     
     
     prtot=0;gvmax=0;gvmean=0

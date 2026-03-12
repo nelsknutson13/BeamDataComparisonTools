@@ -525,30 +525,27 @@ def run_comparison():
     
    
     if mppg ==1:
+        plt.rcParams.update({'font.size': 22})
         gs = gridspec.GridSpec(4,1,height_ratios=[1.5,1,1,1])
         fig, (ax0, ax1, ax2, ax3) = plt.subplots(
-            4, 1, figsize=(15, 9.5),
+            4, 1, figsize=(15, 12),
             gridspec_kw={'height_ratios': [1.5, 1, 1, 1]}
         )
-        plt.rcParams.update({'font.size': 16})
-    
     elif comp ==1 or gam==1:
-        
-        fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 8),
+        plt.rcParams.update({'font.size': 20})
+        fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 11),
             gridspec_kw={'height_ratios': [1.5, 1, 1]})
-        plt.rcParams.update({'font.size': 16})
     elif dif==1 or dist==1:
-        
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 8),
+        plt.rcParams.update({'font.size': 18})
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 9),
             gridspec_kw={'height_ratios': [1.5, 1]})
-        plt.rcParams.update({'font.size': 16})
     elif plot == 1:
-        fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
         plt.rcParams.update({'font.size': 16})
+        fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
     else:
+        plt.rcParams.update({'font.size': 16})
         gs = gridspec.GridSpec(1, 1)
         fig, ax0 = plt.subplots(1, 1, figsize=(10, 5))
-    plt.rcParams.update({'font.size': 16})
        
     #ax0=plt.subplot(gs[0])
     ax0.plot([],'+r',ms=10,label=str(sn1))
@@ -586,8 +583,6 @@ def run_comparison():
     blist=.0000924# 30cm depth coeficcent
     tf=0;tot=0;totpf=0;failpf=0;
     print("Comparison started...")
-    df1=pd.read_excel(fn,sheet_name=sn1,header=0);
-    df2=pd.read_excel(fn,sheet_name=sn2,header=0); 
     df1 = pd.read_excel(fn, sheet_name=sn1, header=0)
     df2 = pd.read_excel(fn, sheet_name=sn2, header=0)
     df1["Depth"] = ((df1["Depth"] / DEPTH_ROUND_CM).round() * DEPTH_ROUND_CM).round(3)
@@ -715,7 +710,7 @@ def run_comparison():
                     
                     #plt.title('Gamma Histogram Data:  '  + str(np.round(100-sum(histd[0][0:(1/bins)]),1)) + '% of Data < Gamma = 1')
                     ax2.set_xlim(0,np.max(gvtot))
-                    ax2.set_xticks(np.arange(0,np.max(gvtot),bins))
+                    ax2.set_xticks(np.arange(0,np.max(gvtot),0.5))
                     
                     #print(pr,prtot,gvmean,gvmax,fsl[j],dl[i],scl[k])
     
@@ -1043,7 +1038,6 @@ def run_comparison():
     except AttributeError:
         figManager.window.state('zoomed')
     fig.tight_layout()
-    fig.subplots_adjust(hspace=.3)
     #fig.subplots_adjust(left=0.09, right=0.98, top=0.96, bottom=0.16, hspace=0.34)
 
     if save ==1:

@@ -486,7 +486,7 @@ def run_comparison():
     
     #all of these set in gui intializing as 0
     scale=0;#Scales field size for offset scans
-    dif=0;dist=0;comp=0;gam=0;mppg=0#iniates as unselected selected by gui
+    dif=0;dist=0;comp=0;gam=0;mppg=0;plot=0#iniates as unselected selected by gui
     smooth=0;cent=0;norm =0;#Assumes norm to CAX set to 2 scale by PDD#Center for all measured profiles
        
     #still hard coded
@@ -513,6 +513,8 @@ def run_comparison():
         dist = 1
     elif selected_analysis == "mppg":
         mppg = 1
+    elif selected_analysis == "plot":
+        plot = 1
     # Set data processing variables based on user selection
     cent = int(cent_combo.get())
     smooth = smooth_var.get()
@@ -539,6 +541,9 @@ def run_comparison():
         
         fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 8),
             gridspec_kw={'height_ratios': [1.5, 1]})
+        plt.rcParams.update({'font.size': 16})
+    elif plot == 1:
+        fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
         plt.rcParams.update({'font.size': 16})
     else:
         gs = gridspec.GridSpec(1, 1)
@@ -1033,7 +1038,10 @@ def run_comparison():
         ax2.set_ylabel('Normalized Incidence')
 
     figManager = plt.get_current_fig_manager()
-    #figManager.window.showMaximized()
+    try:
+        figManager.window.showMaximized()
+    except AttributeError:
+        figManager.window.state('zoomed')
     fig.tight_layout()
     fig.subplots_adjust(hspace=.3)
     #fig.subplots_adjust(left=0.09, right=0.98, top=0.96, bottom=0.16, hspace=0.34)
@@ -1041,8 +1049,10 @@ def run_comparison():
     if save ==1:
         plt.savefig(str(sn1)+'_correctedvs'+str(sn2)+'_'+str(fsl[j])+'_'+str(int(dd*100))+'_'+str(int(dta*10))+'.png',dpi=400)
     if save ==2:
-        plt.savefig('cfOutoffield_'+str(fsl[j])+'_diag',dpi=400)    
-        
+        plt.savefig('cfOutoffield_'+str(fsl[j])+'_diag',dpi=400)
+
+    plt.pause(0.001)
+
 
 def save_report():
     global report_text, fig  # Need access to fig for saving
@@ -1226,31 +1236,65 @@ data_selection_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
 # Field Size Selection
 fsl_label = ttk.Label(data_selection_frame, text="Select Field Sizes")
 fsl_label.grid(row=0, column=0, sticky="w")
-fsl_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
+fsl_listbox = tk.Listbox(data_selection_frame, selectmode="extended", width=20, height=10, exportselection=0)
 fsl_listbox.grid(row=1, column=0, padx=5, pady=5)
+
+def toggle_fsl():
+    if fsl_listbox.curselection() == tuple(range(fsl_listbox.size())):
+        fsl_listbox.selection_clear(0, tk.END)
+        fsl_toggle_btn.config(text="Select All")
+    else:
+        fsl_listbox.selection_set(0, tk.END)
+        fsl_toggle_btn.config(text="Deselect All")
+
+fsl_toggle_btn = ttk.Button(data_selection_frame, text="Select All", command=toggle_fsl)
+fsl_toggle_btn.grid(row=2, column=0, pady=2)
 
 # Scan Types Selection
 scl_label = ttk.Label(data_selection_frame, text="Select Scan Types")
 scl_label.grid(row=0, column=1, sticky="w", padx=20)
-scl_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
+scl_listbox = tk.Listbox(data_selection_frame, selectmode="extended", width=20, height=10, exportselection=0)
 scl_listbox.grid(row=1, column=1, padx=5, pady=5)
+
+def toggle_scl():
+    if scl_listbox.curselection() == tuple(range(scl_listbox.size())):
+        scl_listbox.selection_clear(0, tk.END)
+        scl_toggle_btn.config(text="Select All")
+    else:
+        scl_listbox.selection_set(0, tk.END)
+        scl_toggle_btn.config(text="Deselect All")
+
+scl_toggle_btn = ttk.Button(data_selection_frame, text="Select All", command=toggle_scl)
+scl_toggle_btn.grid(row=2, column=1, pady=2)
 
 # Depth Selection Listbox
 depth_label = ttk.Label(data_selection_frame, text="Select Depths")
 depth_label.grid(row=0, column=2, sticky="w", padx=20)
-depth_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
+depth_listbox = tk.Listbox(data_selection_frame, selectmode="extended", width=20, height=10, exportselection=0)
 depth_listbox.grid(row=1, column=2, padx=5, pady=5)
+
+def toggle_depth():
+    if depth_listbox.curselection() == tuple(range(depth_listbox.size())):
+        depth_listbox.selection_clear(0, tk.END)
+        depth_toggle_btn.config(text="Select All")
+    else:
+        depth_listbox.selection_set(0, tk.END)
+        depth_toggle_btn.config(text="Deselect All")
+
+depth_toggle_btn = ttk.Button(data_selection_frame, text="Select All", command=toggle_depth)
+depth_toggle_btn.grid(row=2, column=2, pady=2)
 
 # Analysis type section with radio buttons
 analysis_frame = ttk.LabelFrame(content, text="Analysis Type", padding="10")
 analysis_frame.grid(row=3, column=0, sticky="ew")
 analysis_var = tk.StringVar(master=root,value="none")
-ttk.Radiobutton(analysis_frame, text="None", variable=analysis_var, value="none").grid(row=0, column=0, sticky="w")
-ttk.Radiobutton(analysis_frame, text="Gamma: Note each profile is compared normalized to AVG of 5 resampled pixels around CAX", variable=analysis_var, value="gam").grid(row=1, column=0, sticky="w")
-ttk.Radiobutton(analysis_frame, text="Composite Analysis", variable=analysis_var, value="comp").grid(row=2, column=0, sticky="w")
-ttk.Radiobutton(analysis_frame, text="Dose Difference", variable=analysis_var, value="dif").grid(row=3, column=0, sticky="w")
-ttk.Radiobutton(analysis_frame, text="Distance to Agreement", variable=analysis_var, value="dist").grid(row=4, column=0, sticky="w")
-ttk.Radiobutton(analysis_frame, text="MPPG5.A Analysis", variable=analysis_var, value="mppg").grid(row=5, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Raw Data Only", variable=analysis_var, value="none").grid(row=0, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Plots Only", variable=analysis_var, value="plot").grid(row=1, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Gamma Analysis", variable=analysis_var, value="gam").grid(row=2, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Composite Analysis", variable=analysis_var, value="comp").grid(row=3, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Dose Difference", variable=analysis_var, value="dif").grid(row=4, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="Distance to Agreement", variable=analysis_var, value="dist").grid(row=5, column=0, sticky="w")
+ttk.Radiobutton(analysis_frame, text="MPPG5.A Analysis", variable=analysis_var, value="mppg").grid(row=6, column=0, sticky="w")
 
 # Data processing section with dropdowns and checkboxes
 processing_frame = ttk.LabelFrame(content, text="Data Processing", padding="10")

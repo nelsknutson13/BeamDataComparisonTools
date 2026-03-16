@@ -692,10 +692,26 @@ def run_comparison():
         fsl[j]=float(fsl[j])    
         prfs=[];gvfs=[];
         # Extract dose and position data
-        y1 = df1.loc[(df1['FS']==fsl[j]),'Pos']
-        d1 = df1.loc[(df1['FS']==fsl[j]),'Dose']
-        y2 = df2.loc[(df2['FS']==fsl[j]),'Pos']
-        d2 = df2.loc[(df2['FS']==fsl[j]),'Dose']
+        y1 = df1.loc[(df1['FS']==fsl[j]),'Pos'].reset_index(drop=True)
+        d1 = df1.loc[(df1['FS']==fsl[j]),'Dose'].reset_index(drop=True)
+        y2 = df2.loc[(df2['FS']==fsl[j]),'Pos'].reset_index(drop=True)
+        d2 = df2.loc[(df2['FS']==fsl[j]),'Dose'].reset_index(drop=True)
+
+        # Check for duplicate depth positions — skip FS and warn if found
+        dup1 = y1[y1.duplicated(keep=False)]
+        dup2 = y2[y2.duplicated(keep=False)]
+        if not dup1.empty:
+            print(f"  FS {fsl[j]}: WARNING — Sheet 1 has duplicate Pos values "
+                  f"{sorted(dup1.unique().tolist())} — skipping.")
+            continue
+        if not dup2.empty:
+            print(f"  FS {fsl[j]}: WARNING — Sheet 2 has duplicate Pos values "
+                  f"{sorted(dup2.unique().tolist())} — skipping.")
+            continue
+        # Ensure strictly increasing depth order
+        s1 = y1.argsort(); y1, d1 = y1.iloc[s1].reset_index(drop=True), d1.iloc[s1].reset_index(drop=True)
+        s2 = y2.argsort(); y2, d2 = y2.iloc[s2].reset_index(drop=True), d2.iloc[s2].reset_index(drop=True)
+
         if auto_shift_var.get():
             autofill_depth_shifts_epom_ui(y1, d1, y2, d2, unit="cm")
 

@@ -23,18 +23,25 @@ from comp import dosedif, dta as dtafunc
 # ─────────────────────────────────────────────
 #  CONFIG  — edit these as needed
 # ─────────────────────────────────────────────
-BASE_PATH = (
-    r"C:\Users\nknutson\Box\Knutson\Research\Projects underway"
-    r"\Radformation research\RADMC Photon VALIDATION\TrueBeam\ProcessedData"
-)
+FILE_MODE = 'flat'
+# 'hierarchical' : BASE_PATH contains energy subfolders (e.g. 6X/, 10FFF/),
+#                  each holding one *PDD*.xlsx file.
+# 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
+#                  parsed from each filename (e.g. 6X_100SSD_PDDData.xlsx -> 6X_100SSD).
+#                  Use FILE_FILTER to restrict which files are processed.
 
-SHEET1_NAME = "Measurement"   # reference / measured
-SHEET2_NAME = "MC"            # dataset to convolve
+BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
 
-ANALYSIS      = 'plot'        # 'comp', 'dif', 'dist', or 'plot'
-DD_CRITERIA   = 2.0           # dose difference threshold [%]
-DTA_CRITERIA  = 0.2           # DTA threshold [cm]  (2 mm)
-NORM          = 2             # 1 = normalize to dmax, 2 = normalize to fixed depth per energy
+
+FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
+
+SHEET1_NAME = "SN 21"   # reference / measured sheet name
+SHEET2_NAME = "TPS SN 21"            # comparison sheet name
+
+ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', or 'plot'
+DD_CRITERIA   = 1.0           # dose difference threshold [%]
+DTA_CRITERIA  = 0.1           # DTA threshold [cm]  (2 mm)
+NORM          = 1             # 1 = normalize to dmax, 2 = normalize to fixed depth per energy
 
 # Fixed normalization depth [cm] per energy folder name
 NORM_DEPTH = {
@@ -48,8 +55,9 @@ DEPTH_SHIFT1  = 0.0           # depth shift for sheet 1 [cm]
 DEPTH_SHIFT2  = 0.0           # depth shift for sheet 2 [cm]
 CUTOFF_DEPTH  = 0.0           # discard points shallower than this [cm]; 0 = no cutoff
 CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 0.48 cm
-MARKER_SIZE   = 2             # plot marker size
-DPI           = 400           # figure output resolution
+CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
+MARKER_SIZE   = 6             # plot marker size
+DPI           = 600           # figure output resolution
 
 RESULTS_DIR = os.path.join(BASE_PATH, "Results")
 # ─────────────────────────────────────────────
@@ -159,6 +167,23 @@ def run_one_file(xlsx_path, energy_label):
             print(f"  FS {fs_val}: not enough points — skipping.")
             continue
 
+        # ── check for duplicate depth positions ──────────────────────────
+        dup1 = y1[y1.duplicated(keep=False)]
+        dup2 = y2[y2.duplicated(keep=False)]
+        if not dup1.empty:
+            print(f"  FS {fs_val}: WARNING — {SHEET1_NAME} has duplicate Pos values "
+                  f"{sorted(dup1.unique().tolist())} — skipping this FS.")
+            continue
+        if not dup2.empty:
+            print(f"  FS {fs_val}: WARNING — {SHEET2_NAME} has duplicate Pos values "
+                  f"{sorted(dup2.unique().tolist())} — skipping this FS.")
+            continue
+        # Ensure strictly increasing order
+        y1 = y1.reset_index(drop=True); d1 = d1.reset_index(drop=True)
+        y2 = y2.reset_index(drop=True); d2 = d2.reset_index(drop=True)
+        sort1 = y1.argsort(); y1, d1 = y1.iloc[sort1].reset_index(drop=True), d1.iloc[sort1].reset_index(drop=True)
+        sort2 = y2.argsort(); y2, d2 = y2.iloc[sort2].reset_index(drop=True), d2.iloc[sort2].reset_index(drop=True)
+
         # ── depth shifts ───────────────────
         y1 = y1 + DEPTH_SHIFT1
         y2 = y2 + DEPTH_SHIFT2
@@ -189,8 +214,11 @@ def run_one_file(xlsx_path, energy_label):
                 d1 = d1 / d1_fixed * 100
                 d2 = d2 / d2_fixed * 100
 
-        # ── detector convolution (MC = curve 2) ──
-        d2 = apply_detector_convolution(y2, d2, CONV_FWHM_CM)
+        # ── detector convolution ──────────────────
+        if CONV_TARGET in ('curve1', 'both'):
+            d1 = apply_detector_convolution(y1, d1, CONV_FWHM_CM)
+        if CONV_TARGET in ('curve2', 'both'):
+            d2 = apply_detector_convolution(y2, d2, CONV_FWHM_CM)
 
         # ── plot curves ───────────────────
         ax0.plot(y1, d1, '+r', ms=MARKER_SIZE)
@@ -320,20 +348,36 @@ def main():
     summary_csv = os.path.join(RESULTS_DIR, f"pdd_comparison_summary_{timestamp}.csv")
     all_results = []
 
-    energy_dirs = sorted([
-        d for d in os.listdir(BASE_PATH)
-        if os.path.isdir(os.path.join(BASE_PATH, d))
-        and os.path.join(BASE_PATH, d) != RESULTS_DIR
-    ])
+    if FILE_MODE == 'flat':
+        # All xlsx files sit directly in BASE_PATH; derive label from filename.
+        xlsx_files = sorted(glob.glob(os.path.join(BASE_PATH, FILE_FILTER)))
+        file_pairs = []
+        for p in xlsx_files:
+            stem = os.path.splitext(os.path.basename(p))[0]
+            # Strip common trailing suffixes to get a tidy energy label
+            label = stem
+            for suffix in ('_PDDData', '_ProfileData', '_PDD', '_Profile', 'Data'):
+                if label.endswith(suffix):
+                    label = label[:-len(suffix)]
+                    break
+            file_pairs.append((p, label))
+    else:
+        # Hierarchical: one energy subfolder per energy, each with a *PDD*.xlsx
+        energy_dirs = sorted([
+            d for d in os.listdir(BASE_PATH)
+            if os.path.isdir(os.path.join(BASE_PATH, d))
+            and os.path.join(BASE_PATH, d) != RESULTS_DIR
+        ])
+        file_pairs = []
+        for energy_label in energy_dirs:
+            folder = os.path.join(BASE_PATH, energy_label)
+            pdd_files = glob.glob(os.path.join(folder, '*PDD*.xlsx'))
+            if not pdd_files:
+                print(f"No PDD xlsx found in {folder} — skipping.")
+                continue
+            file_pairs.append((pdd_files[0], energy_label))
 
-    for energy_label in energy_dirs:
-        folder = os.path.join(BASE_PATH, energy_label)
-        pdd_files = glob.glob(os.path.join(folder, '*PDD*.xlsx'))
-        if not pdd_files:
-            print(f"No PDD xlsx found in {folder} — skipping.")
-            continue
-
-        xlsx_path = pdd_files[0]
+    for xlsx_path, energy_label in file_pairs:
         results = run_one_file(xlsx_path, energy_label)
         all_results.extend(results)
 
@@ -345,8 +389,10 @@ def main():
         ])
 
         # ── build pivot table (pass rate % by energy × FS) ───────────
-        energy_order = [e for e in ['6X', '6FFF', '10X', '10FFF', '15X']
-                        if e in df_out['Energy'].unique()]
+        _preferred = ['6X', '6FFF', '8FFF', '10X', '10FFF', '15X']
+        _actual = df_out['Energy'].unique()
+        _matched = [e for e in _preferred if e in _actual]
+        energy_order = _matched if _matched else sorted(_actual)
         fss = sorted(df_out['FS'].unique())
 
         def weighted_pass(g):

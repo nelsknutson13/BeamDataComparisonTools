@@ -39,7 +39,7 @@ SHEET1_NAME = "SN 21"   # reference / measured sheet name
 SHEET2_NAME = "TPS SN 21"            # comparison sheet name
 
 ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', or 'plot'
-DD_CRITERIA   = 1.0           # dose difference threshold [%]
+DD_CRITERIA   = 1           # dose difference threshold [%]
 DTA_CRITERIA  = 0.1           # DTA threshold [cm]  (2 mm)
 NORM          = 1             # 1 = normalize to dmax, 2 = normalize to fixed depth per energy
 

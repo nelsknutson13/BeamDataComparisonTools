@@ -1,11 +1,31 @@
 import os
 import re
 import threading
+import pickle
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import sys
 import pandas as pd
+
+CACHE_FILE = Path.home() / ".scan_inventory_cache.pkl"
+
+def load_cache():
+    try:
+        if CACHE_FILE.exists():
+            with open(CACHE_FILE, "rb") as f:
+                return pickle.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_cache(cache):
+    try:
+        with open(CACHE_FILE, "wb") as f:
+            pickle.dump(cache, f)
+    except Exception:
+        pass
 
 # ---------- Core logic ----------
 
@@ -94,7 +114,7 @@ def load_requirements(want_path):
     xls = pd.ExcelFile(want_path)
     tabs = []
     for sh in xls.sheet_names:
-        df = pd.read_excel(want_path, sheet_name=sh)
+        df = xls.parse(sh)
         df.columns = [str(c).strip() for c in df.columns]
         # If an Energy column is missing or blank, fill with sheet name
         if 'Energy' not in df.columns:
@@ -128,7 +148,7 @@ def inventory_for_excel(xlsx_path):
 
     for sh in xls.sheet_names:
         try:
-            df = pd.read_excel(xlsx_path, sheet_name=sh).dropna(how="all")
+            df = xls.parse(sh).dropna(how="all")
         except Exception as e:
             rows.append({"File": str(xlsx_path), "Device": parse_device(sh), "Error": str(e)})
             continue
@@ -266,17 +286,19 @@ def build_coverage(inventory, want, device_cols, base_cols):
 
 
 def run_audit(root, req_path, out_path, log_cb=lambda m: None):
+    import time
+    _t0 = time.time()
     log_cb("Loading requirements…")
 
     # Read requirements file (SCANS.xlsx)
-    req_sheets = pd.ExcelFile(req_path).sheet_names
+    req_xls = pd.ExcelFile(req_path)
     req_tabs = []
-    for sh in req_sheets:
+    for sh in req_xls.sheet_names:
         # Parse Energy + SSD from sheet name
         energy, ssd = parse_energy_ssd_from_sheet(sh)
         if not energy or not ssd:
             log_cb(f"WARNING: Could not parse Energy/SSD from sheet '{sh}'")
-        df = pd.read_excel(req_path, sheet_name=sh)
+        df = req_xls.parse(sh)
         df.columns = [c.strip() for c in df.columns]
 
         # Rename columns to standard names
@@ -330,10 +352,32 @@ def run_audit(root, req_path, out_path, log_cb=lambda m: None):
     if not excel_files:
         raise RuntimeError("No .xlsx files found under selected root.")
 
-    inv_parts = []
-    for i, p in enumerate(excel_files, 1):
-        log_cb(f"[{i}/{len(excel_files)}] Indexing {p} …")
-        inv_parts.append(inventory_for_excel(p))
+    total = len(excel_files)
+    inv_parts = [None] * total
+    cache = load_cache()
+
+    # Separate files that need re-reading from those cached
+    to_read = {}
+    for i, p in enumerate(excel_files):
+        mtime = p.stat().st_mtime
+        key = str(p)
+        if key in cache and cache[key][0] == mtime:
+            inv_parts[i] = cache[key][1]
+            log_cb(f"[cached] {p.name}")
+        else:
+            to_read[i] = p
+
+    # Read only new/modified files in parallel
+    if to_read:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(inventory_for_excel, p): (i, p) for i, p in to_read.items()}
+            for future in as_completed(futures):
+                i, p = futures[future]
+                result = future.result()
+                inv_parts[i] = result
+                cache[str(p)] = (p.stat().st_mtime, result)
+                log_cb(f"[{sum(x is not None for x in inv_parts)}/{total}] Indexed {p.name} …")
+        save_cache(cache)
 
     inventory = (pd.concat(inv_parts, ignore_index=True)
                  if inv_parts else pd.DataFrame(
@@ -416,11 +460,16 @@ def run_audit(root, req_path, out_path, log_cb=lambda m: None):
         kind="mergesort"
     ).reset_index(drop=True)
 
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    out_path = Path(out_path)
+    out_path = out_path.parent / f"{out_path.stem}_{timestamp}{out_path.suffix}"
     log_cb(f"Writing: {out_path}")
     with pd.ExcelWriter(out_path, engine="xlsxwriter") as xw:
         inventory.to_excel(xw, index=False, sheet_name="Inventory")
 
-    log_cb("Done.")
+    elapsed = time.time() - _t0
+    log_cb(f"Done.  Total time: {elapsed:.1f} s")
+    return out_path
 
 
 
@@ -520,10 +569,10 @@ class App(tk.Tk):
         def worker():
             try:
                 # NO direct Tk calls in this thread; use after() for UI updates
-                run_audit(root, req, outp,
+                saved = run_audit(root, req, outp,
                           log_cb=lambda m: self.after(0, lambda: self.append_log(m)))
-                self.after(0, lambda: self.append_log(f"Report written to: {outp}"))
-                self.after(0, lambda: self.open_file(outp))
+                self.after(0, lambda p=saved: self.append_log(f"Report written to: {p}"))
+                self.after(0, lambda p=saved: self.open_file(str(p)))
             except Exception as exc:
                 err_msg = str(exc)  # capture now; 'exc' will be cleared after except
                 self.after(0, lambda msg=err_msg: self.append_log(f"ERROR: {msg}"))

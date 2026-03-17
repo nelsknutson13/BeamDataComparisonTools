@@ -70,15 +70,16 @@ CONV_TARGET  = 'none'              # 'none', 'curve1', 'curve2', or 'both'
 
 # MPPG-specific parameters (used only when ANALYSIS == 'mppg')
 MPPG_DDTAIL  = 3.0                 # tail dose-difference criterion [% of Dmax]
-MPPG_PEN_CM  = 1.0                 # penumbra half-width [cm]
-MPPG_OVR_CM  = 0.5                 # overlap buffer zone [cm]
+MPPG_PEN_CM  = 0.25                # penumbra half-width [cm]  (GUI default: pupper_entry="0.5" / 2)
+MPPG_OVR_CM  = 1.0                 # overlap buffer zone [cm]  (GUI default: pulower_entry="1")
+MPPG_DIAG_FACTOR = 0.80            # diagonal field size factor (GUI default: 0.80)
 
 # XY diagonal scans: only process for the largest field size (matches GUI behavior)
 XY_LARGEST_FS_ONLY = True
 
 MARKER_SIZE  = 2                   # plot marker size
 DPI          = 600                 # figure output resolution
-SAVE_FIGURES = False                # set False to skip figure generation (faster, stats only)
+SAVE_FIGURES = True                # set False to skip figure generation (faster, stats only)
 
 RESULTS_DIR = os.path.join(BASE_PATH, "Results")
 # ─────────────────────────────────────────────
@@ -182,9 +183,9 @@ def run_one_file(xlsx_path, energy_label):
     print(f"  {energy_label}  —  {os.path.basename(xlsx_path)}")
     print(f"{'='*60}")
 
-    # Parse SSD from filename for MPPG geometry (defaults to 100 cm if not found)
-    ssd_cm, _ = parse_ssd_energy(xlsx_path, default_ssd=100.0, default_energy=energy_label)
-    print(f"  SSD parsed from path: {ssd_cm:.1f} cm")
+    # Parse SSD and energy key from filename (energy_label may be a full filename stem)
+    ssd_cm, pdd_energy = parse_ssd_energy(xlsx_path, default_ssd=100.0, default_energy=energy_label)
+    print(f"  SSD parsed from path: {ssd_cm:.1f} cm  |  PDD energy key: {pdd_energy}")
 
     df1 = pd.read_excel(xlsx_path, sheet_name=SHEET1_NAME, header=0)
     df2 = pd.read_excel(xlsx_path, sheet_name=SHEET2_NAME, header=0)
@@ -228,61 +229,66 @@ def run_one_file(xlsx_path, energy_label):
     all_results = []
     skipped     = []
 
-    # ── outer loop: one figure per scan axis ──────────────────────────────────
+    # ── profile panel y-label reflects normalization mode ─────────────────
+    profile_ylabel = ('Off Axis Ratio'            if NORM == 1
+                      else 'Dose (norm. to Dmax)' if NORM == 2
+                      else 'Dose (raw units)')
+
+    # ── single figure for all axes overlaid (matches GUI layout) ──────────
+    if SAVE_FIGURES:
+        if ANALYSIS == 'mppg':
+            plt.rcParams.update({'font.size': 22})
+            fig, (ax0, ax1, ax2, ax3) = plt.subplots(
+                4, 1, figsize=(15, 14),
+                gridspec_kw={'height_ratios': [1.5, 1, 1, 1]}
+            )
+            ax1.set_ylabel('DTA [mm]')
+            ax2.set_ylabel('$\\Delta$Dose [%]')
+            ax3.set_ylabel('$\\Delta$Dose [%Dmax]')
+        elif ANALYSIS in ('comp', 'gam'):
+            plt.rcParams.update({'font.size': 20})
+            fig, (ax0, ax1, ax2) = plt.subplots(
+                3, 1, figsize=(15, 11),
+                gridspec_kw={'height_ratios': [1.5, 1, 1]}
+            )
+            if ANALYSIS == 'comp':
+                ax1.set_ylabel('DTA [mm]')
+                ax2.set_ylabel('Dose Difference [%]')
+        elif ANALYSIS in ('dif', 'dist'):
+            plt.rcParams.update({'font.size': 18})
+            fig, (ax0, ax1) = plt.subplots(
+                2, 1, figsize=(15, 9),
+                gridspec_kw={'height_ratios': [1.5, 1]}
+            )
+            ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
+        else:   # 'plot'
+            plt.rcParams.update({'font.size': 16})
+            fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
+        ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
+        ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
+        ax0.legend()
+    else:
+        class _NullAx:
+            def plot(self, *_, **__): pass
+            def set_xlim(self, *_, **__): pass
+            def set_ylim(self, *_, **__): pass
+            def set_ylabel(self, *_, **__): pass
+            def set_xlabel(self, *_, **__): pass
+            def legend(self, *_, **__): pass
+            def hist(self, *_, **__): pass
+        fig = None
+        ax0 = ax1 = ax2 = ax3 = _NullAx()
+    ax0.set_ylabel(profile_ylabel)
+    ax0.set_xlabel('Off Axis Position [cm]')
+
+    # Per-file pass/fail accumulators (all axes combined)
+    total_pts_axis  = 0
+    total_fail_axis = 0
+    gvtot = []
+
+    # ── outer loop: all axes overlaid onto the same figure ────────────────
     for axis in axes:
         print(f"\n  ── Axis: {axis} ──")
-
-        # ── figure setup ──────────────────────────────────────────────────────
-        if SAVE_FIGURES:
-            if ANALYSIS == 'mppg':
-                plt.rcParams.update({'font.size': 22})
-                fig, (ax0, ax1, ax2, ax3) = plt.subplots(
-                    4, 1, figsize=(15, 14),
-                    gridspec_kw={'height_ratios': [1.5, 1, 1, 1]}
-                )
-                ax1.set_ylabel('DTA [mm]')
-                ax2.set_ylabel('$\\Delta$Dose [%]')
-                ax3.set_ylabel('$\\Delta$Dose [%Dmax]')
-            elif ANALYSIS in ('comp', 'gam'):
-                plt.rcParams.update({'font.size': 20})
-                fig, (ax0, ax1, ax2) = plt.subplots(
-                    3, 1, figsize=(15, 11),
-                    gridspec_kw={'height_ratios': [1.5, 1, 1]}
-                )
-                if ANALYSIS == 'comp':
-                    ax1.set_ylabel('DTA [mm]')
-                    ax2.set_ylabel('Dose Difference [%]')
-            elif ANALYSIS in ('dif', 'dist'):
-                plt.rcParams.update({'font.size': 18})
-                fig, (ax0, ax1) = plt.subplots(
-                    2, 1, figsize=(15, 9),
-                    gridspec_kw={'height_ratios': [1.5, 1]}
-                )
-                ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
-            else:   # 'plot'
-                plt.rcParams.update({'font.size': 16})
-                fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
-            ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
-            ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
-            ax0.legend()
-        else:
-            class _NullAx:
-                def plot(self, *_, **__): pass
-                def set_xlim(self, *_, **__): pass
-                def set_ylim(self, *_, **__): pass
-                def set_ylabel(self, *_, **__): pass
-                def set_xlabel(self, *_, **__): pass
-                def legend(self, *_, **__): pass
-                def hist(self, *_, **__): pass
-            fig = None
-            ax0 = ax1 = ax2 = ax3 = _NullAx()
-        ax0.set_ylabel('Off Axis Ratio')
-        ax0.set_xlabel('Off Axis Position [cm]')
-
-        # Per-axis pass/fail accumulators
-        total_pts_axis  = 0
-        total_fail_axis = 0
-        gvtot = []       # gamma values accumulated across all profiles on this axis
 
         # ── loops: field size → depth ──────────────────────────────────────────
         for fs_val in fsl:
@@ -369,7 +375,7 @@ def run_one_file(xlsx_path, energy_label):
                     if cax2 > 0:
                         d2 = d2 / cax2
                     if NORM == 2:
-                        pdd_factor, _ = pdd_lookup_nearest(energy_label, depth)
+                        pdd_factor, _ = pdd_lookup_nearest(pdd_energy, depth)
                         d1 = d1 * pdd_factor
                         d2 = d2 * pdd_factor
 
@@ -411,7 +417,7 @@ def run_one_file(xlsx_path, energy_label):
                 # ── composite analysis ─────────────────────────────────────────
                 elif ANALYSIS == 'comp':
                     dtax, dtav = dtafunc(y1, d1, y2, d2, dta_cm)
-                    difx, difv = dosedif(y1, d1, y2, d2, 0)
+                    difx, difv = dosedif(y1, d1, y2, d2, 1)
                     dtax, dtav = downsample_to_native(dtax, dtav, y1)
                     difx, difv = downsample_to_native(difx, difv, y1)
                     dtafail  = np.where(np.abs(dtav) > dta_cm)[0]
@@ -443,7 +449,7 @@ def run_one_file(xlsx_path, energy_label):
 
                 # ── dose difference analysis ───────────────────────────────────
                 elif ANALYSIS == 'dif':
-                    difx, difv = dosedif(y1, d1, y2, d2, 0)
+                    difx, difv = dosedif(y1, d1, y2, d2, 1)
                     difx, difv = downsample_to_native(difx, difv, y1)
                     ddiffail = np.where(np.abs(difv) > dd_frac)[0]
                     total    = len(difv)
@@ -493,12 +499,12 @@ def run_one_file(xlsx_path, energy_label):
 
                 # ── MPPG analysis ──────────────────────────────────────────────
                 elif ANALYSIS == 'mppg':
-                    pdd_factor, _ = pdd_lookup_nearest(energy_label, depth)
-                    diag    = np.sqrt(2.0) if axis in ('XY', 'YX') else 1.0
+                    pdd_factor, _ = pdd_lookup_nearest(pdd_energy, depth)
+                    diag    = np.sqrt(2.0 * MPPG_DIAG_FACTOR) if axis in ('XY', 'YX') else 1.0
                     edge    = (fs_f / 2.0) * diag * (ssd_cm + depth) / 100.0
 
                     dtax, dtav = dtafunc(y1, d1, y2, d2, dta_cm)
-                    difx, difv = dosedif(y1, d1, y2, d2, 0)
+                    difx, difv = dosedif(y1, d1, y2, d2, 1)
                     dtax, dtav = downsample_to_native(dtax, dtav, y1)
                     difx, difv = downsample_to_native(difx, difv, y1)
                     difv_dmax  = np.asarray(difv) * pdd_factor
@@ -598,70 +604,71 @@ def run_one_file(xlsx_path, energy_label):
                     })
                     print(f"    FS {fs_val} depth {depth:.2f}: MPPG Pass={passrate:.2f}%  Fail={failed}/{total}")
 
-        # ── figure title and pass-rate label ──────────────────────────────────
-        overall_pass = (
-            100.0 * (1 - total_fail_axis / total_pts_axis)
-            if total_pts_axis > 0 else 0.0
+    # ── figure title and pass-rate label (after all axes plotted) ────────
+    overall_pass = (
+        100.0 * (1 - total_fail_axis / total_pts_axis)
+        if total_pts_axis > 0 else 0.0
+    )
+
+    if ANALYSIS == 'comp':
+        title_tag = f'Composite {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm'
+        ax2.set_xlabel(
+            f'Points outside {DD_CRITERIA:.1f}% & {DTA_CRITERIA*10:.1f}mm  '
+            f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
         )
+    elif ANALYSIS == 'dif':
+        title_tag = f'Dose Difference {DD_CRITERIA:.0f}%'
+        ax1.set_xlabel(
+            f'Points outside {DD_CRITERIA:.1f}%  '
+            f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
+        )
+    elif ANALYSIS == 'dist':
+        title_tag = f'DTA {DTA_CRITERIA*10:.0f}mm'
+        ax1.set_xlabel(
+            f'Points outside {DTA_CRITERIA*10:.1f}mm  '
+            f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
+        )
+    elif ANALYSIS == 'gam':
+        title_tag = f'Gamma {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm'
+        ax1.set_ylabel(f'$\\Gamma$ [{DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm]')
+        ax1.set_xlabel(
+            f'Points $\\Gamma$ > 1: {total_fail_axis}/{total_pts_axis}  '
+            f'Pass Rate: {overall_pass:.2f}%'
+        )
+        if gvtot:
+            bins    = 0.1
+            gv_arr  = np.asarray(gvtot)
+            weights = np.ones_like(gv_arr) / float(len(gv_arr))
+            edges   = np.arange(0, max(gv_arr) + bins, bins)
+            ax2.hist(gv_arr, bins=edges, weights=weights)
+            ax2.set_xlabel(f'$\\Gamma$ [{DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm]')
+            ax2.set_ylabel('Normalized Incidence')
+    elif ANALYSIS == 'mppg':
+        title_tag = (
+            f'MPPG {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm/'
+            f'{MPPG_DDTAIL:.0f}%Dmax'
+        )
+        ax3.set_xlabel(
+            f'Outside {DD_CRITERIA:.1f}% in-field | {DTA_CRITERIA*10:.1f}mm pen | '
+            f'{MPPG_DDTAIL:.1f}%Dmax tails  '
+            f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
+        )
+    else:
+        title_tag = 'Plots Only'
 
-        if ANALYSIS == 'comp':
-            title_tag = f'Composite {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm'
-            ax2.set_xlabel(
-                f'Points outside {DD_CRITERIA:.1f}% & {DTA_CRITERIA*10:.1f}mm  '
-                f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
-            )
-        elif ANALYSIS == 'dif':
-            title_tag = f'Dose Difference {DD_CRITERIA:.0f}%'
-            ax1.set_xlabel(
-                f'Points outside {DD_CRITERIA:.1f}%  '
-                f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
-            )
-        elif ANALYSIS == 'dist':
-            title_tag = f'DTA {DTA_CRITERIA*10:.0f}mm'
-            ax1.set_xlabel(
-                f'Points outside {DTA_CRITERIA*10:.1f}mm  '
-                f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
-            )
-        elif ANALYSIS == 'gam':
-            title_tag = f'Gamma {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm'
-            ax1.set_ylabel(f'$\\Gamma$ [{DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm]')
-            ax1.set_xlabel(
-                f'Points $\\Gamma$ > 1: {total_fail_axis}/{total_pts_axis}  '
-                f'Pass Rate: {overall_pass:.2f}%'
-            )
-            if gvtot:
-                bins    = 0.1
-                gv_arr  = np.asarray(gvtot)
-                weights = np.ones_like(gv_arr) / float(len(gv_arr))
-                edges   = np.arange(0, max(gv_arr) + bins, bins)
-                ax2.hist(gv_arr, bins=edges, weights=weights)
-                ax2.set_xlabel(f'$\\Gamma$ [{DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm]')
-                ax2.set_ylabel('Normalized Incidence')
-        elif ANALYSIS == 'mppg':
-            title_tag = (
-                f'MPPG {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm/'
-                f'{MPPG_DDTAIL:.0f}%Dmax'
-            )
-            ax3.set_xlabel(
-                f'Outside {DD_CRITERIA:.1f}% in-field | {DTA_CRITERIA*10:.1f}mm pen | '
-                f'{MPPG_DDTAIL:.1f}%Dmax tails  '
-                f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
-            )
-        else:
-            title_tag = 'Plots Only'
-
-        safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
-        if SAVE_FIGURES:
-            fig.suptitle(
-                f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}  [{axis}]',
-                fontsize=14
-            )
-            fig.tight_layout(rect=[0, 0, 1, 0.95])
-            fig.subplots_adjust(hspace=0.45)
-            out_png = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{axis}_{safe_tag}.png")
-            fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
-            plt.close(fig)
-            print(f"  Figure saved: {out_png}")
+    safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
+    if SAVE_FIGURES:
+        axes_label = '+'.join(axes)
+        fig.suptitle(
+            f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}  [{axes_label}]',
+            fontsize=14
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        fig.subplots_adjust(hspace=0.45)
+        out_png = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{safe_tag}.png")
+        fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  Figure saved: {out_png}")
 
     return all_results, skipped
 
@@ -733,7 +740,7 @@ def main():
         return (t - f) / t * 100 if t > 0 else float('nan')
 
     def fmt(v):
-        return f"{v:.1f}%" if (not isinstance(v, float) or not np.isnan(v)) else "—"
+        return f"{v:.2f}%" if (not isinstance(v, float) or not np.isnan(v)) else "—"
 
     _preferred   = ['6X', '6FFF', '8FFF', '10X', '10FFF', '15X']
     _actual      = df_out['Energy'].unique()

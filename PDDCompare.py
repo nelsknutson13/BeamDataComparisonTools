@@ -828,7 +828,6 @@ def run_comparison():
         if gam ==1:
             gx , gv = g(y1,d1,y2,d2,dd,dta,0,0,.01);#norm 0 is no norm in gamma code, 0 threshold InterpThreshold=0.01
             gx, gv = downsample_to_native(gx, gv, y1)
-            gv=gv[gx>0.1];gx=gx[gx>0.1];
             gx1=np.extract(gv>1,gx);gv1=np.extract(gv>1,gv);
             gx2=np.extract(gv<1,gx);gv2=np.extract(gv<1,gv);
             pr=(np.size((np.where(np.asarray(gv)<=1)))/np.size(np.where(np.asarray(gv)>=0))*100)

@@ -749,7 +749,7 @@ def main():
     if ANALYSIS in ('comp', 'dif', 'dist', 'gam'):
         _criteria_str = f"{_aname}  {DD_CRITERIA:.4g}%/{DTA_CRITERIA*10:.4g}mm"
     elif ANALYSIS == 'mppg':
-        _criteria_str = f"MPPG  DD={DD_CRITERIA:.4g}%  tail={MPPG_DDTAIL:.4g}%  pen={MPPG_PEN_CM:.4g}cm  ovr={MPPG_OVR_CM:.4g}cm"
+        _criteria_str = f"MPPG  {DD_CRITERIA:.4g}%/{DTA_CRITERIA*10:.4g}mm/{MPPG_DDTAIL:.4g}%"
     else:
         _criteria_str = _aname
 

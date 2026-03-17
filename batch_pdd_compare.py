@@ -19,6 +19,7 @@ from scipy import interpolate as interp
 from scipy.ndimage import gaussian_filter1d
 
 from comp import dosedif, dta as dtafunc
+from gamma import gamma as gammafunc
 
 # ─────────────────────────────────────────────
 #  CONFIG  — edit these as needed
@@ -38,7 +39,7 @@ FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx'
 SHEET1_NAME = "SN 21"   # reference / measured sheet name
 SHEET2_NAME = "TPS SN 21"            # comparison sheet name
 
-ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', or 'plot'
+ANALYSIS      = 'gam'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
 DD_CRITERIA   = 1           # dose difference threshold [%]
 DTA_CRITERIA  = 0.1           # DTA threshold [cm]  (2 mm)
 NORM          = 1             # 1 = normalize to dmax, 2 = normalize to fixed depth per energy
@@ -53,7 +54,7 @@ NORM_DEPTH = {
 }
 DEPTH_SHIFT1  = 0.0           # depth shift for sheet 1 [cm]
 DEPTH_SHIFT2  = 0.0           # depth shift for sheet 2 [cm]
-CUTOFF_DEPTH  = 0.0           # discard points shallower than this [cm]; 0 = no cutoff
+CUTOFF_DEPTH  = 0.1           # discard points shallower than this [cm]; GUI uses 0.1 cm
 CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 0.48 cm
 CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
 MARKER_SIZE   = 6             # plot marker size
@@ -137,6 +138,12 @@ def run_one_file(xlsx_path, energy_label):
             plt.rcParams.update({'font.size': 20})
             ax1.set_ylabel('DTA [mm]')
             ax2.set_ylabel('Dose Difference [%]')
+        elif ANALYSIS == 'gam':
+            fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 11),
+                gridspec_kw={'height_ratios': [1.5, 1, 1]})
+            plt.rcParams.update({'font.size': 20})
+            ax1.set_ylabel(f'$\\Gamma$ [{DD_CRITERIA:.4g}%/{DTA_CRITERIA*10:.4g}mm]')
+            ax2.set_ylabel('Normalized Incidence')
         elif ANALYSIS in ('dif', 'dist'):
             fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 9),
                 gridspec_kw={'height_ratios': [1.5, 1]})
@@ -153,6 +160,7 @@ def run_one_file(xlsx_path, energy_label):
             def set_ylabel(self, *_, **__): pass
             def set_xlabel(self, *_, **__): pass
             def legend(self, *_, **__): pass
+            def hist(self, *_, **__): pass
         fig = None
         ax0 = ax1 = ax2 = _NullAx()
 
@@ -165,6 +173,7 @@ def run_one_file(xlsx_path, energy_label):
     results = []
     total_points_cumulative = 0
     total_fails_cumulative  = 0
+    gvtot = []
 
     for fs_val in fsl:
         # ── extract data ───────────────────
@@ -312,6 +321,28 @@ def run_one_file(xlsx_path, energy_label):
             for n in dtafail:
                 ax1.plot(dtax[n], dtav[n] * 10, '.r', ms=0.5)
 
+        elif ANALYSIS == 'gam':
+            gx, gv = gammafunc(y1, d1, y2, d2, DD_CRITERIA, DTA_CRITERIA, 0, 0, 0.01)
+            gx, gv = downsample_to_native(gx, gv, y1)
+            gv_a = np.asarray(gv); gx_a = np.asarray(gx)
+            valid  = gv_a >= 0   # match GUI denominator (gv >= 0)
+            total  = int(valid.sum())
+            passed = int(np.count_nonzero(gv_a[valid] <= 1.0))
+            totalfail = total - passed
+            passrate  = passed / total * 100 if total > 0 else 0.0
+            gvmean    = float(np.mean(gv_a[valid])) if total > 0 else float('nan')
+            total_points_cumulative += total
+            total_fails_cumulative  += totalfail
+            gvtot.extend(gv_a[valid].tolist())
+            results.append({'Energy': energy_label, 'FS': fs_val,
+                'PassRate_pct': round(passrate, 2), 'MeanGamma': round(gvmean, 3),
+                'TotalPoints': total, 'FailPoints': totalfail})
+            print(f"  FS {fs_val:.1f} cm : Pass={passrate:.2f}%  "
+                  f"MeanGamma={gvmean:.3f}  Fail={totalfail}/{total}")
+            ax1.set_xlim(*xlim)
+            ax1.plot(gx_a[gv_a >  1], gv_a[gv_a >  1], '.r', ms=MARKER_SIZE)
+            ax1.plot(gx_a[gv_a <= 1], gv_a[gv_a <= 1], '.g', ms=MARKER_SIZE)
+
     # ── figure summary label & title ──────────
     if total_points_cumulative > 0:
         overall_pass = 100 * (1 - total_fails_cumulative / total_points_cumulative)
@@ -333,6 +364,18 @@ def run_one_file(xlsx_path, energy_label):
                        f'{total_fails_cumulative}/{total_points_cumulative}  '
                        f'Pass Rate: {overall_pass:.2f}%')
         title_tag = f'DTA {DTA_CRITERIA*10:.0f}mm'
+    elif ANALYSIS == 'gam':
+        title_tag = f'Gamma {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm'
+        ax1.set_xlabel(f'Points $\\Gamma$ > 1: {total_fails_cumulative}/{total_points_cumulative}  '
+                       f'Pass Rate: {overall_pass:.2f}%')
+        if gvtot:
+            gv_arr  = np.asarray(gvtot)
+            bins    = 0.1
+            weights = np.ones_like(gv_arr) / float(len(gv_arr))
+            edges   = np.arange(0, max(gv_arr) + bins, bins)
+            ax2.hist(gv_arr, bins=edges, weights=weights)
+            ax2.set_xlabel(f'$\\Gamma$ [{DD_CRITERIA:.4g}%/{DTA_CRITERIA*10:.4g}mm]')
+            ax2.set_ylabel('Normalized Incidence')
     else:
         title_tag = 'Plots Only'
 
@@ -394,18 +437,18 @@ def main():
 
     # ── save summary CSV ─────────────────────
     if all_results:
-        df_out = pd.DataFrame(all_results, columns=[
-            'Energy', 'FS', 'PassRate_pct', 'MeanDoseDiff_pct',
-            'MeanDTA_mm', 'TotalPoints', 'FailPoints'
-        ])
+        df_out = pd.DataFrame(all_results)
+        for col in ('MeanDoseDiff_pct', 'MeanDTA_mm', 'MeanGamma'):
+            if col not in df_out.columns:
+                df_out[col] = float('nan')
 
         # ── criteria label ────────────────────────────────────────────
         _analysis_labels = {
             'comp': 'Composite', 'dif': 'Dose Diff',
-            'dist': 'DTA',       'plot': 'Plot only',
+            'dist': 'DTA',       'gam': 'Gamma',      'plot': 'Plot only',
         }
         _aname = _analysis_labels.get(ANALYSIS, ANALYSIS)
-        if ANALYSIS in ('comp', 'dif', 'dist'):
+        if ANALYSIS in ('comp', 'dif', 'dist', 'gam'):
             _criteria_str = f"{_aname}  {DD_CRITERIA:.4g}%/{DTA_CRITERIA*10:.4g}mm"
         else:
             _criteria_str = _aname
@@ -432,7 +475,7 @@ def main():
         all_data = weighted_pass(df_out)
 
         def fmt(v):
-            return f"{v:.1f}%" if not np.isnan(v) else "—"
+            return f"{v:.2f}%" if not np.isnan(v) else "—"
 
         fs_col_names = [f"{int(fs)} cm" if float(fs).is_integer() else f"{fs} cm"
                         for fs in fss]

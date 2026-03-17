@@ -58,7 +58,7 @@ CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 
 CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
 MARKER_SIZE   = 6             # plot marker size
 DPI           = 600           # figure output resolution
-SAVE_FIGURES  = True          # set False to skip figure generation (faster, stats only)
+SAVE_FIGURES  = False          # set False to skip figure generation (faster, stats only)
 
 RESULTS_DIR = os.path.join(BASE_PATH, "Results")
 # ─────────────────────────────────────────────
@@ -399,6 +399,17 @@ def main():
             'MeanDTA_mm', 'TotalPoints', 'FailPoints'
         ])
 
+        # ── criteria label ────────────────────────────────────────────
+        _analysis_labels = {
+            'comp': 'Composite', 'dif': 'Dose Diff',
+            'dist': 'DTA',       'plot': 'Plot only',
+        }
+        _aname = _analysis_labels.get(ANALYSIS, ANALYSIS)
+        if ANALYSIS in ('comp', 'dif', 'dist'):
+            _criteria_str = f"{_aname}  {DD_CRITERIA:.4g}%/{DTA_CRITERIA*10:.4g}mm"
+        else:
+            _criteria_str = _aname
+
         # ── build pivot table (pass rate % by energy × FS) ───────────
         _preferred = ['6X', '6FFF', '8FFF', '10X', '10FFF', '15X']
         _actual = df_out['Energy'].unique()
@@ -450,6 +461,9 @@ def main():
             df_table.to_csv(fallback, index=False)
             print(f"\nCSV locked (close it in Excel first next time).")
             print(f"Saved to fallback: {fallback}")
+        print(f"\n{'='*60}")
+        print(f"  PDD pass rate  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]")
+        print(f"{'='*60}")
         print(df_table.to_string(index=False))
     else:
         print("\nNo results to save.")

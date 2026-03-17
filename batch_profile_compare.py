@@ -46,7 +46,7 @@ DEPTHS_CM   = 'all'                # e.g. [1.5, 5.0, 10.0]   or  'all'
 
 DEPTH_ROUND_CM = 0.1               # rounding resolution for depth matching [cm]
 
-ANALYSIS      = 'comp'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg'
+ANALYSIS      = 'mppg'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg'
 DD_CRITERIA   = 2.0                # dose difference threshold [%]
 DTA_CRITERIA  = 0.2                # DTA threshold [cm]  (2 mm)
 
@@ -217,7 +217,7 @@ def run_one_file(xlsx_path, energy_label):
 
     if not fsl or not axes or not dl:
         print("  No common FS / Axis / Depth after applying filters — skipping.")
-        return []
+        return [], []
 
     # Pre-computed thresholds in working units
     dd_frac     = DD_CRITERIA  / 100.0   # fraction  (e.g. 0.03 for 3%)
@@ -672,7 +672,7 @@ def main():
     from datetime import datetime
     os.makedirs(RESULTS_DIR, exist_ok=True)
     timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
-    summary_csv = os.path.join(RESULTS_DIR, f"profile_comparison_summary_{timestamp}.csv")
+    summary_xlsx = os.path.join(RESULTS_DIR, f"profile_comparison_summary_{timestamp}.xlsx")
     all_results = []
 
     # ── discover files ────────────────────────────────────────────────────────
@@ -740,6 +740,19 @@ def main():
     _matched     = [e for e in _preferred if e in _actual]
     energy_order = _matched if _matched else sorted(_actual)
 
+    # ── criteria label (used in console + Excel titles) ───────────────────────
+    _analysis_labels = {
+        'comp': 'Composite', 'dif': 'Dose Diff', 'dist': 'DTA',
+        'gam':  'Gamma',     'mppg': 'MPPG',     'plot': 'Plot only',
+    }
+    _aname = _analysis_labels.get(ANALYSIS, ANALYSIS)
+    if ANALYSIS in ('comp', 'dif', 'dist', 'gam'):
+        _criteria_str = f"{_aname}  {DD_CRITERIA:.4g}%/{DTA_CRITERIA*10:.4g}mm"
+    elif ANALYSIS == 'mppg':
+        _criteria_str = f"MPPG  DD={DD_CRITERIA:.4g}%  tail={MPPG_DDTAIL:.4g}%  pen={MPPG_PEN_CM:.4g}cm  ovr={MPPG_OVR_CM:.4g}cm"
+    else:
+        _criteria_str = _aname
+
     # ── per-energy Depth × FS matrices ────────────────────────────────────────
     all_matrix_blocks = []   # list of (energy, df_matrix) for CSV output
 
@@ -773,7 +786,7 @@ def main():
         all_matrix_blocks.append((e, df_mat))
 
         print(f"\n{'='*60}")
-        print(f"  {e}  —  Depth x FS pass rate (axes aggregated)")
+        print(f"  {e}  —  Depth x FS pass rate  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]")
         print(f"{'='*60}")
         print(df_mat.to_string(index=False))
 
@@ -787,27 +800,39 @@ def main():
         print("  No scans skipped.")
     print(f"{'='*60}")
 
-    # ── write CSV ─────────────────────────────────────────────────────────────
-    try:
-        with open(summary_csv, 'w', newline='') as f:
-            f.write("# === Detail rows (one per Energy / FS / Axis / Depth) ===\n")
-            df_out.to_csv(f, index=False)
+    # ── write Excel workbook (Summary tab + Detail tab) ──────────────────────
+    def _write_xlsx(path):
+        with pd.ExcelWriter(path, engine='openpyxl') as writer:
+            # ── Sheet 1: Summary (Depth × FS matrices, one block per energy) ──
+            row_cursor = 0
+            summary_entries = []   # (start_row, df_block, write_header)
             for e, df_mat in all_matrix_blocks:
-                f.write(f"\n# === {e}  Depth x FS pass rate (axes aggregated) ===\n")
-                df_mat.to_csv(f, index=False)
+                header_df = pd.DataFrame([[f'{e}  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]']])
+                summary_entries.append((row_cursor, header_df, False))  # no col header row
+                row_cursor += 1
+                summary_entries.append((row_cursor, df_mat, True))
+                row_cursor += len(df_mat) + 2   # +1 for df_mat header row + 1 blank
+
+            for start_row, df_block, with_header in summary_entries:
+                df_block.to_excel(writer, sheet_name='Summary',
+                                  index=False, header=with_header, startrow=start_row)
+
+            # skipped scans appended below matrices
             if all_skipped:
-                f.write("\n# === Skipped scans ===\n")
-                for msg in all_skipped:
-                    f.write(f"# {msg}\n")
-        print(f"\nSummary CSV saved: {summary_csv}")
+                skip_df = pd.DataFrame({'Skipped scans': all_skipped})
+                skip_df.to_excel(writer, sheet_name='Summary',
+                                 index=False, startrow=row_cursor + 1)
+
+            # ── Sheet 2: Detail rows ───────────────────────────────────────────
+            df_out.to_excel(writer, sheet_name='Detail', index=False)
+
+    try:
+        _write_xlsx(summary_xlsx)
+        print(f"\nSummary saved: {summary_xlsx}")
     except PermissionError:
-        fallback = summary_csv.replace('.csv', f'_retry_{timestamp}.csv')
-        with open(fallback, 'w', newline='') as f:
-            df_out.to_csv(f, index=False)
-            for e, df_mat in all_matrix_blocks:
-                f.write(f"\n# {e}\n")
-                df_mat.to_csv(f, index=False)
-        print(f"\nCSV locked (close it in Excel) — saved fallback: {fallback}")
+        fallback = summary_xlsx.replace('.xlsx', f'_retry_{timestamp}.xlsx')
+        _write_xlsx(fallback)
+        print(f"\nFile locked (close it in Excel) — saved fallback: {fallback}")
 
 
 if __name__ == '__main__':

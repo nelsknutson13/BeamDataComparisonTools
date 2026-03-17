@@ -1,0 +1,753 @@
+"""
+Batch Profile Composite Analysis
+---------------------------------
+Loops over all energy folders/files, runs analysis on Measurement vs MC sheets
+(or any two named sheets), saves one figure per energy + scan-axis and a
+summary CSV of pass-rate statistics.
+
+Parameters are set in the CONFIG section below.
+"""
+
+import os
+import glob
+import re
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')   # non-interactive backend — no GUI needed
+from matplotlib import pyplot as plt
+from scipy import interpolate as interp
+from scipy.ndimage import gaussian_filter1d
+
+from comp import dosedif, dta as dtafunc
+from center import center as center_function
+
+# ─────────────────────────────────────────────
+#  CONFIG  — edit these as needed
+# ─────────────────────────────────────────────
+
+FILE_MODE = 'flat'
+# 'hierarchical' : BASE_PATH contains energy subfolders (e.g. 6X/, 10FFF/),
+#                  each holding one *Profile*.xlsx file.
+# 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
+#                  parsed from each filename.
+
+BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
+
+FILE_FILTER = '*Profile*.xlsx'    # glob used in 'flat' mode only
+
+SHEET1_NAME = "SN 21"             # reference / measured sheet name
+SHEET2_NAME = "TPS SN 21"         # comparison sheet name
+
+# Data selection — None means "use all common values found in each file"
+FIELD_SIZES = None                 # e.g. [5.0, 10.0, 20.0]  or  None
+AXES        = None                 # e.g. ['X', 'Y']          or  None  (Z excluded always)
+DEPTHS_CM   = None                 # e.g. [1.5, 5.0, 10.0]   or  None
+
+DEPTH_ROUND_CM = 0.1               # rounding resolution for depth matching [cm]
+
+ANALYSIS      = 'comp'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg'
+DD_CRITERIA   = 3.0                # dose difference threshold [%]
+DTA_CRITERIA  = 0.3                # DTA threshold [cm]  (3 mm = 0.3 cm)
+
+# Normalization
+NORM = 1
+# 1 = normalize each profile to its CAX ±3 mm mean  (Off Axis Ratio)
+# 2 = normalize to CAX mean × PDD scale factor  (absolute-dose comparable)
+# 0 = no normalization (raw dose units)
+
+# Profile centering
+CENTER = 0
+# 0 = none
+# 1 = shift curve 1 to geometric center
+# 2 = shift curve 2 to geometric center
+# 3 = shift both curves to geometric center
+CENTER_THRESHOLD = 0.3             # threshold fraction passed to center()
+
+# Detector convolution
+CONV_FWHM_CM = 0.0                 # detector FWHM [cm]; 0 = disabled
+CONV_TARGET  = 'none'              # 'none', 'curve1', 'curve2', or 'both'
+
+# MPPG-specific parameters (used only when ANALYSIS == 'mppg')
+MPPG_DDTAIL  = 3.0                 # tail dose-difference criterion [% of Dmax]
+MPPG_PEN_CM  = 1.0                 # penumbra half-width [cm]
+MPPG_OVR_CM  = 0.5                 # overlap buffer zone [cm]
+
+# XY diagonal scans: only process for the largest field size (matches GUI behavior)
+XY_LARGEST_FS_ONLY = True
+
+MARKER_SIZE  = 2                   # plot marker size
+DPI          = 600                 # figure output resolution
+
+RESULTS_DIR = os.path.join(BASE_PATH, "Results")
+# ─────────────────────────────────────────────
+
+
+# ── PDD lookup table (for NORM=2 and MPPG tail scaling) ──────────────────────
+PDD_TABLE = {
+    "6X":   {1.42: 1.000,  5.0: 0.865, 10.0: 0.668, 20.0: 0.382, 30.0: 0.218},
+    "6FFF": {1.32: 1.000,  5.0: 0.848, 10.0: 0.636, 20.0: 0.346, 30.0: 0.190},
+    "8FFF": {1.88: 1.000,  5.0: 0.891, 10.0: 0.693, 20.0: 0.406, 30.0: 0.240},
+    "10X":  {2.22: 1.000,  5.0: 0.925, 10.0: 0.744, 20.0: 0.469, 30.0: 0.296},
+    "10FFF":{2.16: 1.000,  5.0: 0.904, 10.0: 0.708, 20.0: 0.423, 30.0: 0.256},
+    "15X":  {2.72: 1.000,  5.0: 0.949, 10.0: 0.774, 20.0: 0.502, 30.0: 0.325},
+}
+
+
+def pdd_lookup_nearest(energy, depth_cm):
+    table = PDD_TABLE.get(energy, {})
+    if not table:
+        return 1.0, None
+    keys = np.array(list(table.keys()), dtype=float)
+    k = float(keys[np.argmin(np.abs(keys - float(depth_cm)))])
+    return float(table[k]), k
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def parse_ssd_energy(path, default_ssd=100.0, default_energy="6X"):
+    """Extract SSD (cm) and energy token from file path."""
+    s = str(path)
+    m_ssd = (re.search(r'ssd[_\-\s]?(\d+(?:\.\d+)?)', s, re.I)
+             or re.search(r'(\d+(?:\.\d+)?)\s*ssd', s, re.I))
+    ssd_val = float(m_ssd.group(1)) if m_ssd else float(default_ssd)
+    s_norm = re.sub(r'[^A-Za-z0-9.]+', ' ', s)
+    m_energy = re.search(r'(?:^|\s)(6X|6FFF|8FFF|10X|10FFF|15X)(?=\s|$)', s_norm, re.I)
+    energy_val = m_energy.group(1).upper() if m_energy else default_energy
+    return ssd_val, energy_val
+
+
+def apply_detector_convolution(x, dose, fwhm_cm):
+    """Gaussian blur along the lateral axis to simulate detector volume averaging."""
+    if fwhm_cm <= 0:
+        return dose
+    sigma_cm  = fwhm_cm / 2.355
+    step_cm   = np.mean(np.diff(np.asarray(x, dtype=float)))
+    if step_cm <= 0:
+        return dose
+    sigma_idx = sigma_cm / step_cm
+    return gaussian_filter1d(np.asarray(dose, dtype=float), sigma=sigma_idx)
+
+
+def downsample_to_native(x_interp, vals_interp, x_native):
+    """Thin interpolated output back to roughly the native data spacing."""
+    x_interp    = np.asarray(x_interp,    dtype=float)
+    vals_interp = np.asarray(vals_interp, dtype=float)
+
+    if isinstance(x_native, (list, tuple)):
+        natives = [np.asarray(x, dtype=float) for x in x_native if x is not None]
+    else:
+        natives = [np.asarray(x_native, dtype=float)]
+
+    if x_interp.size < 2 or not natives:
+        return x_interp, vals_interp
+
+    def _median_step(x):
+        x = x[np.isfinite(x)]
+        if x.size < 2:
+            return 0.0
+        xu = np.unique(x)
+        xu.sort()
+        diffs = np.diff(xu)
+        diffs = diffs[diffs > 0]
+        return float(np.median(diffs)) if diffs.size else 0.0
+
+    steps = [s for s in (_median_step(x) for x in natives) if s > 0]
+    if not steps:
+        return x_interp, vals_interp
+
+    native_step = max(steps)
+    xi = np.unique(x_interp[np.isfinite(x_interp)])
+    xi.sort()
+    if xi.size < 2:
+        return x_interp, vals_interp
+    interp_step = float(np.median(np.diff(xi)))
+    if interp_step <= 0:
+        return x_interp, vals_interp
+
+    factor = max(1, int(round(native_step / interp_step)))
+    return x_interp[::factor], vals_interp[::factor]
+
+
+# ── analysis for one file ─────────────────────────────────────────────────────
+
+def run_one_file(xlsx_path, energy_label):
+    """
+    Run profile analysis on one Excel file.
+    Returns a list of result dicts (one per FS × Axis × Depth combination).
+    """
+    print(f"\n{'='*60}")
+    print(f"  {energy_label}  —  {os.path.basename(xlsx_path)}")
+    print(f"{'='*60}")
+
+    # Parse SSD from filename for MPPG geometry (defaults to 100 cm if not found)
+    ssd_cm, _ = parse_ssd_energy(xlsx_path, default_ssd=100.0, default_energy=energy_label)
+    print(f"  SSD parsed from path: {ssd_cm:.1f} cm")
+
+    df1 = pd.read_excel(xlsx_path, sheet_name=SHEET1_NAME, header=0)
+    df2 = pd.read_excel(xlsx_path, sheet_name=SHEET2_NAME, header=0)
+
+    # Standardize depth rounding to avoid floating-point mismatches
+    for df in (df1, df2):
+        df["Depth"] = ((df["Depth"] / DEPTH_ROUND_CM).round() * DEPTH_ROUND_CM).round(3)
+
+    df1 = df1.sort_values(by=['FS', 'Depth', 'Axis', 'Pos'])
+    df2 = df2.sort_values(by=['FS', 'Depth', 'Axis', 'Pos'])
+
+    # ── determine common FS / Axis / Depth (always exclude Z-axis PDDs) ───────
+    def _common(col):
+        s1 = set(df1.loc[df1['Axis'] != 'Z', col].dropna().unique())
+        s2 = set(df2.loc[df2['Axis'] != 'Z', col].dropna().unique())
+        return sorted(s1 & s2, key=float)
+
+    fsl_all  = _common('FS')
+    dl_all   = _common('Depth')
+    axes_all = sorted(
+        set(df1.loc[df1['Axis'] != 'Z', 'Axis'].dropna().unique()) &
+        set(df2.loc[df2['Axis'] != 'Z', 'Axis'].dropna().unique()),
+        key=lambda x: (x in ('XY', 'YX'), x)   # XY/YX processed last
+    )
+
+    # Apply config filters
+    fsl  = [f for f in fsl_all  if FIELD_SIZES is None or float(f) in [float(x) for x in FIELD_SIZES]]
+    axes = [a for a in axes_all if AXES        is None or a in AXES]
+    dl   = [d for d in dl_all   if DEPTHS_CM   is None or float(d) in [float(x) for x in DEPTHS_CM]]
+
+    if not fsl or not axes or not dl:
+        print("  No common FS / Axis / Depth after applying filters — skipping.")
+        return []
+
+    # Pre-computed thresholds in working units
+    dd_frac     = DD_CRITERIA  / 100.0   # fraction  (e.g. 0.03 for 3%)
+    ddtail_frac = MPPG_DDTAIL  / 100.0   # fraction of Dmax
+    dta_cm      = DTA_CRITERIA            # cm
+
+    stem        = os.path.splitext(os.path.basename(xlsx_path))[0]
+    all_results = []
+
+    # ── outer loop: one figure per scan axis ──────────────────────────────────
+    for axis in axes:
+        print(f"\n  ── Axis: {axis} ──")
+
+        # ── figure setup ──────────────────────────────────────────────────────
+        if ANALYSIS == 'mppg':
+            plt.rcParams.update({'font.size': 22})
+            fig, (ax0, ax1, ax2, ax3) = plt.subplots(
+                4, 1, figsize=(15, 14),
+                gridspec_kw={'height_ratios': [1.5, 1, 1, 1]}
+            )
+            ax1.set_ylabel('DTA [mm]')
+            ax2.set_ylabel('$\\Delta$Dose [%]')
+            ax3.set_ylabel('$\\Delta$Dose [%Dmax]')
+        elif ANALYSIS in ('comp', 'gam'):
+            plt.rcParams.update({'font.size': 20})
+            fig, (ax0, ax1, ax2) = plt.subplots(
+                3, 1, figsize=(15, 11),
+                gridspec_kw={'height_ratios': [1.5, 1, 1]}
+            )
+            if ANALYSIS == 'comp':
+                ax1.set_ylabel('DTA [mm]')
+                ax2.set_ylabel('Dose Difference [%]')
+        elif ANALYSIS in ('dif', 'dist'):
+            plt.rcParams.update({'font.size': 18})
+            fig, (ax0, ax1) = plt.subplots(
+                2, 1, figsize=(15, 9),
+                gridspec_kw={'height_ratios': [1.5, 1]}
+            )
+            ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
+        else:   # 'plot'
+            plt.rcParams.update({'font.size': 16})
+            fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
+
+        ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
+        ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
+        ax0.legend()
+        ax0.set_ylabel('Off Axis Ratio')
+        ax0.set_xlabel('Off Axis Position [cm]')
+
+        # Per-axis pass/fail accumulators
+        total_pts_axis  = 0
+        total_fail_axis = 0
+        gvtot = []       # gamma values accumulated across all profiles on this axis
+
+        # ── loops: field size → depth ──────────────────────────────────────────
+        for fs_val in fsl:
+            fs_f = float(fs_val)
+
+            # XY / YX diagonal scans: skip if not the largest field size
+            if XY_LARGEST_FS_ONLY and axis in ('XY', 'YX') and fs_f != float(max(fsl)):
+                continue
+
+            for depth in dl:
+                mask1 = (
+                    (df1['FS']    == fs_val) &
+                    (df1['Axis']  == axis)   &
+                    (df1['Depth'] == depth)
+                )
+                mask2 = (
+                    (df2['FS']    == fs_val) &
+                    (df2['Axis']  == axis)   &
+                    (df2['Depth'] == depth)
+                )
+
+                y1 = df1.loc[mask1, 'Pos'].reset_index(drop=True)
+                d1 = df1.loc[mask1, 'Dose'].reset_index(drop=True)
+                y2 = df2.loc[mask2, 'Pos'].reset_index(drop=True)
+                d2 = df2.loc[mask2, 'Dose'].reset_index(drop=True)
+
+                if len(y1) < 3 or len(y2) < 3:
+                    print(f"    FS {fs_val} depth {depth}: not enough points — skipping.")
+                    continue
+
+                # Sort by position (should already be sorted, but enforce it)
+                s1 = y1.argsort()
+                y1, d1 = y1.iloc[s1].reset_index(drop=True), d1.iloc[s1].reset_index(drop=True)
+                s2 = y2.argsort()
+                y2, d2 = y2.iloc[s2].reset_index(drop=True), d2.iloc[s2].reset_index(drop=True)
+
+                # ── centering ─────────────────────────────────────────────────
+                # center() requires a pandas Series with a clean integer index (already done above)
+                if CENTER in (1, 3):
+                    try:
+                        shift1 = center_function(y1, d1, CENTER_THRESHOLD)
+                        y1 = y1 + shift1
+                    except Exception as e:
+                        print(f"    FS {fs_val} depth {depth}: center() curve1 failed ({e})")
+                if CENTER in (2, 3):
+                    try:
+                        shift2 = center_function(y2, d2, CENTER_THRESHOLD)
+                        y2 = y2 + shift2
+                    except Exception as e:
+                        print(f"    FS {fs_val} depth {depth}: center() curve2 failed ({e})")
+
+                # ── detector convolution ───────────────────────────────────────
+                if CONV_TARGET in ('curve1', 'both'):
+                    d1 = pd.Series(apply_detector_convolution(y1, d1, CONV_FWHM_CM))
+                if CONV_TARGET in ('curve2', 'both'):
+                    d2 = pd.Series(apply_detector_convolution(y2, d2, CONV_FWHM_CM))
+
+                # ── normalization ──────────────────────────────────────────────
+                if NORM in (1, 2):
+                    cax1 = d1[np.abs(y1) <= 0.3].mean()
+                    cax2 = d2[np.abs(y2) <= 0.3].mean()
+                    if cax1 > 0:
+                        d1 = d1 / cax1
+                    if cax2 > 0:
+                        d2 = d2 / cax2
+                    if NORM == 2:
+                        pdd_factor, _ = pdd_lookup_nearest(energy_label, depth)
+                        d1 = d1 * pdd_factor
+                        d2 = d2 * pdd_factor
+
+                # ── plot the curves ────────────────────────────────────────────
+                ax0.plot(y1, d1, '+r', ms=MARKER_SIZE)
+                ax0.plot(y2, d2, '.k', ms=MARKER_SIZE)
+
+                if ANALYSIS == 'plot':
+                    continue
+
+                # ── gamma analysis ─────────────────────────────────────────────
+                elif ANALYSIS == 'gam':
+                    from gamma import gamma as g
+                    gx, gv = g(y1, d1, y2, d2, dd_frac, dta_cm, 1, 0.01, 0.01)
+                    gx, gv = downsample_to_native(gx, gv, y1)
+                    gv_a   = np.asarray(gv)
+                    valid  = np.isfinite(gv_a)
+                    total  = int(valid.sum())
+                    passed = int(np.count_nonzero(gv_a[valid] <= 1.0))
+                    failed = total - passed
+                    passrate = passed / total * 100 if total > 0 else 0.0
+                    gvmean   = float(np.mean(gv_a[valid])) if total > 0 else float('nan')
+                    total_pts_axis  += total
+                    total_fail_axis += failed
+                    gvtot.extend(gv_a[valid].tolist())
+
+                    ax1.plot(gx[gv_a >  1], gv_a[gv_a >  1], '.r', ms=MARKER_SIZE)
+                    ax1.plot(gx[gv_a <= 1], gv_a[gv_a <= 1], '.g', ms=MARKER_SIZE)
+
+                    all_results.append({
+                        'Energy': energy_label, 'FS': fs_val, 'Axis': axis,
+                        'Depth_cm': depth, 'PassRate_pct': round(passrate, 2),
+                        'MeanGamma': round(gvmean, 3),
+                        'TotalPoints': total, 'FailPoints': failed,
+                    })
+                    print(f"    FS {fs_val} depth {depth:.2f}: Pass={passrate:.2f}%  "
+                          f"MeanGamma={gvmean:.3f}  Fail={failed}/{total}")
+
+                # ── composite analysis ─────────────────────────────────────────
+                elif ANALYSIS == 'comp':
+                    dtax, dtav = dtafunc(y1, d1, y2, d2, dta_cm)
+                    difx, difv = dosedif(y1, d1, y2, d2, 0)
+                    dtax, dtav = downsample_to_native(dtax, dtav, y1)
+                    difx, difv = downsample_to_native(difx, difv, y1)
+                    dtafail  = np.where(np.abs(dtav) > dta_cm)[0]
+                    ddiffail = np.where(np.abs(difv) > dd_frac)[0]
+                    fail_set = set(dtafail) & set(ddiffail)
+                    total    = len(dtav)
+                    failed   = len(fail_set)
+                    passrate = (total - failed) / total * 100 if total > 0 else 0.0
+                    mean_dd  = float(np.mean(np.abs(difv))) * 100 if total > 0 else 0.0
+                    mean_dta = float(np.mean(np.abs(dtav)))       if total > 0 else 0.0
+                    total_pts_axis  += total
+                    total_fail_axis += failed
+
+                    ax1.plot(dtax, dtav * 10, '.g', ms=0.5)
+                    ax2.plot(difx, difv * 100, '.g', ms=0.5)
+                    for n in fail_set:
+                        ax1.plot(dtax[n], dtav[n] * 10, '.r', ms=0.5)
+                        ax2.plot(difx[n], difv[n] * 100, '.r', ms=0.5)
+
+                    all_results.append({
+                        'Energy': energy_label, 'FS': fs_val, 'Axis': axis,
+                        'Depth_cm': depth, 'PassRate_pct': round(passrate, 2),
+                        'MeanDoseDiff_pct': round(mean_dd, 3),
+                        'MeanDTA_mm': round(mean_dta * 10, 3),
+                        'TotalPoints': total, 'FailPoints': failed,
+                    })
+                    print(f"    FS {fs_val} depth {depth:.2f}: Pass={passrate:.2f}%  "
+                          f"MeanDD={mean_dd:.2f}%  MeanDTA={mean_dta*10:.2f}mm  Fail={failed}/{total}")
+
+                # ── dose difference analysis ───────────────────────────────────
+                elif ANALYSIS == 'dif':
+                    difx, difv = dosedif(y1, d1, y2, d2, 0)
+                    difx, difv = downsample_to_native(difx, difv, y1)
+                    ddiffail = np.where(np.abs(difv) > dd_frac)[0]
+                    total    = len(difv)
+                    failed   = len(ddiffail)
+                    passrate = (total - failed) / total * 100 if total > 0 else 0.0
+                    mean_dd  = float(np.mean(np.abs(difv))) * 100 if total > 0 else 0.0
+                    total_pts_axis  += total
+                    total_fail_axis += failed
+
+                    ax1.plot(difx, difv * 100, '.g', ms=0.5)
+                    for n in ddiffail:
+                        ax1.plot(difx[n], difv[n] * 100, '.r', ms=0.5)
+
+                    all_results.append({
+                        'Energy': energy_label, 'FS': fs_val, 'Axis': axis,
+                        'Depth_cm': depth, 'PassRate_pct': round(passrate, 2),
+                        'MeanDoseDiff_pct': round(mean_dd, 3),
+                        'TotalPoints': total, 'FailPoints': failed,
+                    })
+                    print(f"    FS {fs_val} depth {depth:.2f}: Pass={passrate:.2f}%  "
+                          f"MeanDD={mean_dd:.2f}%  Fail={failed}/{total}")
+
+                # ── DTA analysis ───────────────────────────────────────────────
+                elif ANALYSIS == 'dist':
+                    dtax, dtav = dtafunc(y1, d1, y2, d2, dta_cm)
+                    dtax, dtav = downsample_to_native(dtax, dtav, y1)
+                    dtafail  = np.where(np.abs(dtav) > dta_cm)[0]
+                    total    = len(dtav)
+                    failed   = len(dtafail)
+                    passrate = (total - failed) / total * 100 if total > 0 else 0.0
+                    mean_dta = float(np.mean(np.abs(dtav))) if total > 0 else 0.0
+                    total_pts_axis  += total
+                    total_fail_axis += failed
+
+                    ax1.plot(dtax, dtav * 10, '.g', ms=0.5)
+                    for n in dtafail:
+                        ax1.plot(dtax[n], dtav[n] * 10, '.r', ms=0.5)
+
+                    all_results.append({
+                        'Energy': energy_label, 'FS': fs_val, 'Axis': axis,
+                        'Depth_cm': depth, 'PassRate_pct': round(passrate, 2),
+                        'MeanDTA_mm': round(mean_dta * 10, 3),
+                        'TotalPoints': total, 'FailPoints': failed,
+                    })
+                    print(f"    FS {fs_val} depth {depth:.2f}: Pass={passrate:.2f}%  "
+                          f"MeanDTA={mean_dta*10:.2f}mm  Fail={failed}/{total}")
+
+                # ── MPPG analysis ──────────────────────────────────────────────
+                elif ANALYSIS == 'mppg':
+                    pdd_factor, _ = pdd_lookup_nearest(energy_label, depth)
+                    diag    = np.sqrt(2.0) if axis in ('XY', 'YX') else 1.0
+                    edge    = (fs_f / 2.0) * diag * (ssd_cm + depth) / 100.0
+
+                    dtax, dtav = dtafunc(y1, d1, y2, d2, dta_cm)
+                    difx, difv = dosedif(y1, d1, y2, d2, 0)
+                    dtax, dtav = downsample_to_native(dtax, dtav, y1)
+                    difx, difv = downsample_to_native(difx, difv, y1)
+                    difv_dmax  = np.asarray(difv) * pdd_factor
+
+                    x_dif = np.asarray(difx)
+                    x_dta = np.asarray(dtax)
+                    PEN   = MPPG_PEN_CM
+                    OVR   = MPPG_OVR_CM
+                    left  = -edge
+                    right =  edge
+
+                    # Region masks on the ΔDose grid
+                    pen_left_x   = (x_dif >= left  - PEN) & (x_dif <= left  + PEN)
+                    pen_right_x  = (x_dif >= right - PEN) & (x_dif <= right + PEN)
+                    pen_core_x   = pen_left_x  | pen_right_x
+                    in_core_x    = (x_dif >  left  + (PEN + OVR)) & (x_dif < right - (PEN + OVR))
+                    tail_core_x  = (x_dif <= left  - (PEN + OVR)) | (x_dif >= right + (PEN + OVR))
+                    near_hi_x    = (
+                        ((x_dif >  left  + PEN) & (x_dif <= left  + PEN + OVR)) |
+                        ((x_dif >= right - PEN - OVR) & (x_dif <  right - PEN))
+                    )
+                    near_lo_x    = (
+                        ((x_dif >= left  - PEN - OVR) & (x_dif < left  - PEN)) |
+                        ((x_dif >  right + PEN)        & (x_dif <= right + PEN + OVR))
+                    )
+
+                    # Region masks on the DTA grid (penumbra)
+                    pen_core_dta = (
+                        ((x_dta >= left  - PEN) & (x_dta <= left  + PEN)) |
+                        ((x_dta >= right - PEN) & (x_dta <= right + PEN))
+                    )
+
+                    dtav_a  = np.asarray(dtav)
+                    difv_a  = np.asarray(difv)
+                    pass_dta    = np.abs(dtav_a)    <= dta_cm
+                    pass_dd     = np.abs(difv_a)    <= dd_frac
+                    pass_ddtail = np.abs(difv_dmax) <= ddtail_frac
+
+                    # Interpolate DTA onto ΔDose grid for overlap OR-rule
+                    if len(dtax) > 3:
+                        dta_on_difx      = interp.pchip(dtax, dtav)(difx)
+                        pass_dta_on_difx = np.abs(dta_on_difx) <= dta_cm
+                    else:
+                        pass_dta_on_difx = np.zeros(len(difx), dtype=bool)
+
+                    overlap_hi_pass = near_hi_x & (pass_dd | pass_dta_on_difx)
+                    overlap_hi_fail = near_hi_x & ~(pass_dd | pass_dta_on_difx)
+                    overlap_lo_pass = near_lo_x & (pass_ddtail | pass_dta_on_difx)
+                    overlap_lo_fail = near_lo_x & ~(pass_ddtail | pass_dta_on_difx)
+
+                    domain_mask = in_core_x | tail_core_x | pen_core_x | near_hi_x | near_lo_x
+                    pass_any    = (
+                        (in_core_x   & pass_dd)          |
+                        (tail_core_x & pass_ddtail)       |
+                        (pen_core_x  & pass_dta_on_difx)  |
+                        overlap_hi_pass                   |
+                        overlap_lo_pass
+                    )
+                    total    = int(domain_mask.sum())
+                    passed   = int(pass_any.sum())
+                    failed   = total - passed
+                    passrate = passed / total * 100 if total > 0 else 0.0
+                    mean_dd  = float(np.mean(np.abs(difv_a))) * 100 if total > 0 else 0.0
+                    total_pts_axis  += total
+                    total_fail_axis += failed
+
+                    # Plotting — ax1 (DTA penumbra)
+                    ax1.plot(dtax, dtav_a * 10, '.k', ms=MARKER_SIZE)
+                    ax1.plot(dtax[pen_core_dta &  pass_dta],
+                             dtav_a[pen_core_dta &  pass_dta] * 10, '.g', ms=MARKER_SIZE)
+                    ax1.plot(dtax[pen_core_dta & ~pass_dta],
+                             dtav_a[pen_core_dta & ~pass_dta] * 10, '.r', ms=MARKER_SIZE)
+
+                    # ax2 (ΔDose in-field + overlap_hi)
+                    ax2.plot(difx, difv_a * 100, '.k', ms=MARKER_SIZE)
+                    ax2.plot(difx[in_core_x &  pass_dd],
+                             difv_a[in_core_x &  pass_dd] * 100, '.g', ms=MARKER_SIZE)
+                    ax2.plot(difx[in_core_x & ~pass_dd],
+                             difv_a[in_core_x & ~pass_dd] * 100, '.r', ms=MARKER_SIZE)
+                    ax2.plot(difx[overlap_hi_pass], difv_a[overlap_hi_pass] * 100, '.g', ms=MARKER_SIZE)
+                    ax2.plot(difx[overlap_hi_fail], difv_a[overlap_hi_fail] * 100, '.r', ms=MARKER_SIZE)
+
+                    # ax3 (ΔDose×PDD tails + overlap_lo)
+                    ax3.plot(difx, difv_dmax * 100, '.k', ms=MARKER_SIZE)
+                    ax3.plot(difx[tail_core_x &  pass_ddtail],
+                             difv_dmax[tail_core_x &  pass_ddtail] * 100, '.g', ms=MARKER_SIZE)
+                    ax3.plot(difx[tail_core_x & ~pass_ddtail],
+                             difv_dmax[tail_core_x & ~pass_ddtail] * 100, '.r', ms=MARKER_SIZE)
+                    ax3.plot(difx[overlap_lo_pass], difv_dmax[overlap_lo_pass] * 100, '.g', ms=MARKER_SIZE)
+                    ax3.plot(difx[overlap_lo_fail], difv_dmax[overlap_lo_fail] * 100, '.r', ms=MARKER_SIZE)
+
+                    all_results.append({
+                        'Energy': energy_label, 'FS': fs_val, 'Axis': axis,
+                        'Depth_cm': depth, 'PassRate_pct': round(passrate, 2),
+                        'MeanDoseDiff_pct': round(mean_dd, 3),
+                        'TotalPoints': total, 'FailPoints': failed,
+                    })
+                    print(f"    FS {fs_val} depth {depth:.2f}: MPPG Pass={passrate:.2f}%  Fail={failed}/{total}")
+
+        # ── figure title and pass-rate label ──────────────────────────────────
+        overall_pass = (
+            100.0 * (1 - total_fail_axis / total_pts_axis)
+            if total_pts_axis > 0 else 0.0
+        )
+
+        if ANALYSIS == 'comp':
+            title_tag = f'Composite {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm'
+            ax2.set_xlabel(
+                f'Points outside {DD_CRITERIA:.1f}% & {DTA_CRITERIA*10:.1f}mm  '
+                f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
+            )
+        elif ANALYSIS == 'dif':
+            title_tag = f'Dose Difference {DD_CRITERIA:.0f}%'
+            ax1.set_xlabel(
+                f'Points outside {DD_CRITERIA:.1f}%  '
+                f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
+            )
+        elif ANALYSIS == 'dist':
+            title_tag = f'DTA {DTA_CRITERIA*10:.0f}mm'
+            ax1.set_xlabel(
+                f'Points outside {DTA_CRITERIA*10:.1f}mm  '
+                f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
+            )
+        elif ANALYSIS == 'gam':
+            title_tag = f'Gamma {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm'
+            ax1.set_ylabel(f'$\\Gamma$ [{DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm]')
+            ax1.set_xlabel(
+                f'Points $\\Gamma$ > 1: {total_fail_axis}/{total_pts_axis}  '
+                f'Pass Rate: {overall_pass:.2f}%'
+            )
+            if gvtot:
+                bins    = 0.1
+                gv_arr  = np.asarray(gvtot)
+                weights = np.ones_like(gv_arr) / float(len(gv_arr))
+                edges   = np.arange(0, max(gv_arr) + bins, bins)
+                ax2.hist(gv_arr, bins=edges, weights=weights)
+                ax2.set_xlabel(f'$\\Gamma$ [{DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm]')
+                ax2.set_ylabel('Normalized Incidence')
+        elif ANALYSIS == 'mppg':
+            title_tag = (
+                f'MPPG {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm/'
+                f'{MPPG_DDTAIL:.0f}%Dmax'
+            )
+            ax3.set_xlabel(
+                f'Outside {DD_CRITERIA:.1f}% in-field | {DTA_CRITERIA*10:.1f}mm pen | '
+                f'{MPPG_DDTAIL:.1f}%Dmax tails  '
+                f'{total_fail_axis}/{total_pts_axis}  Pass Rate: {overall_pass:.2f}%'
+            )
+        else:
+            title_tag = 'Plots Only'
+
+        fig.suptitle(
+            f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}  [{axis}]',
+            fontsize=14
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        fig.subplots_adjust(hspace=0.45)
+
+        safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
+        out_png  = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{axis}_{safe_tag}.png")
+        fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  Figure saved: {out_png}")
+
+    return all_results
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    from datetime import datetime
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_csv = os.path.join(RESULTS_DIR, f"profile_comparison_summary_{timestamp}.csv")
+    all_results = []
+
+    # ── discover files ────────────────────────────────────────────────────────
+    if FILE_MODE == 'flat':
+        xlsx_files = sorted(glob.glob(os.path.join(BASE_PATH, FILE_FILTER)))
+        file_pairs = []
+        for p in xlsx_files:
+            stem  = os.path.splitext(os.path.basename(p))[0]
+            label = stem
+            for suffix in ('_ProfileData', '_Profile', 'Data', '_PDDData', '_PDD'):
+                if label.endswith(suffix):
+                    label = label[:-len(suffix)]
+                    break
+            file_pairs.append((p, label))
+    else:
+        energy_dirs = sorted([
+            d for d in os.listdir(BASE_PATH)
+            if os.path.isdir(os.path.join(BASE_PATH, d))
+            and os.path.join(BASE_PATH, d) != RESULTS_DIR
+        ])
+        file_pairs = []
+        for energy_label in energy_dirs:
+            folder     = os.path.join(BASE_PATH, energy_label)
+            prof_files = glob.glob(os.path.join(folder, '*Profile*.xlsx'))
+            if not prof_files:
+                print(f"No Profile xlsx found in {folder} — skipping.")
+                continue
+            file_pairs.append((prof_files[0], energy_label))
+
+    if not file_pairs:
+        print("No files found matching the filter. Check BASE_PATH and FILE_FILTER.")
+        return
+
+    # ── process each file ─────────────────────────────────────────────────────
+    for xlsx_path, energy_label in file_pairs:
+        results = run_one_file(xlsx_path, energy_label)
+        all_results.extend(results)
+
+    # ── save summary CSV ──────────────────────────────────────────────────────
+    if not all_results:
+        print("\nNo results to save.")
+        return
+
+    # Normalise columns — fill missing metric columns with NaN
+    for row in all_results:
+        row.setdefault('MeanDoseDiff_pct', float('nan'))
+        row.setdefault('MeanDTA_mm',       float('nan'))
+        row.setdefault('MeanGamma',        float('nan'))
+
+    df_out = pd.DataFrame(all_results)
+
+    # ── Energy × FS pivot (weighted pass rate, aggregated over all axes/depths)
+    _preferred   = ['6X', '6FFF', '8FFF', '10X', '10FFF', '15X']
+    _actual      = df_out['Energy'].unique()
+    _matched     = [e for e in _preferred if e in _actual]
+    energy_order = _matched if _matched else sorted(_actual)
+    fss          = sorted(df_out['FS'].unique())
+
+    def weighted_pass(grp):
+        t = grp['TotalPoints'].sum()
+        f = grp['FailPoints'].sum()
+        return (t - f) / t * 100 if t > 0 else float('nan')
+
+    def fmt(v):
+        return f"{v:.1f}%" if not np.isnan(v) else "—"
+
+    fs_col_names = [
+        f"{int(fs)} cm" if float(fs).is_integer() else f"{fs} cm"
+        for fs in fss
+    ]
+
+    # Build pass-rate table rows manually (weighted, not an average of averages)
+    table_rows = []
+    for e in energy_order:
+        row = {'Energy': e}
+        for fs, col in zip(fss, fs_col_names):
+            sub = df_out[(df_out['Energy'] == e) & (df_out['FS'] == fs)]
+            row[col] = fmt(weighted_pass(sub)) if len(sub) > 0 else '—'
+        row['All Field Sizes'] = fmt(weighted_pass(df_out[df_out['Energy'] == e]))
+        table_rows.append(row)
+
+    # Footer row: all energies combined
+    footer = {'Energy': 'All Energies'}
+    for fs, col in zip(fss, fs_col_names):
+        sub = df_out[df_out['FS'] == fs]
+        footer[col] = fmt(weighted_pass(sub)) if len(sub) > 0 else '—'
+    footer['All Field Sizes'] = f"All Data: {fmt(weighted_pass(df_out))}"
+    table_rows.append(footer)
+
+    df_pivot = pd.DataFrame(table_rows)
+
+    # ── write CSV ─────────────────────────────────────────────────────────────
+    try:
+        with open(summary_csv, 'w', newline='') as f:
+            f.write("# === Detail rows (one per Energy / FS / Axis / Depth) ===\n")
+            df_out.to_csv(f, index=False)
+            f.write("\n# === Energy × FS pass-rate summary (weighted over all axes and depths) ===\n")
+            df_pivot.to_csv(f, index=False)
+        print(f"\nSummary CSV saved: {summary_csv}")
+    except PermissionError:
+        fallback = summary_csv.replace('.csv', f'_retry_{timestamp}.csv')
+        with open(fallback, 'w', newline='') as f:
+            df_out.to_csv(f, index=False)
+            f.write("\n")
+            df_pivot.to_csv(f, index=False)
+        print(f"\nCSV locked (close it in Excel) — saved fallback: {fallback}")
+
+    print(df_pivot.to_string(index=False))
+
+
+if __name__ == '__main__':
+    main()

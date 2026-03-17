@@ -58,6 +58,7 @@ CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 
 CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
 MARKER_SIZE   = 6             # plot marker size
 DPI           = 600           # figure output resolution
+SAVE_FIGURES  = True          # set False to skip figure generation (faster, stats only)
 
 RESULTS_DIR = os.path.join(BASE_PATH, "Results")
 # ─────────────────────────────────────────────
@@ -129,20 +130,31 @@ def run_one_file(xlsx_path, energy_label):
         return []
 
     # ── figure setup ─────────────────────────
-    if ANALYSIS == 'comp':
-        fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 11),
-            gridspec_kw={'height_ratios': [1.5, 1, 1]})
-        plt.rcParams.update({'font.size': 20})
-        ax1.set_ylabel('DTA [mm]')
-        ax2.set_ylabel('Dose Difference [%]')
-    elif ANALYSIS in ('dif', 'dist'):
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 9),
-            gridspec_kw={'height_ratios': [1.5, 1]})
-        plt.rcParams.update({'font.size': 18})
-        ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
-    else:  # 'plot'
-        fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
-        plt.rcParams.update({'font.size': 16})
+    if SAVE_FIGURES:
+        if ANALYSIS == 'comp':
+            fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 11),
+                gridspec_kw={'height_ratios': [1.5, 1, 1]})
+            plt.rcParams.update({'font.size': 20})
+            ax1.set_ylabel('DTA [mm]')
+            ax2.set_ylabel('Dose Difference [%]')
+        elif ANALYSIS in ('dif', 'dist'):
+            fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(15, 9),
+                gridspec_kw={'height_ratios': [1.5, 1]})
+            plt.rcParams.update({'font.size': 18})
+            ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
+        else:  # 'plot'
+            fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
+            plt.rcParams.update({'font.size': 16})
+    else:
+        class _NullAx:
+            def plot(self, *_, **__): pass
+            def set_xlim(self, *_, **__): pass
+            def set_ylim(self, *_, **__): pass
+            def set_ylabel(self, *_, **__): pass
+            def set_xlabel(self, *_, **__): pass
+            def legend(self, *_, **__): pass
+        fig = None
+        ax0 = ax1 = ax2 = _NullAx()
 
     ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
     ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
@@ -324,17 +336,16 @@ def run_one_file(xlsx_path, energy_label):
     else:
         title_tag = 'Plots Only'
 
-    fig.suptitle(f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}', fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.subplots_adjust(hspace=0.45)
-
-    # ── save figure ───────────────────────────
     stem     = os.path.splitext(os.path.basename(xlsx_path))[0]
     safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
-    out_png  = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{safe_tag}.png")
-    fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Figure saved: {out_png}")
+    if SAVE_FIGURES:
+        fig.suptitle(f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}', fontsize=14)
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        fig.subplots_adjust(hspace=0.45)
+        out_png = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{safe_tag}.png")
+        fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  Figure saved: {out_png}")
 
     return results
 

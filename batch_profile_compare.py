@@ -32,32 +32,32 @@ FILE_MODE = 'flat'
 # 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
 #                  parsed from each filename.
 
-BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
+BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data\Test"
 
 FILE_FILTER = '*Profile*.xlsx'    # glob used in 'flat' mode only
 
 SHEET1_NAME = "SN 21"             # reference / measured sheet name
 SHEET2_NAME = "TPS SN 21"         # comparison sheet name
 
-# Data selection — None means "use all common values found in each file"
-FIELD_SIZES = None                 # e.g. [5.0, 10.0, 20.0]  or  None
-AXES        = None                 # e.g. ['X', 'Y']          or  None  (Z excluded always)
-DEPTHS_CM   = None                 # e.g. [1.5, 5.0, 10.0]   or  None
+# Data selection — 'all' means use all common values found in each file
+FIELD_SIZES = 'all'                # e.g. [5.0, 10.0, 20.0]  or  'all'
+AXES        = 'all'                # e.g. ['X', 'Y']          or  'all'  (Z excluded always)
+DEPTHS_CM   = 'all'                # e.g. [1.5, 5.0, 10.0]   or  'all'
 
 DEPTH_ROUND_CM = 0.1               # rounding resolution for depth matching [cm]
 
 ANALYSIS      = 'comp'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg'
-DD_CRITERIA   = 3.0                # dose difference threshold [%]
-DTA_CRITERIA  = 0.3                # DTA threshold [cm]  (3 mm = 0.3 cm)
+DD_CRITERIA   = 2.0                # dose difference threshold [%]
+DTA_CRITERIA  = 0.2                # DTA threshold [cm]  (2 mm)
 
 # Normalization
-NORM = 1
+NORM = 2
 # 1 = normalize each profile to its CAX ±3 mm mean  (Off Axis Ratio)
 # 2 = normalize to CAX mean × PDD scale factor  (absolute-dose comparable)
 # 0 = no normalization (raw dose units)
 
 # Profile centering
-CENTER = 0
+CENTER = 3
 # 0 = none
 # 1 = shift curve 1 to geometric center
 # 2 = shift curve 2 to geometric center
@@ -78,6 +78,7 @@ XY_LARGEST_FS_ONLY = True
 
 MARKER_SIZE  = 2                   # plot marker size
 DPI          = 600                 # figure output resolution
+SAVE_FIGURES = False                # set False to skip figure generation (faster, stats only)
 
 RESULTS_DIR = os.path.join(BASE_PATH, "Results")
 # ─────────────────────────────────────────────
@@ -174,7 +175,8 @@ def downsample_to_native(x_interp, vals_interp, x_native):
 def run_one_file(xlsx_path, energy_label):
     """
     Run profile analysis on one Excel file.
-    Returns a list of result dicts (one per FS × Axis × Depth combination).
+    Returns (results, skipped) where results is a list of result dicts
+    and skipped is a list of warning strings for flagged/skipped combos.
     """
     print(f"\n{'='*60}")
     print(f"  {energy_label}  —  {os.path.basename(xlsx_path)}")
@@ -209,9 +211,9 @@ def run_one_file(xlsx_path, energy_label):
     )
 
     # Apply config filters
-    fsl  = [f for f in fsl_all  if FIELD_SIZES is None or float(f) in [float(x) for x in FIELD_SIZES]]
-    axes = [a for a in axes_all if AXES        is None or a in AXES]
-    dl   = [d for d in dl_all   if DEPTHS_CM   is None or float(d) in [float(x) for x in DEPTHS_CM]]
+    fsl  = [f for f in fsl_all  if FIELD_SIZES == 'all' or float(f) in [float(x) for x in FIELD_SIZES]]
+    axes = [a for a in axes_all if AXES        == 'all' or a in AXES]
+    dl   = [d for d in dl_all   if DEPTHS_CM   == 'all' or float(d) in [float(x) for x in DEPTHS_CM]]
 
     if not fsl or not axes or not dl:
         print("  No common FS / Axis / Depth after applying filters — skipping.")
@@ -224,44 +226,56 @@ def run_one_file(xlsx_path, energy_label):
 
     stem        = os.path.splitext(os.path.basename(xlsx_path))[0]
     all_results = []
+    skipped     = []
 
     # ── outer loop: one figure per scan axis ──────────────────────────────────
     for axis in axes:
         print(f"\n  ── Axis: {axis} ──")
 
         # ── figure setup ──────────────────────────────────────────────────────
-        if ANALYSIS == 'mppg':
-            plt.rcParams.update({'font.size': 22})
-            fig, (ax0, ax1, ax2, ax3) = plt.subplots(
-                4, 1, figsize=(15, 14),
-                gridspec_kw={'height_ratios': [1.5, 1, 1, 1]}
-            )
-            ax1.set_ylabel('DTA [mm]')
-            ax2.set_ylabel('$\\Delta$Dose [%]')
-            ax3.set_ylabel('$\\Delta$Dose [%Dmax]')
-        elif ANALYSIS in ('comp', 'gam'):
-            plt.rcParams.update({'font.size': 20})
-            fig, (ax0, ax1, ax2) = plt.subplots(
-                3, 1, figsize=(15, 11),
-                gridspec_kw={'height_ratios': [1.5, 1, 1]}
-            )
-            if ANALYSIS == 'comp':
+        if SAVE_FIGURES:
+            if ANALYSIS == 'mppg':
+                plt.rcParams.update({'font.size': 22})
+                fig, (ax0, ax1, ax2, ax3) = plt.subplots(
+                    4, 1, figsize=(15, 14),
+                    gridspec_kw={'height_ratios': [1.5, 1, 1, 1]}
+                )
                 ax1.set_ylabel('DTA [mm]')
-                ax2.set_ylabel('Dose Difference [%]')
-        elif ANALYSIS in ('dif', 'dist'):
-            plt.rcParams.update({'font.size': 18})
-            fig, (ax0, ax1) = plt.subplots(
-                2, 1, figsize=(15, 9),
-                gridspec_kw={'height_ratios': [1.5, 1]}
-            )
-            ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
-        else:   # 'plot'
-            plt.rcParams.update({'font.size': 16})
-            fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
-
-        ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
-        ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
-        ax0.legend()
+                ax2.set_ylabel('$\\Delta$Dose [%]')
+                ax3.set_ylabel('$\\Delta$Dose [%Dmax]')
+            elif ANALYSIS in ('comp', 'gam'):
+                plt.rcParams.update({'font.size': 20})
+                fig, (ax0, ax1, ax2) = plt.subplots(
+                    3, 1, figsize=(15, 11),
+                    gridspec_kw={'height_ratios': [1.5, 1, 1]}
+                )
+                if ANALYSIS == 'comp':
+                    ax1.set_ylabel('DTA [mm]')
+                    ax2.set_ylabel('Dose Difference [%]')
+            elif ANALYSIS in ('dif', 'dist'):
+                plt.rcParams.update({'font.size': 18})
+                fig, (ax0, ax1) = plt.subplots(
+                    2, 1, figsize=(15, 9),
+                    gridspec_kw={'height_ratios': [1.5, 1]}
+                )
+                ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
+            else:   # 'plot'
+                plt.rcParams.update({'font.size': 16})
+                fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
+            ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
+            ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
+            ax0.legend()
+        else:
+            class _NullAx:
+                def plot(self, *_, **__): pass
+                def set_xlim(self, *_, **__): pass
+                def set_ylim(self, *_, **__): pass
+                def set_ylabel(self, *_, **__): pass
+                def set_xlabel(self, *_, **__): pass
+                def legend(self, *_, **__): pass
+                def hist(self, *_, **__): pass
+            fig = None
+            ax0 = ax1 = ax2 = ax3 = _NullAx()
         ax0.set_ylabel('Off Axis Ratio')
         ax0.set_xlabel('Off Axis Position [cm]')
 
@@ -295,8 +309,12 @@ def run_one_file(xlsx_path, energy_label):
                 y2 = df2.loc[mask2, 'Pos'].reset_index(drop=True)
                 d2 = df2.loc[mask2, 'Dose'].reset_index(drop=True)
 
+                if len(y1) == 0 or len(y2) == 0:
+                    continue   # no data for this combo — silent skip
                 if len(y1) < 3 or len(y2) < 3:
-                    print(f"    FS {fs_val} depth {depth}: not enough points — skipping.")
+                    msg = f"{energy_label}  FS {fs_val} depth {depth} [{axis}]: only {min(len(y1),len(y2))} point(s)"
+                    print(f"    WARNING — {msg} — skipping.")
+                    skipped.append(msg)
                     continue
 
                 # Sort by position (should already be sorted, but enforce it)
@@ -304,6 +322,22 @@ def run_one_file(xlsx_path, energy_label):
                 y1, d1 = y1.iloc[s1].reset_index(drop=True), d1.iloc[s1].reset_index(drop=True)
                 s2 = y2.argsort()
                 y2, d2 = y2.iloc[s2].reset_index(drop=True), d2.iloc[s2].reset_index(drop=True)
+
+                # Check for duplicate positions (would crash pchip interpolation)
+                dup1 = y1[y1.duplicated(keep=False)]
+                dup2 = y2[y2.duplicated(keep=False)]
+                if not dup1.empty:
+                    msg = (f"{energy_label}  FS {fs_val} depth {depth} [{axis}]: "
+                           f"{SHEET1_NAME} duplicate Pos {sorted(dup1.unique().tolist())}")
+                    print(f"    WARNING — {msg} — skipping.")
+                    skipped.append(msg)
+                    continue
+                if not dup2.empty:
+                    msg = (f"{energy_label}  FS {fs_val} depth {depth} [{axis}]: "
+                           f"{SHEET2_NAME} duplicate Pos {sorted(dup2.unique().tolist())}")
+                    print(f"    WARNING — {msg} — skipping.")
+                    skipped.append(msg)
+                    continue
 
                 # ── centering ─────────────────────────────────────────────────
                 # center() requires a pandas Series with a clean integer index (already done above)
@@ -616,20 +650,20 @@ def run_one_file(xlsx_path, energy_label):
         else:
             title_tag = 'Plots Only'
 
-        fig.suptitle(
-            f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}  [{axis}]',
-            fontsize=14
-        )
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
-        fig.subplots_adjust(hspace=0.45)
-
         safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
-        out_png  = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{axis}_{safe_tag}.png")
-        fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
-        plt.close(fig)
-        print(f"  Figure saved: {out_png}")
+        if SAVE_FIGURES:
+            fig.suptitle(
+                f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}  [{axis}]',
+                fontsize=14
+            )
+            fig.tight_layout(rect=[0, 0, 1, 0.95])
+            fig.subplots_adjust(hspace=0.45)
+            out_png = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{axis}_{safe_tag}.png")
+            fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
+            plt.close(fig)
+            print(f"  Figure saved: {out_png}")
 
-    return all_results
+    return all_results, skipped
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -673,9 +707,11 @@ def main():
         return
 
     # ── process each file ─────────────────────────────────────────────────────
+    all_skipped = []
     for xlsx_path, energy_label in file_pairs:
-        results = run_one_file(xlsx_path, energy_label)
+        results, skipped = run_one_file(xlsx_path, energy_label)
         all_results.extend(results)
+        all_skipped.extend(skipped)
 
     # ── save summary CSV ──────────────────────────────────────────────────────
     if not all_results:
@@ -690,63 +726,88 @@ def main():
 
     df_out = pd.DataFrame(all_results)
 
-    # ── Energy × FS pivot (weighted pass rate, aggregated over all axes/depths)
-    _preferred   = ['6X', '6FFF', '8FFF', '10X', '10FFF', '15X']
-    _actual      = df_out['Energy'].unique()
-    _matched     = [e for e in _preferred if e in _actual]
-    energy_order = _matched if _matched else sorted(_actual)
-    fss          = sorted(df_out['FS'].unique())
-
+    # ── helpers ───────────────────────────────────────────────────────────────
     def weighted_pass(grp):
         t = grp['TotalPoints'].sum()
         f = grp['FailPoints'].sum()
         return (t - f) / t * 100 if t > 0 else float('nan')
 
     def fmt(v):
-        return f"{v:.1f}%" if not np.isnan(v) else "—"
+        return f"{v:.1f}%" if (not isinstance(v, float) or not np.isnan(v)) else "—"
 
-    fs_col_names = [
-        f"{int(fs)} cm" if float(fs).is_integer() else f"{fs} cm"
-        for fs in fss
-    ]
+    _preferred   = ['6X', '6FFF', '8FFF', '10X', '10FFF', '15X']
+    _actual      = df_out['Energy'].unique()
+    _matched     = [e for e in _preferred if e in _actual]
+    energy_order = _matched if _matched else sorted(_actual)
 
-    # Build pass-rate table rows manually (weighted, not an average of averages)
-    table_rows = []
+    # ── per-energy Depth × FS matrices ────────────────────────────────────────
+    all_matrix_blocks = []   # list of (energy, df_matrix) for CSV output
+
     for e in energy_order:
-        row = {'Energy': e}
+        de = df_out[df_out['Energy'] == e]
+        depths = sorted(de['Depth_cm'].unique())
+        fss    = sorted(de['FS'].unique())
+        fs_col_names = [
+            f"{int(fs)} cm" if float(fs).is_integer() else f"{fs} cm"
+            for fs in fss
+        ]
+
+        rows = []
+        for d in depths:
+            row = {'Depth': f"{d:g} cm"}
+            for fs, col in zip(fss, fs_col_names):
+                sub = de[(de['Depth_cm'] == d) & (de['FS'] == fs)]
+                row[col] = fmt(weighted_pass(sub)) if len(sub) > 0 else '—'
+            row['All FS'] = fmt(weighted_pass(de[de['Depth_cm'] == d]))
+            rows.append(row)
+
+        # Footer: per-FS totals
+        footer = {'Depth': 'All Depths'}
         for fs, col in zip(fss, fs_col_names):
-            sub = df_out[(df_out['Energy'] == e) & (df_out['FS'] == fs)]
-            row[col] = fmt(weighted_pass(sub)) if len(sub) > 0 else '—'
-        row['All Field Sizes'] = fmt(weighted_pass(df_out[df_out['Energy'] == e]))
-        table_rows.append(row)
+            sub = de[de['FS'] == fs]
+            footer[col] = fmt(weighted_pass(sub)) if len(sub) > 0 else '—'
+        footer['All FS'] = fmt(weighted_pass(de))
+        rows.append(footer)
 
-    # Footer row: all energies combined
-    footer = {'Energy': 'All Energies'}
-    for fs, col in zip(fss, fs_col_names):
-        sub = df_out[df_out['FS'] == fs]
-        footer[col] = fmt(weighted_pass(sub)) if len(sub) > 0 else '—'
-    footer['All Field Sizes'] = f"All Data: {fmt(weighted_pass(df_out))}"
-    table_rows.append(footer)
+        df_mat = pd.DataFrame(rows)
+        all_matrix_blocks.append((e, df_mat))
 
-    df_pivot = pd.DataFrame(table_rows)
+        print(f"\n{'='*60}")
+        print(f"  {e}  —  Depth x FS pass rate (axes aggregated)")
+        print(f"{'='*60}")
+        print(df_mat.to_string(index=False))
+
+    # ── skipped scan summary ──────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    if all_skipped:
+        print(f"  SKIPPED SCANS ({len(all_skipped)} total):")
+        for msg in all_skipped:
+            print(f"    - {msg}")
+    else:
+        print("  No scans skipped.")
+    print(f"{'='*60}")
 
     # ── write CSV ─────────────────────────────────────────────────────────────
     try:
         with open(summary_csv, 'w', newline='') as f:
             f.write("# === Detail rows (one per Energy / FS / Axis / Depth) ===\n")
             df_out.to_csv(f, index=False)
-            f.write("\n# === Energy × FS pass-rate summary (weighted over all axes and depths) ===\n")
-            df_pivot.to_csv(f, index=False)
+            for e, df_mat in all_matrix_blocks:
+                f.write(f"\n# === {e}  Depth x FS pass rate (axes aggregated) ===\n")
+                df_mat.to_csv(f, index=False)
+            if all_skipped:
+                f.write("\n# === Skipped scans ===\n")
+                for msg in all_skipped:
+                    f.write(f"# {msg}\n")
         print(f"\nSummary CSV saved: {summary_csv}")
     except PermissionError:
         fallback = summary_csv.replace('.csv', f'_retry_{timestamp}.csv')
         with open(fallback, 'w', newline='') as f:
             df_out.to_csv(f, index=False)
-            f.write("\n")
-            df_pivot.to_csv(f, index=False)
+            for e, df_mat in all_matrix_blocks:
+                f.write(f"\n# {e}\n")
+                df_mat.to_csv(f, index=False)
         print(f"\nCSV locked (close it in Excel) — saved fallback: {fallback}")
-
-    print(df_pivot.to_string(index=False))
 
 
 if __name__ == '__main__':

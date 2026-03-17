@@ -61,29 +61,27 @@ def gamma(ref_x, ref_prof,meas_x,meas_prof,dd,dta,norm,thres,interpinterval):
     refL=len(dta_ref);
     measL=len(dta_meas)
     
-    if local_fit_px <=1:
-        #RY = np.transpose(np.multiply(dd_ref,np.transpose(np.ones([1,measL]))));
-        #MY = np.ones([refL,1])*np.transpose(dd_meas)
-        #MY = (np.ones([refL,1])*np.transpose(dd_meas));
-        #RX = np.transpose(np.multiply(np.transpose(np.ones([1,measL])),dta_ref));
-        #MX = np.ones([refL,1])*np.transpose(dta_meas);
-       # Debugging output to ensure consistent values
-        #print(f"refL: {refL}, measL: {measL}")
-        #print(f"dta_ref shape: {dta_ref.shape}, dta_meas shape: {dta_meas.shape}")
-        
-        # Adjust ones_matrix to have correct shapes that match dta_ref and dta_meas
-        ones_matrix = np.ones((refL, measL))  # Correct dimensions based on refL and measL
-        
-        # Perform element-wise multiplications
-        RY = np.multiply(dd_ref, ones_matrix)  # (refL, measL)
-        MY = np.multiply(np.ones((refL, 1)), dd_meas.T)  # Adjust dd_meas to align with refL
-        RX = np.multiply(dta_ref, ones_matrix)  # Ensure correct shape matching with dta_ref
-        MX = np.multiply(np.ones((refL, 1)), dta_meas.T)  # Correct alignment of dta_meas
+    # Local-window gamma: for each measurement point search only reference
+    # points within ±(dta + 1 cm) spatially — same result as full NxM but
+    # much smaller matrix per point.
+    search_half = dta + 1.0   # cm  (dta already in same units as ref_x)
+    ref_x_arr   = ref_x.ravel()
+    meas_x_arr  = meas_x.ravel()
+    ref_d_arr   = (ref_prof / dd).ravel()
+    meas_d_arr  = (meas_prof / dd).ravel()
 
-
-        
-    gint=np.sqrt(np.square(RY-MY) + np.square(RX-MX));
-    Gammas=np.min(gint,axis=0)
+    Gammas = np.empty(measL)
+    for m in range(measL):
+        mx = meas_x_arr[m]
+        md = meas_d_arr[m]
+        idx = np.where(np.abs(ref_x_arr - mx) <= search_half)[0]
+        if idx.size == 0:
+            # fallback: use entire reference (should never happen with 1 cm margin)
+            idx = np.arange(refL)
+        rx = ref_x_arr[idx] / dta
+        rd = ref_d_arr[idx]
+        g2 = (rd - md) ** 2 + (rx - mx / dta) ** 2
+        Gammas[m] = np.sqrt(g2.min())
     #print(MY)
     #Gammas = np.min(np.sqrt(np.power((RY-MY),2) +np.power((RX-MX),2)),axis=0);
     #if len(_x)==len(Gammas):

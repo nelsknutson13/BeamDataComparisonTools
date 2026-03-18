@@ -673,6 +673,8 @@ def run_comparison():
     prl=[];gvl=[];gvtot=[];  comp_results=[]
     dif_total = 0; dif_fails = 0
     dist_total = 0; dist_fails = 0
+    dif_results = []
+    dist_results = []
     print("Comparison started...")
     df1=pd.read_excel(fn,sheet_name=sn1,header=0);
     df2=pd.read_excel(fn,sheet_name=sn2,header=0);   
@@ -868,6 +870,8 @@ def run_comparison():
             ddx2=np.extract(np.abs(ddif)<dd,difx);ddv2=np.extract(np.abs(ddif)<dd,ddif);
             dif_total += len(ddif)
             dif_fails += len(ddx1)
+            fs_pr = 100 * (len(ddif) - len(ddx1)) / len(ddif) if len(ddif) > 0 else 0.0
+            dif_results.append((fsl[j], len(ddx1), len(ddif), fs_pr))
             ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.plot(ddx1,ddv1,'.r',ms=ms)
@@ -880,6 +884,8 @@ def run_comparison():
             dtax2=np.extract(dtav<dta,dtax);dtav2=np.extract(dtav<dta,dtav);
             dist_total += len(dtav)
             dist_fails += len(dtax1)
+            fs_dist_pr = 100 * (len(dtav) - len(dtax1)) / len(dtav) if len(dtav) > 0 else 0.0
+            dist_results.append((fsl[j], len(dtax1), len(dtav), fs_dist_pr))
             ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
             ax1.plot(dtax1,dtav1*10,'.r',ms=ms)
@@ -1023,6 +1029,15 @@ def run_comparison():
 
     if dif == 1:
         dif_prtot = 100 * (dif_total - dif_fails) / dif_total if dif_total > 0 else 0
+        header = "Field Size [cm] | Fails / Total | Pass Rate [%]"
+        sep = "-" * len(header)
+        print("\nDose Difference Analysis Results")
+        print(f"Criteria: {dd:.1f}%")
+        print(sep); print(header); print(sep)
+        for fs_val, fails, total, pr in dif_results:
+            print(f"{fs_val:<15.1f} | {fails:>5}/{total:<7} | {pr:>12.2f}")
+        print(sep)
+        print(f"{'Overall':<15} | {dif_fails:>5}/{dif_total:<7} | {dif_prtot:>12.2f}")
         ax1.set_xlabel(
             f'Points outside {dd:.1f}% : {dif_fails}/{dif_total}  Pass Rate : {dif_prtot:.2f}%'
         )
@@ -1036,6 +1051,15 @@ def run_comparison():
 
     if dist == 1:
         dist_prtot = 100 * (dist_total - dist_fails) / dist_total if dist_total > 0 else 0
+        header = "Field Size [cm] | Fails / Total | Pass Rate [%]"
+        sep = "-" * len(header)
+        print("\nDTA Analysis Results")
+        print(f"Criteria: {dta*10:.1f} mm")
+        print(sep); print(header); print(sep)
+        for fs_val, fails, total, pr in dist_results:
+            print(f"{fs_val:<15.1f} | {fails:>5}/{total:<7} | {pr:>12.2f}")
+        print(sep)
+        print(f"{'Overall':<15} | {dist_fails:>5}/{dist_total:<7} | {dist_prtot:>12.2f}")
         ax1.set_xlabel(
             f'Points outside {dta*10:.1f} mm : {dist_fails}/{dist_total}  Pass Rate : {dist_prtot:.2f}%'
         )

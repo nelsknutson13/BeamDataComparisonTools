@@ -1138,6 +1138,16 @@ ttk.Label(sheet_frame, text="Select Sheet 2:").grid(row=1, column=0, sticky="w")
 sheet2_combo = ttk.Combobox(sheet_frame, width=30)
 sheet2_combo.grid(row=1, column=1, padx=5)
 
+def swap_sheets():
+    s1 = sheet1_combo.get()
+    s2 = sheet2_combo.get()
+    sheet1_combo.set(s2)
+    sheet2_combo.set(s1)
+    populate_fsl()
+    populate_scl()
+
+ttk.Button(sheet_frame, text="Swap \u21c5", command=swap_sheets).grid(row=0, column=2, rowspan=2, padx=5)
+
 # Data Selection Frame
 data_selection_frame = ttk.LabelFrame(main, text="Data Selection", padding="10")
 data_selection_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))

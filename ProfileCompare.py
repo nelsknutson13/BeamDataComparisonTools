@@ -444,7 +444,10 @@ def run_comparison():
     global fig, report_text
 
     # Retrieve dd and dta values from the input fields
-    msize=2#markersize
+    try:
+        msize = float(marker_size_entry.get())
+    except ValueError:
+        msize = 2
     dd = float(dd_entry.get())/100
     ddtail=float(ddtail_entry.get())/100
     dta = float(dta_entry.get())/10
@@ -581,7 +584,8 @@ def run_comparison():
     sf=1;s1=0;s2=0 
     end=2;
     blist=.0000924# 30cm depth coeficcent
-    tf=0;tot=0;totpf=0;failpf=0;
+    tf=0;tot=0;totpf=0;failpf=0;tf_dif=0;tot_dif=0;tf_dist=0;tot_dist=0
+    dif_results=[];dist_results=[]
     print("Comparison started...")
     df1 = pd.read_excel(fn, sheet_name=sn1, header=0)
     df2 = pd.read_excel(fn, sheet_name=sn2, header=0)
@@ -668,8 +672,8 @@ def run_comparison():
                     d2=d2*PDD[i]/df2.loc[(df2['Depth']==dl[i])&(np.abs(df2['Pos'])<=0.3)&(df2['FS']==fsl[j])&(df2['Axis']==scl[k]),'Dose'].mean()
                 
                 
-                ax0.plot(y1,d1,'+r',ms=5)
-                ax0.plot(y2,d2,'.k',ms=6)
+                ax0.plot(y1,d1,'+r',ms=msize)
+                ax0.plot(y2,d2,'.k',ms=msize)
     
                 if gam ==1:
                     
@@ -719,18 +723,24 @@ def run_comparison():
                     difx, ddif = downsample_to_native(difx, ddif, y1)
                     ddx1=np.extract(np.abs(ddif)>dd,difx);ddv1=np.extract(np.abs(ddif)>dd,ddif);
                     ddx2=np.extract(np.abs(ddif)<dd,difx);ddv2=np.extract(np.abs(ddif)<dd,ddif);
-                    #ax0=plt.subplot(gs[0])
+                    tf_dif += len(ddx1)
+                    tot_dif += len(ddif)
+                    fs_dif_pr = 100 * (len(ddif) - len(ddx1)) / len(ddif) if len(ddif) > 0 else 0.0
+                    dif_results.append((fsl[j], len(ddx1), len(ddif), fs_dif_pr))
                     ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
-                    #ax1=fig.add_subplot(gs[1],sharex=ax0)
                     ax1.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
-                    ax1.plot(ddx1,ddv1,'.r')
-                    ax1.plot(ddx2,ddv2,'.g')
-                    ax1.set_ylabel('Dose Difference: ')
+                    ax1.plot(ddx1,ddv1*100,'.r',ms=msize)
+                    ax1.plot(ddx2,ddv2*100,'.g',ms=msize)
+                    ax1.set_ylabel('Dose Difference [%]')
                 if dist ==1:
                     dtax, dtav= dtafunc(y1,d1,y2,d2,dta)
                     dtax, dtav = downsample_to_native(dtax, dtav, y1)
                     dtax1=np.extract(dtav>dta,dtax);dtav1=np.extract(dtav>dta,dtav);
                     dtax2=np.extract(dtav<dta,dtax);dtav2=np.extract(dtav<dta,dtav);
+                    tf_dist += len(dtax1)
+                    tot_dist += len(dtav)
+                    fs_dist_pr = 100 * (len(dtav) - len(dtax1)) / len(dtav) if len(dtav) > 0 else 0.0
+                    dist_results.append((fsl[j], len(dtax1), len(dtav), fs_dist_pr))
                     #ax0=plt.subplot(gs[0])
                     ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
                     #ax1=fig.add_subplot(gs[1],sharex=ax0)
@@ -993,6 +1003,36 @@ def run_comparison():
             report_text = buf.getvalue()
             print(report_text)
 
+    if dif == 1:
+        pr_dif = (tot_dif - tf_dif) / tot_dif * 100 if tot_dif > 0 else 0.0
+        header = "Field Size [cm] | Fails / Total | Pass Rate [%]"
+        sep = "-" * len(header)
+        print("\nDose Difference Analysis Results")
+        print(f"Criteria: {dd*100:.1f}%")
+        print(sep); print(header); print(sep)
+        for fs_val, fails, total, pr in dif_results:
+            print(f"{fs_val:<15.1f} | {fails:>5}/{total:<7} | {pr:>12.2f}")
+        print(sep)
+        print(f"{'Overall':<15} | {tf_dif:>5}/{tot_dif:<7} | {pr_dif:>12.2f}")
+        ax1.set_xlabel(
+            f'Points outside {dd*100:.1f}%  {tf_dif}/{tot_dif}  Pass Rate: {pr_dif:.2f}%'
+        )
+
+    if dist == 1:
+        dist_prtot = 100 * (tot_dist - tf_dist) / tot_dist if tot_dist > 0 else 0.0
+        header = "Field Size [cm] | Fails / Total | Pass Rate [%]"
+        sep = "-" * len(header)
+        print("\nDTA Analysis Results")
+        print(f"Criteria: {dta*10:.1f} mm")
+        print(sep); print(header); print(sep)
+        for fs_val, fails, total, pr in dist_results:
+            print(f"{fs_val:<15.1f} | {fails:>5}/{total:<7} | {pr:>12.2f}")
+        print(sep)
+        print(f"{'Overall':<15} | {tf_dist:>5}/{tot_dist:<7} | {dist_prtot:>12.2f}")
+        ax1.set_xlabel(
+            f'Points outside {dta*10:.1f} mm : {tf_dist}/{tot_dist}  Pass Rate: {dist_prtot:.2f}%'
+        )
+
     if mppg == 1:
         _, _, _, _, _, overall = agg_mppg.build_matrix()
         tf_mppg  = agg_mppg.total - agg_mppg.total_pass   # fails
@@ -1223,6 +1263,15 @@ ttk.Label(sheet_frame, text="Select Sheet 2:").grid(row=1, column=0, sticky="w")
 sheet2_combo = ttk.Combobox(sheet_frame, width=30)
 sheet2_combo.grid(row=1, column=1, padx=5)
 
+def swap_sheets():
+    s1 = sheet1_combo.get()
+    s2 = sheet2_combo.get()
+    sheet1_combo.set(s2)
+    sheet2_combo.set(s1)
+    preload_two_sheets()
+
+ttk.Button(sheet_frame, text="Swap \u21c5", command=swap_sheets).grid(row=0, column=2, rowspan=2, padx=5)
+
 # Data Selection Frame
 data_selection_frame = ttk.LabelFrame(content, text="Data Selection", padding="10")
 data_selection_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
@@ -1333,6 +1382,10 @@ root.after(0, lambda: diag_factor_var.set("0.80"))
 
 ttk.Checkbutton(processing_frame, text="Smooth", variable=smooth_var).grid(row=5, column=0, sticky="w")
 ttk.Checkbutton(processing_frame, text="Scale", variable=scale_var).grid(row=6, column=0, sticky="w")
+ttk.Label(processing_frame, text="Marker size:").grid(row=7, column=0, sticky="w")
+marker_size_entry = ttk.Entry(processing_frame, width=6)
+marker_size_entry.grid(row=7, column=1, sticky="w", padx=5)
+marker_size_entry.insert(0, "6")
 
 # Criteria frame
 criteria_frame = ttk.LabelFrame(content, text="Dose Difference and DTA Criteria Settings: Default:1% and 1mm", padding="10")

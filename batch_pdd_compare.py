@@ -57,7 +57,9 @@ DEPTH_SHIFT2  = 0.0           # depth shift for sheet 2 [cm]
 CUTOFF_DEPTH  = 0.1           # discard points shallower than this [cm]; GUI uses 0.1 cm
 CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 0.48 cm
 CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
-MARKER_SIZE   = 6             # plot marker size
+MARKER_SIZE   = 4             # plot marker size
+SCALE_TARGET  = 0             # 0=none, 1=scale curve1, 2=scale curve2, 3=scale both
+SCALE_FACTOR  = 1.00          # multiplier applied after normalization
 DPI           = 600           # figure output resolution
 SAVE_FIGURES  = False          # set False to skip figure generation (faster, stats only)
 
@@ -240,6 +242,12 @@ def run_one_file(xlsx_path, energy_label):
             d1 = apply_detector_convolution(y1, d1, CONV_FWHM_CM)
         if CONV_TARGET in ('curve2', 'both'):
             d2 = apply_detector_convolution(y2, d2, CONV_FWHM_CM)
+
+        # ── profile scaling (after normalization) ─────
+        if SCALE_TARGET in (1, 3):
+            d1 = d1 * SCALE_FACTOR
+        if SCALE_TARGET in (2, 3):
+            d2 = d2 * SCALE_FACTOR
 
         # ── plot curves ───────────────────
         ax0.plot(y1, d1, '+r', ms=MARKER_SIZE)

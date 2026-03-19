@@ -522,8 +522,8 @@ def run_comparison():
     cent = int(cent_combo.get())
     smooth = int(smooth_combo.get())
     conv= int(conv_combo.get())
-    scale = scale_var.get()
     norm = int(norm_combo.get())
+    plot_pdd = plot_pdd_var.get()
     
     
    
@@ -668,12 +668,18 @@ def run_comparison():
                 
              
                 
-                if norm ==1:# Normalize to +/- 3mm of CAX
-                    d1=d1/df1.loc[(df1['Depth']==dl[i])&(np.abs(df1['Pos'])<=0.3) & (df1['FS']==fsl[j])&(df1['Axis']==scl[k]),'Dose'].mean()
-                    d2=d2/df2.loc[(df2['Depth']==dl[i])&(np.abs(df2['Pos'])<=0.3)&(df2['FS']==fsl[j])&(df2['Axis']==scl[k]),'Dose'].mean()
-                if norm ==2:# Normalize to +/- 3mm of CAX and scale by PDD as function of depth.
-                    d1=d1*PDD[i]/df1.loc[(df1['Depth']==dl[i])&(np.abs(df1['Pos'])<=0.3) & (df1['FS']==fsl[j])&(df1['Axis']==scl[k]),'Dose'].mean()
-                    d2=d2*PDD[i]/df2.loc[(df2['Depth']==dl[i])&(np.abs(df2['Pos'])<=0.3)&(df2['FS']==fsl[j])&(df2['Axis']==scl[k]),'Dose'].mean()
+                # analysis copies — always PDD-free so 1% = 1% of CAX
+                d1_analysis = d1; d2_analysis = d2
+                if norm ==1:# Normalize to CAX
+                    d1_analysis=d1/df1.loc[(df1['Depth']==dl[i])&(np.abs(df1['Pos'])<=0.3) & (df1['FS']==fsl[j])&(df1['Axis']==scl[k]),'Dose'].mean()
+                    d2_analysis=d2/df2.loc[(df2['Depth']==dl[i])&(np.abs(df2['Pos'])<=0.3)&(df2['FS']==fsl[j])&(df2['Axis']==scl[k]),'Dose'].mean()
+                if norm ==2:# Normalize each profile to its own Dmax
+                    d1_analysis=d1/np.max(d1); d2_analysis=d2/np.max(d2)
+                # apply PDD scaling for plotting only
+                if plot_pdd:
+                    d1=d1_analysis*PDD[i]; d2=d2_analysis*PDD[i]
+                else:
+                    d1=d1_analysis; d2=d2_analysis
                 
                 
                 ax0.plot(y1,d1,'+r',ms=msize)
@@ -681,7 +687,7 @@ def run_comparison():
     
                 if gam ==1:
                     
-                    gx , gv = g(y1,d1,y2,d2,dd,dta,1,0,.01);# norm 1 is to central 5 pixel,norm 2 is to dmax, 0 threshold InterpThreshold=0.01
+                    gx , gv = g(y1,d1_analysis,y2,d2_analysis,dd,dta,1,0,.01);# norm 1 is to central 5 pixel,norm 2 is to dmax, 0 threshold InterpThreshold=0.01
                     # --- NEW: per-profile pass/total and add to aggregator ---
                     #down sample to native input
                     gx, gv = downsample_to_native(gx, gv, y1)
@@ -723,7 +729,7 @@ def run_comparison():
                     #print(pr,prtot,gvmean,gvmax,fsl[j],dl[i],scl[k])
     
                 if dif ==1:
-                    difx, ddif= dosedif(y1,d1,y2,d2,1)
+                    difx, ddif= dosedif(y1,d1_analysis,y2,d2_analysis,0)
                     difx, ddif = downsample_to_native(difx, ddif, y1)
                     ddx1=np.extract(np.abs(ddif)>dd,difx);ddv1=np.extract(np.abs(ddif)>dd,ddif);
                     ddx2=np.extract(np.abs(ddif)<dd,difx);ddv2=np.extract(np.abs(ddif)<dd,ddif);
@@ -737,7 +743,7 @@ def run_comparison():
                     ax1.plot(ddx2,ddv2*100,'.g',ms=msize)
                     ax1.set_ylabel('Dose Difference [%]')
                 if dist ==1:
-                    dtax, dtav= dtafunc(y1,d1,y2,d2,dta)
+                    dtax, dtav= dtafunc(y1,d1_analysis,y2,d2_analysis,dta)
                     dtax, dtav = downsample_to_native(dtax, dtav, y1)
                     dtax1=np.extract(dtav>dta,dtax);dtav1=np.extract(dtav>dta,dtav);
                     dtax2=np.extract(dtav<dta,dtax);dtav2=np.extract(dtav<dta,dtav);
@@ -753,8 +759,8 @@ def run_comparison():
                     ax1.plot(dtax2,dtav2,'.g')
                     ax1.set_ylabel('DTA [cm]: ')
                 if comp ==1:
-                    dtax, dtav= dtafunc(y1,d1,y2,d2,dta)
-                    difx, difv= dosedif(y1,d1,y2,d2,1)
+                    dtax, dtav= dtafunc(y1,d1_analysis,y2,d2_analysis,dta)
+                    difx, difv= dosedif(y1,d1_analysis,y2,d2_analysis,0)
                     #resample to input data resolution
                     dtax, dtav = downsample_to_native(dtax, dtav, y1)
                     difx, difv = downsample_to_native(difx, difv, y1)
@@ -795,8 +801,8 @@ def run_comparison():
                         ax2.plot(difx[n],difv[n]*100,'.r',ms=msize)
                 if mppg == 1:
                     # --- metrics ---
-                    dtax, dtav = dtafunc(y1, d1, y2, d2, dta)          # DTA (cm)
-                    difx, difv = dosedif(y1, d1, y2, d2, 1)            # ΔDose (fraction)
+                    dtax, dtav = dtafunc(y1, d1_analysis, y2, d2_analysis, dta)          # DTA (cm)
+                    difx, difv = dosedif(y1, d1_analysis, y2, d2_analysis, 0)            # ΔDose (fraction)
                     #downsample to native resolution
                     dtax, dtav = downsample_to_native(dtax, dtav, y1)
                     difx, difv = downsample_to_native(difx, difv, y1)
@@ -1355,8 +1361,8 @@ ttk.Label(processing_frame, text="0: No centering, 1: Center profile 1, 2: Cente
 ttk.Label(processing_frame, text="Normalization:").grid(row=1, column=0, sticky="w")
 norm_combo = ttk.Combobox(processing_frame, values=[0, 1, 2], width=5)
 norm_combo.grid(row=1, column=1, padx=5)
-norm_combo.set(2)
-ttk.Label(processing_frame, text="0: No norm, 1: Normalize to AVG CAX +/- 3mm, 2: Normalize to PDD").grid(row=1, column=2, sticky="w")
+norm_combo.set(1)
+ttk.Label(processing_frame, text="0: No norm, 1: Normalize to CAX, 2: Normalize to Dmax").grid(row=1, column=2, sticky="w")
 
 ttk.Label(processing_frame, text="Smooth:").grid(row=2, column=0, sticky="w")
 smooth_combo = ttk.Combobox(processing_frame, values=[0, 1, 2, 3], width=5)
@@ -1370,7 +1376,6 @@ conv_combo.grid(row=3, column=1, padx=5)
 conv_combo.set(0)
 ttk.Label(processing_frame, text="0: No convolution, 1: Convolve profile 1, 2: Convolve profile 2 3: Convolve both").grid(row=3, column=2, sticky="w")
 
-scale_var = tk.IntVar(value=0)
 # Detector diameter input (cm)
 det_diam_var = tk.StringVar(master=root)   # bind to current root explicitly
 ttk.Label(processing_frame, text="Detector diameter (cm):").grid(row=4, column=0, sticky="w", padx=0)
@@ -1389,11 +1394,12 @@ diag_factor_entry.grid(row=5, column=1, sticky="w", padx=5)
 # default to 0.90
 root.after(0, lambda: diag_factor_var.set("0.80"))
 
-ttk.Checkbutton(processing_frame, text="Scale", variable=scale_var).grid(row=6, column=0, sticky="w")
+plot_pdd_var = tk.IntVar(value=1)
+ttk.Checkbutton(processing_frame, text="Scale plot by PDD", variable=plot_pdd_var).grid(row=6, column=0, sticky="w")
 ttk.Label(processing_frame, text="Marker size:").grid(row=7, column=0, sticky="w")
 marker_size_entry = ttk.Entry(processing_frame, width=6)
 marker_size_entry.grid(row=7, column=1, sticky="w", padx=5)
-marker_size_entry.insert(0, "6")
+marker_size_entry.insert(0, "4")
 
 # Criteria frame
 criteria_frame = ttk.LabelFrame(content, text="Dose Difference and DTA Criteria Settings: Default:1% and 1mm", padding="10")

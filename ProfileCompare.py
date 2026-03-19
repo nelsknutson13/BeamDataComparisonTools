@@ -520,7 +520,7 @@ def run_comparison():
         plot = 1
     # Set data processing variables based on user selection
     cent = int(cent_combo.get())
-    smooth = smooth_var.get()
+    smooth = int(smooth_combo.get())
     conv= int(conv_combo.get())
     scale = scale_var.get()
     norm = int(norm_combo.get())
@@ -657,7 +657,11 @@ def run_comparison():
                                         
                     d1 = gaussian_filter1d(d1, sigma=sigma_data_points)
                     d2 = gaussian_filter1d(d2, sigma=sigma_data_points)
-                if smooth ==1 :
+                if smooth == 1:
+                    d1=sig.savgol_filter(d1,3,1)
+                if smooth == 2:
+                    d2=sig.savgol_filter(d2,3,1)
+                if smooth == 3:
                     d1=sig.savgol_filter(d1,3,1)
                     d2=sig.savgol_filter(d2,3,1)
              
@@ -1354,33 +1358,37 @@ norm_combo.grid(row=1, column=1, padx=5)
 norm_combo.set(2)
 ttk.Label(processing_frame, text="0: No norm, 1: Normalize to AVG CAX +/- 3mm, 2: Normalize to PDD").grid(row=1, column=2, sticky="w")
 
-ttk.Label(processing_frame, text=" Dectector Convolution:").grid(row=2, column=0, sticky="w")
-conv_combo = ttk.Combobox(processing_frame, values=[0, 1, 2, 3], width=5)
-conv_combo.grid(row=2, column=1, padx=5)
-conv_combo.set(0)
-ttk.Label(processing_frame, text="0: No convolution, 1: Convolve profile 1, 2: Convolve profile 2 3: Convolve both").grid(row=2, column=2, sticky="w")
+ttk.Label(processing_frame, text="Smooth:").grid(row=2, column=0, sticky="w")
+smooth_combo = ttk.Combobox(processing_frame, values=[0, 1, 2, 3], width=5)
+smooth_combo.grid(row=2, column=1, padx=5)
+smooth_combo.set(0)
+ttk.Label(processing_frame, text="0: No smoothing, 1: Smooth profile 1, 2: Smooth profile 2, 3: Smooth both").grid(row=2, column=2, sticky="w")
 
-smooth_var = tk.IntVar(value=0)
+ttk.Label(processing_frame, text=" Dectector Convolution:").grid(row=3, column=0, sticky="w")
+conv_combo = ttk.Combobox(processing_frame, values=[0, 1, 2, 3], width=5)
+conv_combo.grid(row=3, column=1, padx=5)
+conv_combo.set(0)
+ttk.Label(processing_frame, text="0: No convolution, 1: Convolve profile 1, 2: Convolve profile 2 3: Convolve both").grid(row=3, column=2, sticky="w")
+
 scale_var = tk.IntVar(value=0)
 # Detector diameter input (cm)
 det_diam_var = tk.StringVar(master=root)   # bind to current root explicitly
-ttk.Label(processing_frame, text="Detector diameter (cm):").grid(row=3, column=0, sticky="w", padx=0)
+ttk.Label(processing_frame, text="Detector diameter (cm):").grid(row=4, column=0, sticky="w", padx=0)
 
 det_diam_entry = ttk.Entry(processing_frame, textvariable=det_diam_var, width=6)
-det_diam_entry.grid(row=3, column=1, sticky="w", padx=5)
+det_diam_entry.grid(row=4, column=1, sticky="w", padx=5)
 
 # ensure default text appears even in quirky environments
 root.after(0, lambda: det_diam_var.set("0.6"))
 # Diagonal Field Size clipping factor (user input for DIAG_Factor)
 diag_factor_var = tk.StringVar(master=root)
-ttk.Label(processing_frame, text="Diagonal Field Size clipping factor:").grid(row=4, column=0, sticky="w", padx=0)
+ttk.Label(processing_frame, text="Diagonal Field Size clipping factor:").grid(row=5, column=0, sticky="w", padx=0)
 diag_factor_entry = ttk.Entry(processing_frame, textvariable=diag_factor_var, width=6)
-diag_factor_entry.grid(row=4, column=1, sticky="w", padx=5)
+diag_factor_entry.grid(row=5, column=1, sticky="w", padx=5)
 
 # default to 0.90
 root.after(0, lambda: diag_factor_var.set("0.80"))
 
-ttk.Checkbutton(processing_frame, text="Smooth", variable=smooth_var).grid(row=5, column=0, sticky="w")
 ttk.Checkbutton(processing_frame, text="Scale", variable=scale_var).grid(row=6, column=0, sticky="w")
 ttk.Label(processing_frame, text="Marker size:").grid(row=7, column=0, sticky="w")
 marker_size_entry = ttk.Entry(processing_frame, width=6)

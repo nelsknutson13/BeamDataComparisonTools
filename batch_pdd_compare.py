@@ -393,7 +393,9 @@ def run_one_file(xlsx_path, energy_label):
         fig.suptitle(f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}', fontsize=14)
         fig.tight_layout(rect=[0, 0, 1, 0.95])
         fig.subplots_adjust(hspace=0.45)
-        out_png = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{safe_tag}.png")
+        s1 = SHEET1_NAME.replace(' ', '')
+        s2 = SHEET2_NAME.replace(' ', '')
+        out_png = os.path.join(RESULTS_DIR, f"{s1}_{s2}_{energy_label}_{safe_tag}.png")
         fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
         plt.close(fig)
         print(f"  Figure saved: {out_png}")
@@ -407,7 +409,8 @@ def main():
     from datetime import datetime
     os.makedirs(RESULTS_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    summary_csv = os.path.join(RESULTS_DIR, f"pdd_comparison_summary_{timestamp}.csv")
+    s1 = SHEET1_NAME.replace(' ', ''); s2 = SHEET2_NAME.replace(' ', '')
+    summary_csv = os.path.join(RESULTS_DIR, f"{s1}_{s2}_pdd_summary_{timestamp}.csv")
     all_results = []
 
     if FILE_MODE == 'flat':

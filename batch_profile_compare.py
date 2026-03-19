@@ -32,12 +32,12 @@ FILE_MODE = 'flat'
 # 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
 #                  parsed from each filename.
 
-BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data\Test"
+BASE_PATH = r"P:\Knutson\WC2 scans"
 
 FILE_FILTER = '*Profile*.xlsx'    # glob used in 'flat' mode only
 
-SHEET1_NAME = "SN 21"             # reference / measured sheet name
-SHEET2_NAME = "TPS SN 21"         # comparison sheet name
+SHEET1_NAME = "BJWC2 Profiles"             # reference / measured sheet name
+SHEET2_NAME = "AXB Profiles"         # comparison sheet name
 
 # Data selection — 'all' means use all common values found in each file
 FIELD_SIZES = 'all'                # e.g. [5.0, 10.0, 20.0]  or  'all'
@@ -53,7 +53,7 @@ DTA_CRITERIA  = 0.2                # DTA threshold [cm]  (2 mm)
 # Normalization
 NORM = 1
 # 0 = no normalization (raw dose units)
-# 1 = normalize each profile to its CAX ±3 mm mean  (Off Axis Ratio)
+# 1 = normalize each profile to its CAX  (Off Axis Ratio)
 # 2 = normalize each profile to its own Dmax
 PLOT_PDD_SCALE = True
 CAX_WINDOW_MM = 0
@@ -689,7 +689,9 @@ def run_one_file(xlsx_path, energy_label):
         )
         fig.tight_layout(rect=[0, 0, 1, 0.95])
         fig.subplots_adjust(hspace=0.45)
-        out_png = os.path.join(RESULTS_DIR, f"{energy_label}_{stem}_{safe_tag}.png")
+        s1 = SHEET1_NAME.replace(' ', '')
+        s2 = SHEET2_NAME.replace(' ', '')
+        out_png = os.path.join(RESULTS_DIR, f"{s1}_{s2}_{energy_label}_{safe_tag}.png")
         fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
         plt.close(fig)
         print(f"  Figure saved: {out_png}")
@@ -703,7 +705,8 @@ def main():
     from datetime import datetime
     os.makedirs(RESULTS_DIR, exist_ok=True)
     timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
-    summary_xlsx = os.path.join(RESULTS_DIR, f"profile_comparison_summary_{timestamp}.xlsx")
+    s1 = SHEET1_NAME.replace(' ', ''); s2 = SHEET2_NAME.replace(' ', '')
+    summary_xlsx = os.path.join(RESULTS_DIR, f"{s1}_{s2}_profile_summary_{timestamp}.xlsx")
     all_results = []
 
     # ── discover files ────────────────────────────────────────────────────────

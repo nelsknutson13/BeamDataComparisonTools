@@ -56,6 +56,9 @@ NORM = 1
 # 1 = normalize each profile to its CAX ±3 mm mean  (Off Axis Ratio)
 # 2 = normalize each profile to its own Dmax
 PLOT_PDD_SCALE = True
+CAX_WINDOW_MM = 0
+# 0 = use nearest point to axis (recommended for small fields / sparse data)
+# N = average within ±N mm of axis
 # True  = scale the plotted curves by PDD(depth) for visual absolute-dose display
 # False = plot in the same units as the normalization above
 
@@ -373,8 +376,12 @@ def run_one_file(xlsx_path, energy_label):
                 # d1_analysis/d2_analysis are always PDD-free so 1% = 1% of CAX
                 d1_analysis = d1; d2_analysis = d2
                 if NORM == 1:
-                    cax1 = d1[np.abs(y1) <= 0.3].mean()
-                    cax2 = d2[np.abs(y2) <= 0.3].mean()
+                    if CAX_WINDOW_MM == 0:
+                        cax1 = float(d1.iloc[np.abs(np.asarray(y1)).argmin()])
+                        cax2 = float(d2.iloc[np.abs(np.asarray(y2)).argmin()])
+                    else:
+                        cax1 = float(d1[np.abs(np.asarray(y1)) <= CAX_WINDOW_MM / 10.0].mean())
+                        cax2 = float(d2[np.abs(np.asarray(y2)) <= CAX_WINDOW_MM / 10.0].mean())
                     if cax1 > 0:
                         d1_analysis = d1 / cax1
                     if cax2 > 0:

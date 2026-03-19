@@ -9,8 +9,12 @@ Parameters are set in the CONFIG section below.
 """
 
 import os
+import io
 import glob
 import re
+import contextlib
+import platform
+import subprocess
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -61,6 +65,8 @@ CAX_WINDOW_MM = 0
 # N = average within ±N mm of axis
 SCALE_TARGET = 0       # 0=none, 1=scale profile 1, 2=scale profile 2, 3=scale both
 SCALE_FACTOR = 1.00    # multiplier applied after normalization
+SAVE_REPORT  = True    # generate multi-page PDF report (summary + per-energy figures)
+REPORT_DPI   = 150     # DPI for PDF report pages (lower = smaller file, faster to open)
 # True  = scale the plotted curves by PDD(depth) for visual absolute-dose display
 # False = plot in the same units as the normalization above
 
@@ -87,7 +93,7 @@ XY_LARGEST_FS_ONLY = True
 
 MARKER_SIZE  = 4                   # plot marker size
 DPI          = 600                 # figure output resolution
-SAVE_FIGURES = True                # set False to skip figure generation (faster, stats only)
+SAVE_FIGURES = False                # set False to skip figure generation (faster, stats only)
 
 RESULTS_DIR = os.path.join(BASE_PATH, "Results")
 # ─────────────────────────────────────────────
@@ -243,7 +249,8 @@ def run_one_file(xlsx_path, energy_label):
                       else 'Dose (raw units)')
 
     # ── single figure for all axes overlaid (matches GUI layout) ──────────
-    if SAVE_FIGURES:
+    fig = None
+    if SAVE_FIGURES or SAVE_REPORT:
         if ANALYSIS == 'mppg':
             plt.rcParams.update({'font.size': 22})
             fig, (ax0, ax1, ax2, ax3) = plt.subplots(
@@ -693,10 +700,13 @@ def run_one_file(xlsx_path, energy_label):
         s2 = SHEET2_NAME.replace(' ', '')
         out_png = os.path.join(RESULTS_DIR, f"{s1}_{s2}_{energy_label}_{safe_tag}.png")
         fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
-        plt.close(fig)
         print(f"  Figure saved: {out_png}")
 
-    return all_results, skipped
+    if not SAVE_REPORT:
+        plt.close(fig)
+        fig = None
+
+    return all_results, skipped, fig
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -742,10 +752,13 @@ def main():
 
     # ── process each file ─────────────────────────────────────────────────────
     all_skipped = []
+    all_figs = []
     for xlsx_path, energy_label in file_pairs:
-        results, skipped = run_one_file(xlsx_path, energy_label)
+        results, skipped, fig = run_one_file(xlsx_path, energy_label)
         all_results.extend(results)
         all_skipped.extend(skipped)
+        if fig is not None:
+            all_figs.append((energy_label, fig))
 
     # ── save summary CSV ──────────────────────────────────────────────────────
     if not all_results:
@@ -789,6 +802,7 @@ def main():
 
     # ── per-energy Depth × FS matrices ────────────────────────────────────────
     all_matrix_blocks = []   # list of (energy, df_matrix) for CSV output
+    energy_texts = {}        # energy -> captured summary text for PDF
 
     for e in energy_order:
         de = df_out[df_out['Energy'] == e]
@@ -819,10 +833,14 @@ def main():
         df_mat = pd.DataFrame(rows)
         all_matrix_blocks.append((e, df_mat))
 
-        print(f"\n{'='*60}")
-        print(f"  {e}  —  Depth x FS pass rate  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]")
-        print(f"{'='*60}")
-        print(df_mat.to_string(index=False))
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            print(f"\n{'='*60}")
+            print(f"  {e}  —  Depth x FS pass rate  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]")
+            print(f"{'='*60}")
+            print(df_mat.to_string(index=False))
+        energy_texts[e] = _buf.getvalue()
+        print(energy_texts[e], end='')
 
     # ── skipped scan summary ──────────────────────────────────────────────────
     print(f"\n{'='*60}")
@@ -867,6 +885,51 @@ def main():
         fallback = summary_xlsx.replace('.xlsx', f'_retry_{timestamp}.xlsx')
         _write_xlsx(fallback)
         print(f"\nFile locked (close it in Excel) — saved fallback: {fallback}")
+
+    # ── PDF report ────────────────────────────────────────────────────────────
+    if SAVE_REPORT and all_figs:
+        from reportlab.lib.pagesizes import letter as rl_letter
+        from reportlab.pdfgen import canvas as rl_canvas
+        from reportlab.lib.utils import ImageReader
+
+        pdf_path = summary_xlsx.replace('.xlsx', '.pdf')
+        rl_w, rl_h = rl_letter
+        c = rl_canvas.Canvas(pdf_path, pagesize=rl_letter)
+
+        for energy_label, fig in all_figs:
+            etext = energy_texts.get(energy_label, f'  {energy_label}\n')
+            # — text block (top of page) —
+            c.setFont("Courier", 9)
+            y = rl_h - 36
+            for line in etext.split('\n'):
+                c.drawString(36, y, line)
+                y -= 12
+                if y < rl_h * 0.45:
+                    break
+            # — figure (below text) —
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=REPORT_DPI, bbox_inches='tight')
+            buf.seek(0)
+            img = ImageReader(buf)
+            iw, ih = img.getSize()
+            fig_w = rl_w - 72
+            fig_h = fig_w * (ih / float(iw))
+            fig_top = y - 8
+            if fig_top - fig_h < 18:
+                fig_h = max(fig_top - 18, 10)
+                fig_w = fig_h * (iw / float(ih))
+            c.drawImage(img, 36, fig_top - fig_h, width=fig_w, height=fig_h)
+            plt.close(fig)
+            c.showPage()
+
+        c.save()
+        print(f"PDF report saved: {pdf_path}")
+        if platform.system() == 'Windows':
+            os.startfile(pdf_path)
+        elif platform.system() == 'Darwin':
+            subprocess.call(['open', pdf_path])
+        else:
+            subprocess.call(['xdg-open', pdf_path])
 
 
 if __name__ == '__main__':

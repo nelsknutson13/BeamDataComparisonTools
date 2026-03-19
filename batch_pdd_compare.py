@@ -9,7 +9,11 @@ Parameters are set in the CONFIG section below.
 """
 
 import os
+import io
 import glob
+import contextlib
+import platform
+import subprocess
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -61,7 +65,9 @@ MARKER_SIZE   = 4             # plot marker size
 SCALE_TARGET  = 0             # 0=none, 1=scale curve1, 2=scale curve2, 3=scale both
 SCALE_FACTOR  = 1.00          # multiplier applied after normalization
 DPI           = 600           # figure output resolution
-SAVE_FIGURES  = False          # set False to skip figure generation (faster, stats only)
+SAVE_FIGURES  = True           # set False to skip individual PNG figure generation
+SAVE_REPORT   = True           # generate multi-page PDF report (summary + per-energy figures)
+REPORT_DPI    = 150            # DPI for PDF report pages (lower = smaller file, faster to open)
 
 RESULTS_DIR = os.path.join(BASE_PATH, "Results")
 # ─────────────────────────────────────────────
@@ -397,10 +403,13 @@ def run_one_file(xlsx_path, energy_label):
         s2 = SHEET2_NAME.replace(' ', '')
         out_png = os.path.join(RESULTS_DIR, f"{s1}_{s2}_{energy_label}_{safe_tag}.png")
         fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
-        plt.close(fig)
         print(f"  Figure saved: {out_png}")
 
-    return results
+    if not SAVE_REPORT:
+        plt.close(fig)
+        fig = None
+
+    return results, fig
 
 
 # ── main ─────────────────────────────────────
@@ -442,9 +451,16 @@ def main():
                 continue
             file_pairs.append((pdd_files[0], energy_label))
 
+    all_figs = []
     for xlsx_path, energy_label in file_pairs:
-        results = run_one_file(xlsx_path, energy_label)
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            results, fig = run_one_file(xlsx_path, energy_label)
+        energy_text = _buf.getvalue()
+        print(energy_text, end='')
         all_results.extend(results)
+        if fig is not None:
+            all_figs.append((energy_label, energy_text, fig))
 
     # ── save summary CSV ─────────────────────
     if all_results:
@@ -519,6 +535,50 @@ def main():
         print(f"  PDD pass rate  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]")
         print(f"{'='*60}")
         print(df_table.to_string(index=False))
+
+        # ── PDF report ────────────────────────────────────────────────────────
+        if SAVE_REPORT and all_figs:
+            from reportlab.lib.pagesizes import letter as rl_letter
+            from reportlab.pdfgen import canvas as rl_canvas
+            from reportlab.lib.utils import ImageReader
+
+            pdf_path = summary_csv.replace('.csv', '.pdf')
+            rl_w, rl_h = rl_letter
+            c = rl_canvas.Canvas(pdf_path, pagesize=rl_letter)
+
+            for energy_label, energy_text, fig in all_figs:
+                # — text block (top of page) —
+                c.setFont("Courier", 9)
+                y = rl_h - 36
+                for line in energy_text.split('\n'):
+                    c.drawString(36, y, line)
+                    y -= 12
+                    if y < rl_h * 0.45:
+                        break
+                # — figure (below text) —
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', dpi=REPORT_DPI, bbox_inches='tight')
+                buf.seek(0)
+                img = ImageReader(buf)
+                iw, ih = img.getSize()
+                fig_w = rl_w - 72
+                fig_h = fig_w * (ih / float(iw))
+                fig_top = y - 8
+                if fig_top - fig_h < 18:
+                    fig_h = max(fig_top - 18, 10)
+                    fig_w = fig_h * (iw / float(ih))
+                c.drawImage(img, 36, fig_top - fig_h, width=fig_w, height=fig_h)
+                plt.close(fig)
+                c.showPage()
+
+            c.save()
+            print(f"PDF report saved: {pdf_path}")
+            if platform.system() == 'Windows':
+                os.startfile(pdf_path)
+            elif platform.system() == 'Darwin':
+                subprocess.call(['open', pdf_path])
+            else:
+                subprocess.call(['xdg-open', pdf_path])
     else:
         print("\nNo results to save.")
 

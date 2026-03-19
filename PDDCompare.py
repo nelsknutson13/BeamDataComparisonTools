@@ -650,8 +650,13 @@ def run_comparison():
     smooth_option = smooth_combo.get()
     
     norm = int(norm_combo.get())
-    
-     
+    scale_profile = int(scale_profile_combo.get())
+    try:
+        scale_factor = float(scale_factor_entry.get())
+    except ValueError:
+        scale_factor = 1.0
+
+
     if comp ==1 or gam==1:
         plt.rcParams.update({'font.size': 20})
         gs = gridspec.GridSpec(3,1,height_ratios=[1.5,1,1])
@@ -824,7 +829,12 @@ def run_comparison():
         
         # If "None", do nothing
 
-       
+        # Profile scaling (after normalization)
+        if scale_profile in (1, 3):
+            d1 = d1 * scale_factor
+        if scale_profile in (2, 3):
+            d2 = d2 * scale_factor
+
         ax0.plot(y1,d1,'+r',ms=ms)
         ax0.plot(y2,d2,'.k',ms=ms)  
         if gam ==1:
@@ -1280,16 +1290,28 @@ cutoff_depth_entry = ttk.Entry(processing_frame, width=10)
 cutoff_depth_entry.grid(row=9, column=1, padx=5)
 cutoff_depth_entry.insert(0, 0)
 
-# --- Marker size ---
-ttk.Label(processing_frame, text="Marker Size:").grid(row=10, column=0, sticky="w")
-marker_size_entry = ttk.Entry(processing_frame, width=10)
-marker_size_entry.grid(row=10, column=1, padx=5)
-marker_size_entry.insert(0, "6")
+# --- Profile scaling ---
+ttk.Label(processing_frame, text="Scale profile:").grid(row=10, column=0, sticky="w")
+scale_profile_combo = ttk.Combobox(processing_frame, values=[0, 1, 2, 3], width=5)
+scale_profile_combo.grid(row=10, column=1, padx=5)
+scale_profile_combo.set(0)
+ttk.Label(processing_frame, text="0: None, 1: Scale curve 1, 2: Scale curve 2, 3: Scale both").grid(row=10, column=2, sticky="w")
+ttk.Label(processing_frame, text="Scale factor:").grid(row=11, column=0, sticky="w")
+scale_factor_entry = ttk.Entry(processing_frame, width=10)
+scale_factor_entry.grid(row=11, column=1, padx=5)
+scale_factor_entry.insert(0, "1.00")
 
+# Plotting options frame
+plotting_frame = ttk.LabelFrame(main, text="Plotting Options", padding="10")
+plotting_frame.grid(row=5, column=0, sticky="ew")
+ttk.Label(plotting_frame, text="Marker Size:").grid(row=0, column=0, sticky="w")
+marker_size_entry = ttk.Entry(plotting_frame, width=6)
+marker_size_entry.grid(row=0, column=1, sticky="w", padx=5)
+marker_size_entry.insert(0, "4")
 
 # Criteria frame
 criteria_frame = ttk.LabelFrame(main, text="Dose Difference and DTA Criteria Settings: Default:1% and 1mm", padding="10")
-criteria_frame.grid(row=5, column=0, sticky="ew")
+criteria_frame.grid(row=6, column=0, sticky="ew")
 ttk.Label(criteria_frame, text="Dose Difference (%):").grid(row=0, column=0, sticky="w")
 dd_entry = ttk.Entry(criteria_frame, width=10)
 dd_entry.grid(row=0, column=1, padx=5)
@@ -1301,11 +1323,11 @@ dta_entry.insert(0, "1")
 
 # Buttons
 run_button = ttk.Button(main, text="Run Comparison", command=run_comparison)
-run_button.grid(row=6, column=0, pady=10)
+run_button.grid(row=7, column=0, pady=10)
 savefig_button = ttk.Button(main, text="Save Figure", command=lambda: save_current_figure())
-savefig_button.grid(row=7, column=0, pady=5)
+savefig_button.grid(row=8, column=0, pady=5)
 save_report_button = ttk.Button(main, text="Save Report", command=save_report)
-save_report_button.grid(row=8, column=0, pady=5)
+save_report_button.grid(row=9, column=0, pady=5)
 
 
 # Start the GUI loop

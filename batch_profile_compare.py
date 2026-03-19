@@ -51,10 +51,13 @@ DD_CRITERIA   = 2.0                # dose difference threshold [%]
 DTA_CRITERIA  = 0.2                # DTA threshold [cm]  (2 mm)
 
 # Normalization
-NORM = 2
-# 1 = normalize each profile to its CAX ±3 mm mean  (Off Axis Ratio)
-# 2 = normalize to CAX mean × PDD scale factor  (absolute-dose comparable)
+NORM = 1
 # 0 = no normalization (raw dose units)
+# 1 = normalize each profile to its CAX ±3 mm mean  (Off Axis Ratio)
+# 2 = normalize each profile to its own Dmax
+PLOT_PDD_SCALE = True
+# True  = scale the plotted curves by PDD(depth) for visual absolute-dose display
+# False = plot in the same units as the normalization above
 
 # Profile centering
 CENTER = 3
@@ -77,7 +80,7 @@ MPPG_DIAG_FACTOR = 0.80            # diagonal field size factor (GUI default: 0.
 # XY diagonal scans: only process for the largest field size (matches GUI behavior)
 XY_LARGEST_FS_ONLY = True
 
-MARKER_SIZE  = 2                   # plot marker size
+MARKER_SIZE  = 4                   # plot marker size
 DPI          = 600                 # figure output resolution
 SAVE_FIGURES = True                # set False to skip figure generation (faster, stats only)
 
@@ -367,17 +370,24 @@ def run_one_file(xlsx_path, energy_label):
                     d2 = pd.Series(apply_detector_convolution(y2, d2, CONV_FWHM_CM))
 
                 # ── normalization ──────────────────────────────────────────────
-                if NORM in (1, 2):
+                # d1_analysis/d2_analysis are always PDD-free so 1% = 1% of CAX
+                d1_analysis = d1; d2_analysis = d2
+                if NORM == 1:
                     cax1 = d1[np.abs(y1) <= 0.3].mean()
                     cax2 = d2[np.abs(y2) <= 0.3].mean()
                     if cax1 > 0:
-                        d1 = d1 / cax1
+                        d1_analysis = d1 / cax1
                     if cax2 > 0:
-                        d2 = d2 / cax2
-                    if NORM == 2:
-                        pdd_factor, _ = pdd_lookup_nearest(pdd_energy, depth)
-                        d1 = d1 * pdd_factor
-                        d2 = d2 * pdd_factor
+                        d2_analysis = d2 / cax2
+                elif NORM == 2:
+                    d1_analysis = d1 / d1.max(); d2_analysis = d2 / d2.max()
+                # apply PDD scaling for plotting only
+                if PLOT_PDD_SCALE:
+                    pdd_factor, _ = pdd_lookup_nearest(pdd_energy, depth)
+                    d1 = d1_analysis * pdd_factor
+                    d2 = d2_analysis * pdd_factor
+                else:
+                    d1 = d1_analysis; d2 = d2_analysis
 
                 # ── plot the curves ────────────────────────────────────────────
                 ax0.plot(y1, d1, '+r', ms=MARKER_SIZE)
@@ -389,7 +399,7 @@ def run_one_file(xlsx_path, energy_label):
                 # ── gamma analysis ─────────────────────────────────────────────
                 elif ANALYSIS == 'gam':
                     from gamma import gamma as g
-                    gx, gv = g(y1, d1, y2, d2, dd_frac, dta_cm, 1, 0.01, 0.01)
+                    gx, gv = g(y1, d1_analysis, y2, d2_analysis, dd_frac, dta_cm, 1, 0.01, 0.01)
                     gx, gv = downsample_to_native(gx, gv, y1)
                     gv_a   = np.asarray(gv)
                     valid  = np.isfinite(gv_a)
@@ -416,8 +426,8 @@ def run_one_file(xlsx_path, energy_label):
 
                 # ── composite analysis ─────────────────────────────────────────
                 elif ANALYSIS == 'comp':
-                    dtax, dtav = dtafunc(y1, d1, y2, d2, dta_cm)
-                    difx, difv = dosedif(y1, d1, y2, d2, 1)
+                    dtax, dtav = dtafunc(y1, d1_analysis, y2, d2_analysis, dta_cm)
+                    difx, difv = dosedif(y1, d1_analysis, y2, d2_analysis, 0)
                     dtax, dtav = downsample_to_native(dtax, dtav, y1)
                     difx, difv = downsample_to_native(difx, difv, y1)
                     dtafail  = np.where(np.abs(dtav) > dta_cm)[0]
@@ -449,7 +459,7 @@ def run_one_file(xlsx_path, energy_label):
 
                 # ── dose difference analysis ───────────────────────────────────
                 elif ANALYSIS == 'dif':
-                    difx, difv = dosedif(y1, d1, y2, d2, 1)
+                    difx, difv = dosedif(y1, d1_analysis, y2, d2_analysis, 0)
                     difx, difv = downsample_to_native(difx, difv, y1)
                     ddiffail = np.where(np.abs(difv) > dd_frac)[0]
                     total    = len(difv)
@@ -474,7 +484,7 @@ def run_one_file(xlsx_path, energy_label):
 
                 # ── DTA analysis ───────────────────────────────────────────────
                 elif ANALYSIS == 'dist':
-                    dtax, dtav = dtafunc(y1, d1, y2, d2, dta_cm)
+                    dtax, dtav = dtafunc(y1, d1_analysis, y2, d2_analysis, dta_cm)
                     dtax, dtav = downsample_to_native(dtax, dtav, y1)
                     dtafail  = np.where(np.abs(dtav) > dta_cm)[0]
                     total    = len(dtav)
@@ -503,8 +513,8 @@ def run_one_file(xlsx_path, energy_label):
                     diag    = np.sqrt(2.0 * MPPG_DIAG_FACTOR) if axis in ('XY', 'YX') else 1.0
                     edge    = (fs_f / 2.0) * diag * (ssd_cm + depth) / 100.0
 
-                    dtax, dtav = dtafunc(y1, d1, y2, d2, dta_cm)
-                    difx, difv = dosedif(y1, d1, y2, d2, 1)
+                    dtax, dtav = dtafunc(y1, d1_analysis, y2, d2_analysis, dta_cm)
+                    difx, difv = dosedif(y1, d1_analysis, y2, d2_analysis, 0)
                     dtax, dtav = downsample_to_native(dtax, dtav, y1)
                     difx, difv = downsample_to_native(difx, difv, y1)
                     difv_dmax  = np.asarray(difv) * pdd_factor

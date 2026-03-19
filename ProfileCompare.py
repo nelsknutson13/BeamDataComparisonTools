@@ -528,6 +528,11 @@ def run_comparison():
         cax_window_cm = float(cax_window_entry.get()) / 10.0  # mm → cm
     except ValueError:
         cax_window_cm = 0.0
+    scale_profile = int(scale_profile_combo.get())
+    try:
+        scale_factor = float(scale_factor_entry.get())
+    except ValueError:
+        scale_factor = 1.0
     
     
    
@@ -689,6 +694,11 @@ def run_comparison():
                     d2_analysis = d2 / cax2
                 if norm ==2:# Normalize each profile to its own Dmax
                     d1_analysis=d1/np.max(d1); d2_analysis=d2/np.max(d2)
+                # profile scaling (after norm, independent of normalization)
+                if scale_profile in (1, 3):
+                    d1_analysis = d1_analysis * scale_factor
+                if scale_profile in (2, 3):
+                    d2_analysis = d2_analysis * scale_factor
                 # apply PDD scaling for plotting only
                 if plot_pdd:
                     d1=d1_analysis*PDD[i]; d2=d2_analysis*PDD[i]
@@ -1413,6 +1423,16 @@ cax_window_entry = ttk.Entry(processing_frame, width=6)
 cax_window_entry.grid(row=6, column=1, sticky="w", padx=5)
 cax_window_entry.insert(0, "0")
 ttk.Label(processing_frame, text="0: nearest point, N: avg within ±N mm").grid(row=6, column=2, sticky="w")
+
+ttk.Label(processing_frame, text="Scale profile:").grid(row=7, column=0, sticky="w")
+scale_profile_combo = ttk.Combobox(processing_frame, values=[0, 1, 2, 3], width=5)
+scale_profile_combo.grid(row=7, column=1, padx=5)
+scale_profile_combo.set(0)
+ttk.Label(processing_frame, text="0: None, 1: Scale profile 1, 2: Scale profile 2, 3: Scale both").grid(row=7, column=2, sticky="w")
+ttk.Label(processing_frame, text="Scale factor:").grid(row=8, column=0, sticky="w")
+scale_factor_entry = ttk.Entry(processing_frame, width=6)
+scale_factor_entry.grid(row=8, column=1, sticky="w", padx=5)
+scale_factor_entry.insert(0, "1.00")
 
 # Plotting options frame
 plotting_frame = ttk.LabelFrame(content, text="Plotting Options", padding="10")

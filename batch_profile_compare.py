@@ -59,6 +59,8 @@ PLOT_PDD_SCALE = True
 CAX_WINDOW_MM = 0
 # 0 = use nearest point to axis (recommended for small fields / sparse data)
 # N = average within ±N mm of axis
+SCALE_TARGET = 0       # 0=none, 1=scale profile 1, 2=scale profile 2, 3=scale both
+SCALE_FACTOR = 1.00    # multiplier applied after normalization
 # True  = scale the plotted curves by PDD(depth) for visual absolute-dose display
 # False = plot in the same units as the normalization above
 
@@ -388,6 +390,11 @@ def run_one_file(xlsx_path, energy_label):
                         d2_analysis = d2 / cax2
                 elif NORM == 2:
                     d1_analysis = d1 / d1.max(); d2_analysis = d2 / d2.max()
+                # profile scaling (after norm, independent of normalization)
+                if SCALE_TARGET in (1, 3):
+                    d1_analysis = d1_analysis * SCALE_FACTOR
+                if SCALE_TARGET in (2, 3):
+                    d2_analysis = d2_analysis * SCALE_FACTOR
                 # apply PDD scaling for plotting only
                 if PLOT_PDD_SCALE:
                     pdd_factor, _ = pdd_lookup_nearest(pdd_energy, depth)

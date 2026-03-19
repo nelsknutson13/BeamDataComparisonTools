@@ -524,6 +524,10 @@ def run_comparison():
     conv= int(conv_combo.get())
     norm = int(norm_combo.get())
     plot_pdd = plot_pdd_var.get()
+    try:
+        cax_window_cm = float(cax_window_entry.get()) / 10.0  # mm → cm
+    except ValueError:
+        cax_window_cm = 0.0
     
     
    
@@ -671,8 +675,18 @@ def run_comparison():
                 # analysis copies — always PDD-free so 1% = 1% of CAX
                 d1_analysis = d1; d2_analysis = d2
                 if norm ==1:# Normalize to CAX
-                    d1_analysis=d1/df1.loc[(df1['Depth']==dl[i])&(np.abs(df1['Pos'])<=0.3) & (df1['FS']==fsl[j])&(df1['Axis']==scl[k]),'Dose'].mean()
-                    d2_analysis=d2/df2.loc[(df2['Depth']==dl[i])&(np.abs(df2['Pos'])<=0.3)&(df2['FS']==fsl[j])&(df2['Axis']==scl[k]),'Dose'].mean()
+                    if cax_window_cm == 0:
+                        pos1 = df1.loc[(df1['Depth']==dl[i])&(df1['FS']==fsl[j])&(df1['Axis']==scl[k]),'Pos'].values
+                        dos1 = df1.loc[(df1['Depth']==dl[i])&(df1['FS']==fsl[j])&(df1['Axis']==scl[k]),'Dose'].values
+                        pos2 = df2.loc[(df2['Depth']==dl[i])&(df2['FS']==fsl[j])&(df2['Axis']==scl[k]),'Pos'].values
+                        dos2 = df2.loc[(df2['Depth']==dl[i])&(df2['FS']==fsl[j])&(df2['Axis']==scl[k]),'Dose'].values
+                        cax1 = dos1[np.abs(pos1).argmin()]
+                        cax2 = dos2[np.abs(pos2).argmin()]
+                    else:
+                        cax1 = df1.loc[(df1['Depth']==dl[i])&(np.abs(df1['Pos'])<=cax_window_cm)&(df1['FS']==fsl[j])&(df1['Axis']==scl[k]),'Dose'].mean()
+                        cax2 = df2.loc[(df2['Depth']==dl[i])&(np.abs(df2['Pos'])<=cax_window_cm)&(df2['FS']==fsl[j])&(df2['Axis']==scl[k]),'Dose'].mean()
+                    d1_analysis = d1 / cax1
+                    d2_analysis = d2 / cax2
                 if norm ==2:# Normalize each profile to its own Dmax
                     d1_analysis=d1/np.max(d1); d2_analysis=d2/np.max(d2)
                 # apply PDD scaling for plotting only
@@ -1394,16 +1408,25 @@ diag_factor_entry.grid(row=5, column=1, sticky="w", padx=5)
 # default to 0.90
 root.after(0, lambda: diag_factor_var.set("0.80"))
 
+ttk.Label(processing_frame, text="CAX window [mm]:").grid(row=6, column=0, sticky="w")
+cax_window_entry = ttk.Entry(processing_frame, width=6)
+cax_window_entry.grid(row=6, column=1, sticky="w", padx=5)
+cax_window_entry.insert(0, "0")
+ttk.Label(processing_frame, text="0: nearest point, N: avg within ±N mm").grid(row=6, column=2, sticky="w")
+
+# Plotting options frame
+plotting_frame = ttk.LabelFrame(content, text="Plotting Options", padding="10")
+plotting_frame.grid(row=5, column=0, sticky="ew")
 plot_pdd_var = tk.IntVar(value=1)
-ttk.Checkbutton(processing_frame, text="Scale plot by PDD", variable=plot_pdd_var).grid(row=6, column=0, sticky="w")
-ttk.Label(processing_frame, text="Marker size:").grid(row=7, column=0, sticky="w")
-marker_size_entry = ttk.Entry(processing_frame, width=6)
-marker_size_entry.grid(row=7, column=1, sticky="w", padx=5)
+ttk.Checkbutton(plotting_frame, text="Scale plot by PDD", variable=plot_pdd_var).grid(row=0, column=0, sticky="w")
+ttk.Label(plotting_frame, text="Marker size:").grid(row=0, column=1, sticky="w", padx=(20, 0))
+marker_size_entry = ttk.Entry(plotting_frame, width=6)
+marker_size_entry.grid(row=0, column=2, sticky="w", padx=5)
 marker_size_entry.insert(0, "4")
 
 # Criteria frame
 criteria_frame = ttk.LabelFrame(content, text="Dose Difference and DTA Criteria Settings: Default:1% and 1mm", padding="10")
-criteria_frame.grid(row=5, column=0, sticky="ew")
+criteria_frame.grid(row=6, column=0, sticky="ew")
 ttk.Label(criteria_frame, text="Dose Difference (%):").grid(row=0, column=0, sticky="w")
 dd_entry = ttk.Entry(criteria_frame, width=10); dd_entry.grid(row=0, column=1, padx=5); dd_entry.insert(0, "2")
 ttk.Label(criteria_frame, text="DTA Criteria [mm]:").grid(row=1, column=0, sticky="w")
@@ -1417,10 +1440,10 @@ pulower_entry = ttk.Entry(criteria_frame, width=10); pulower_entry.grid(row=4, c
 
 # Run comparison button
 run_button = ttk.Button(content, text="Run Comparison", command=run_comparison)
-run_button.grid(row=6, column=0, pady=10)
+run_button.grid(row=7, column=0, pady=10)
 #save Repoort Button
 save_report_button = ttk.Button(content, text="Save Report (PDF)", command=save_report)
-save_report_button.grid(row=7, column=0, pady=5)
+save_report_button.grid(row=8, column=0, pady=5)
 
 
 def _on_close():

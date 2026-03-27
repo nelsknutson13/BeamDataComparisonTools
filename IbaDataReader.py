@@ -46,7 +46,9 @@ def run_conversion():
 
     for fn in files_to_process:
         try:
-            tree = ET.parse(fn)
+            # Use extended path prefix to handle paths > 260 chars on Windows
+            fn_open = fn if fn.startswith('\\\\?\\') else '\\\\?\\' + fn
+            tree = ET.parse(fn_open)
             xml_root = tree.getroot()
 
             measurement_params = xml_root.find('MeasurementParams')

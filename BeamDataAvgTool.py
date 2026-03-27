@@ -1,17 +1,7 @@
 # Script to make AVG PDDs from multiple data sets and output the avg and plot that plus a confidence interval
-from matplotlib.legend_handler import HandlerTuple
 import pandas as pd
 from matplotlib import pyplot as plt
-from matplotlib import gridspec
 import numpy as np
-from scipy import interpolate as interp
-from scipy import signal as sig
-from gamma import gamma as g
-from center import center as c
-from comp import dosedif as dosedif
-from comp import dta as dtafunc
-import numpy.polynomial.polynomial as poly
-from scipy.optimize import curve_fit
 import tkinter as tk
 from tkinter import filedialog, ttk
 from scipy.interpolate import interp1d
@@ -163,8 +153,6 @@ def save_average():
     if 'dl' not in globals():
         print("Depths are not defined. Run make_avg first to define them.")
         return
-        print("Depths are not defined. Run make_avg first to define them.")
-        return
 
     # Create a list to store all average data
     avg_data_list = []
@@ -199,8 +187,14 @@ def save_average():
     # Create a new DataFrame for metadata
     df_metadata = pd.DataFrame(list(metadata.items()), columns=['Description', 'Value'])
 
-    # Create a new Excel writer object
-    output_file = 'output.xlsx'  # The output file name
+    # Prompt user for save location
+    output_file = filedialog.asksaveasfilename(
+        defaultextension=".xlsx",
+        filetypes=[("Excel Files", "*.xlsx")],
+        title="Save Average Data As")
+    if not output_file:
+        return  # User cancelled
+
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         # Write the average data to a single sheet named 'Average Data'
         df_avg_all.to_excel(writer, sheet_name='Average Data', index=False)
@@ -255,12 +249,11 @@ def plot_data():
         ax_z.set_ylim([0, 110])
 
     # Define a color map for sheets
-    color_map = plt.cm.get_cmap("tab20", len(selected_sheets))
+    color_map = plt.colormaps["tab20"].resampled(len(selected_sheets))
 
     # Plot actual data from sheets
     for sheet_idx, sheet in enumerate(selected_sheets):
-        df = pd.read_excel(file_entry.get(), sheet_name=sheet, header=0)
-        df = df.sort_values(by=['FS', 'Axis', 'Pos'])
+        df = excel_data[sheet].sort_values(by=['FS', 'Axis', 'Pos'])
         color = color_map(sheet_idx)
         marker = markers[sheet_idx % len(markers)]
         sheet_labeled = False  # To label the sheet only once in the legend
@@ -416,8 +409,7 @@ def make_avg():
 
     # Loop over selected sheets and resample data
     for sheet in selected_sheets:
-        df = pd.read_excel(file_entry.get(), sheet_name=sheet, header=0)
-        df = df.sort_values(by=['FS', 'Axis', 'Pos'])
+        df = excel_data[sheet].sort_values(by=['FS', 'Axis', 'Pos'])
 
         # Resample doses for each FS, Axis, and Depth combination
         for fs in fsl:
@@ -548,21 +540,6 @@ depth_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20
 depth_listbox.grid(row=1, column=2, padx=5, pady=5)
 
 
-# Data processing section with dropdowns and checkboxes
-processing_frame = ttk.LabelFrame(root, text="Data Processing", padding="10")
-processing_frame.grid(row=4, column=0, sticky="ew")
-
-
-# Dropdown for normalization options
-ttk.Label(processing_frame, text="Normalization:").grid(row=1, column=0, sticky="w")
-norm_combo = ttk.Combobox(processing_frame, values=[0, 1, 2], width=5)
-norm_combo.grid(row=1, column=1, padx=5)
-norm_combo.set(1)  # Set default value to 0
-ttk.Label(processing_frame, text=" Currently Hard Coded to Max 0: No norm, 1: Normalize to Max, 2: Normalize to Fixed Depth").grid(row=1, column=2, sticky="w")
-# Variables for checkboxes
-smooth_var = tk.IntVar(value=0)
-tankcor_var = tk.IntVar(value=0)
-
 # Add input fields for dose and position tolerance
 ttk.Label(root, text="Dose Tolerance [%]:").grid(row=6, column=0, sticky="w")
 dose_entry = ttk.Entry(root)
@@ -573,8 +550,6 @@ ttk.Label(root, text="Position Tolerance [mm]:").grid(row=7, column=0, sticky="w
 pos_entry = ttk.Entry(root)
 pos_entry.insert(0, "1")  # Default value of 1 mm
 pos_entry.grid(row=7, column=0)
-# Checkboxes for other data processing options
-ttk.Checkbutton(processing_frame, text="Smooth", variable=smooth_var).grid(row=2, column=0, sticky="w")
 
 # Adding the buttons to the GUI
 

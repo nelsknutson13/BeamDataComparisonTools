@@ -17,6 +17,7 @@ A collection of Python tools for radiation therapy beam data analysis, compariso
 | **ProfileCorrectionFactorCalculator.py** | Calculate profile correction factors. |
 | **OutputRoundRobinDataViewer.py** | Visualize round-robin QA consortium data as boxplots comparing institutions/systems by energy. |
 | **DataDuplicateCleaner.py** | Detect and manage duplicate profile curves in grouped beam data using MD5 fingerprinting. |
+| **BeamDataAvgTool.py** | Average beam profiles and PDDs across multiple datasets. Plots individual scans with the computed average and a clinical tolerance envelope (dose % / position mm). Exports averaged data to Excel in standard format. |
 
 ## Data Readers / Converters
 

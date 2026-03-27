@@ -285,7 +285,7 @@ def build_coverage(inventory, want, device_cols, base_cols):
 
 
 
-def run_audit(root, req_path, out_path, log_cb=lambda m: None):
+def run_audit(root, req_path, out_path, recursive=False, log_cb=lambda m: None):
     import time
     _t0 = time.time()
     log_cb("Loading requirements…")
@@ -347,7 +347,8 @@ def run_audit(root, req_path, out_path, log_cb=lambda m: None):
     # Crawl & build inventory
     root = Path(root)
     log_cb(f"Scanning for Excel files under: {root}")
-    excel_files = [p for p in root.rglob("*.xlsx")
+    pattern = "**/*.xlsx" if recursive else "*.xlsx"
+    excel_files = [p for p in root.glob(pattern)
                    if not any(ex in p.name for ex in ["~$", Path(req_path).name])]
     if not excel_files:
         raise RuntimeError("No .xlsx files found under selected root.")
@@ -501,6 +502,10 @@ class App(tk.Tk):
         ttk.Entry(self, textvariable=self.out_var, width=70).grid(row=2, column=1, **pad)
         ttk.Button(self, text="Choose…", command=self.pick_out).grid(row=2, column=2, **pad)
 
+        self.recursive_var = tk.BooleanVar(self, value=False)
+        ttk.Checkbutton(self, text="Search subfolders recursively",
+                        variable=self.recursive_var).grid(row=3, column=0, sticky="w", **pad)
+
         self.run_btn = ttk.Button(self, text="Run Audit", command=self.on_run)
         self.run_btn.grid(row=3, column=1, sticky="e", **pad)
 
@@ -570,6 +575,7 @@ class App(tk.Tk):
             try:
                 # NO direct Tk calls in this thread; use after() for UI updates
                 saved = run_audit(root, req, outp,
+                          recursive=self.recursive_var.get(),
                           log_cb=lambda m: self.after(0, lambda: self.append_log(m)))
                 self.after(0, lambda p=saved: self.append_log(f"Report written to: {p}"))
                 self.after(0, lambda p=saved: self.open_file(str(p)))

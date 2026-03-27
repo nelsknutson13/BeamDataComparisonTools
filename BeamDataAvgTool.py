@@ -123,9 +123,9 @@ def populate_dl():
                 else:
                     common_depths = common_depths.intersection(depths)
 
-        # If no common depths found, return
+        # If no common depths found (e.g. Z-only scans), clear the list silently
         if not common_depths:
-            print("No common depths found!")
+            depth_listbox.delete(0, tk.END)
             return
 
         # Update the listbox
@@ -249,7 +249,7 @@ def plot_data():
         ax_z.set_ylim([0, 110])
 
     # Define a color map for sheets
-    color_map = plt.colormaps["tab20"].resampled(len(selected_sheets))
+    color_map = plt.cm.get_cmap("tab20", len(selected_sheets))
 
     # Plot actual data from sheets
     for sheet_idx, sheet in enumerate(selected_sheets):
@@ -513,6 +513,18 @@ sheet_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))  # Padding to separ
 ttk.Label(sheet_frame, text="Select Sheets:").grid(row=0, column=0, sticky="w")
 sheet_listbox = tk.Listbox(sheet_frame, selectmode="multiple", width=40, height=10, exportselection=0)
 sheet_listbox.grid(row=1, column=0, padx=5, pady=5)
+sheet_listbox.bind("<<ListboxSelect>>", lambda _: (populate_fsl(), populate_scl(), populate_dl()))
+
+def toggle_sheets():
+    if sheet_listbox.curselection() == tuple(range(sheet_listbox.size())):
+        sheet_listbox.selection_clear(0, tk.END)
+        sheet_toggle_btn.config(text="Select All")
+    else:
+        sheet_listbox.selection_set(0, tk.END)
+        sheet_toggle_btn.config(text="Deselect All")
+
+sheet_toggle_btn = ttk.Button(sheet_frame, text="Select All", command=toggle_sheets)
+sheet_toggle_btn.grid(row=2, column=0, pady=2)
 
 # Populating the listbox with sheet names from the Excel file (Done in `select_file()` function)
 
@@ -522,22 +534,52 @@ data_selection_frame = ttk.LabelFrame(root, text="Data Selection", padding="10")
 data_selection_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))  # Adjust row number to fit below file and sheet sections
 
 # Field Size Selection
-fsl_label = ttk.Label(data_selection_frame, text="Select Field Sizes")
-fsl_label.grid(row=0, column=0, sticky="w")
+ttk.Label(data_selection_frame, text="Select Field Sizes").grid(row=0, column=0, sticky="w")
 fsl_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
 fsl_listbox.grid(row=1, column=0, padx=5, pady=5)
 
+def toggle_fsl():
+    if fsl_listbox.curselection() == tuple(range(fsl_listbox.size())):
+        fsl_listbox.selection_clear(0, tk.END)
+        fsl_toggle_btn.config(text="Select All")
+    else:
+        fsl_listbox.selection_set(0, tk.END)
+        fsl_toggle_btn.config(text="Deselect All")
+
+fsl_toggle_btn = ttk.Button(data_selection_frame, text="Select All", command=toggle_fsl)
+fsl_toggle_btn.grid(row=2, column=0, pady=2)
+
 # Scan Types Selection
-scl_label = ttk.Label(data_selection_frame, text="Select Scan Types")
-scl_label.grid(row=0, column=1, sticky="w", padx=20)
+ttk.Label(data_selection_frame, text="Select Scan Types").grid(row=0, column=1, sticky="w", padx=20)
 scl_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
 scl_listbox.grid(row=1, column=1, padx=5, pady=5)
 
-# Depth Selection 
-depth_label = ttk.Label(data_selection_frame, text="Select Depths")
-depth_label.grid(row=0, column=2, sticky="w", padx=20)
+def toggle_scl():
+    if scl_listbox.curselection() == tuple(range(scl_listbox.size())):
+        scl_listbox.selection_clear(0, tk.END)
+        scl_toggle_btn.config(text="Select All")
+    else:
+        scl_listbox.selection_set(0, tk.END)
+        scl_toggle_btn.config(text="Deselect All")
+
+scl_toggle_btn = ttk.Button(data_selection_frame, text="Select All", command=toggle_scl)
+scl_toggle_btn.grid(row=2, column=1, pady=2)
+
+# Depth Selection
+ttk.Label(data_selection_frame, text="Select Depths").grid(row=0, column=2, sticky="w", padx=20)
 depth_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
 depth_listbox.grid(row=1, column=2, padx=5, pady=5)
+
+def toggle_depth():
+    if depth_listbox.curselection() == tuple(range(depth_listbox.size())):
+        depth_listbox.selection_clear(0, tk.END)
+        depth_toggle_btn.config(text="Select All")
+    else:
+        depth_listbox.selection_set(0, tk.END)
+        depth_toggle_btn.config(text="Deselect All")
+
+depth_toggle_btn = ttk.Button(data_selection_frame, text="Select All", command=toggle_depth)
+depth_toggle_btn.grid(row=2, column=2, pady=2)
 
 
 # Add input fields for dose and position tolerance

@@ -40,8 +40,8 @@ BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NG
 
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
 
-SHEET1_NAME = "SN 21"   # reference / measured sheet name
-SHEET2_NAME = "SN 19"            # comparison sheet name
+SHEET1_NAME = "TPS SN 20"   # reference / measured sheet name
+SHEET2_NAME = "SN 20"            # comparison sheet name
 
 ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
 DD_CRITERIA   = 1           # dose difference threshold [%]
@@ -57,7 +57,7 @@ NORM_DEPTH = {
     '15X':  3.5,
 }
 DEPTH_SHIFT1  = 0.0           # depth shift for sheet 1 [cm]
-DEPTH_SHIFT2  = -0.15           # depth shift for sheet 2 [cm]
+DEPTH_SHIFT2  = 0           # depth shift for sheet 2 [cm]
 CUTOFF_DEPTH  = 0.1           # discard points shallower than this [cm]; GUI uses 0.1 cm
 CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 0.48 cm
 CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
@@ -71,8 +71,24 @@ REPORT_DPI    = 150            # DPI for PDF report pages (lower = smaller file,
 
 _s1 = SHEET1_NAME.replace(' ', '')
 _s2 = SHEET2_NAME.replace(' ', '')
+
+# Build a criteria tag from analysis type and thresholds so runs with different
+# criteria land in separate folders automatically (e.g. comp_1pct_1mm).
+_dd  = f"{DD_CRITERIA:.4g}".rstrip('0').rstrip('.')
+_dta = f"{DTA_CRITERIA*10:.4g}".rstrip('0').rstrip('.')
+_criteria_tag = f"{ANALYSIS}_{_dd}pct_{_dta}mm"
+
+# Output folder hierarchy:
+#   Results/
+#     <SN1>_vs_<SN2>/
+#       PDD/
+#         <criteria>/
+#           <summary>.csv
+#           <summary>.pdf          ← all-energy report
+#           Individual Figures/    ← per-energy PNGs
+#           Individual Reports/    ← per-energy PDFs
 COMPARISON_DIR = os.path.join(BASE_PATH, "Results", f"{_s1}_vs_{_s2}")
-PDD_DIR        = os.path.join(COMPARISON_DIR, "PDD")
+PDD_DIR        = os.path.join(COMPARISON_DIR, "PDD", _criteria_tag)
 RESULTS_DIR    = os.path.join(PDD_DIR, "Individual Figures")
 REPORTS_DIR    = os.path.join(PDD_DIR, "Individual Reports")
 # ─────────────────────────────────────────────

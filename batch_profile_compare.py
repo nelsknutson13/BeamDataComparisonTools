@@ -36,12 +36,12 @@ FILE_MODE = 'flat'
 # 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
 #                  parsed from each filename.
 
-BASE_PATH = r"P:\Knutson\WC2 scans"
+BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
 
 FILE_FILTER = '*Profile*.xlsx'    # glob used in 'flat' mode only
 
-SHEET1_NAME = "BJWC2 Profiles"             # reference / measured sheet name
-SHEET2_NAME = "AXB Profiles"         # comparison sheet name
+SHEET1_NAME = "TPS SN 20"             # reference / measured sheet name
+SHEET2_NAME = "SN 20"         # comparison sheet name
 
 # Data selection — 'all' means use all common values found in each file
 FIELD_SIZES = 'all'                # e.g. [5.0, 10.0, 20.0]  or  'all'
@@ -83,7 +83,7 @@ CONV_FWHM_CM = 0.0                 # detector FWHM [cm]; 0 = disabled
 CONV_TARGET  = 'none'              # 'none', 'curve1', 'curve2', or 'both'
 
 # MPPG-specific parameters (used only when ANALYSIS == 'mppg')
-MPPG_DDTAIL  = 3.0                 # tail dose-difference criterion [% of Dmax]
+MPPG_DDTAIL  = 2.0                 # tail dose-difference criterion [% of Dmax]
 MPPG_PEN_CM  = 0.25                # penumbra half-width [cm]  (GUI default: pupper_entry="0.5" / 2)
 MPPG_OVR_CM  = 1.0                 # overlap buffer zone [cm]  (GUI default: pulower_entry="1")
 MPPG_DIAG_FACTOR = 0.80            # diagonal field size factor (GUI default: 0.80)
@@ -93,12 +93,28 @@ XY_LARGEST_FS_ONLY = True
 
 MARKER_SIZE  = 4                   # plot marker size
 DPI          = 600                 # figure output resolution
-SAVE_FIGURES = False                # set False to skip figure generation (faster, stats only)
+SAVE_FIGURES = True                # set False to skip figure generation (faster, stats only)
 
 _s1 = SHEET1_NAME.replace(' ', '')
 _s2 = SHEET2_NAME.replace(' ', '')
+
+# Build a criteria tag from analysis type and thresholds so runs with different
+# criteria land in separate folders automatically (e.g. mppg_2pct_2mm).
+_dd  = f"{DD_CRITERIA:.4g}".rstrip('0').rstrip('.')
+_dta = f"{DTA_CRITERIA*10:.4g}".rstrip('0').rstrip('.')
+_criteria_tag = f"{ANALYSIS}_{_dd}pct_{_dta}mm"
+
+# Output folder hierarchy:
+#   Results/
+#     <SN1>_vs_<SN2>/
+#       Profile/
+#         <criteria>/
+#           <summary>.xlsx
+#           <summary>.pdf          ← all-energy report
+#           Individual Figures/    ← per-energy PNGs
+#           Individual Reports/    ← per-energy PDFs
 COMPARISON_DIR = os.path.join(BASE_PATH, "Results", f"{_s1}_vs_{_s2}")
-PROFILE_DIR    = os.path.join(COMPARISON_DIR, "Profile")
+PROFILE_DIR    = os.path.join(COMPARISON_DIR, "Profile", _criteria_tag)
 RESULTS_DIR    = os.path.join(PROFILE_DIR, "Individual Figures")
 REPORTS_DIR    = os.path.join(PROFILE_DIR, "Individual Reports")
 # ─────────────────────────────────────────────
@@ -237,7 +253,7 @@ def run_one_file(xlsx_path, energy_label):
 
     if not fsl or not axes or not dl:
         print("  No common FS / Axis / Depth after applying filters — skipping.")
-        return [], []
+        return [], [], None
 
     # Pre-computed thresholds in working units
     dd_frac     = DD_CRITERIA  / 100.0   # fraction  (e.g. 0.03 for 3%)

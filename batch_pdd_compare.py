@@ -41,9 +41,9 @@ BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NG
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
 
 SHEET1_NAME = "SN 21"   # reference / measured sheet name
-SHEET2_NAME = "TPS SN 21"            # comparison sheet name
+SHEET2_NAME = "SN 19"            # comparison sheet name
 
-ANALYSIS      = 'gam'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
+ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
 DD_CRITERIA   = 1           # dose difference threshold [%]
 DTA_CRITERIA  = 0.1           # DTA threshold [cm]  (2 mm)
 NORM          = 1             # 1 = normalize to dmax, 2 = normalize to fixed depth per energy
@@ -57,7 +57,7 @@ NORM_DEPTH = {
     '15X':  3.5,
 }
 DEPTH_SHIFT1  = 0.0           # depth shift for sheet 1 [cm]
-DEPTH_SHIFT2  = 0.0           # depth shift for sheet 2 [cm]
+DEPTH_SHIFT2  = -0.15           # depth shift for sheet 2 [cm]
 CUTOFF_DEPTH  = 0.1           # discard points shallower than this [cm]; GUI uses 0.1 cm
 CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 0.48 cm
 CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
@@ -69,7 +69,12 @@ SAVE_FIGURES  = True           # set False to skip individual PNG figure generat
 SAVE_REPORT   = True           # generate multi-page PDF report (summary + per-energy figures)
 REPORT_DPI    = 150            # DPI for PDF report pages (lower = smaller file, faster to open)
 
-RESULTS_DIR = os.path.join(BASE_PATH, "Results")
+_s1 = SHEET1_NAME.replace(' ', '')
+_s2 = SHEET2_NAME.replace(' ', '')
+COMPARISON_DIR = os.path.join(BASE_PATH, "Results", f"{_s1}_vs_{_s2}")
+PDD_DIR        = os.path.join(COMPARISON_DIR, "PDD")
+RESULTS_DIR    = os.path.join(PDD_DIR, "Individual Figures")
+REPORTS_DIR    = os.path.join(PDD_DIR, "Individual Reports")
 # ─────────────────────────────────────────────
 
 
@@ -139,7 +144,7 @@ def run_one_file(xlsx_path, energy_label):
         return []
 
     # ── figure setup ─────────────────────────
-    if SAVE_FIGURES:
+    if SAVE_FIGURES or SAVE_REPORT:
         if ANALYSIS == 'comp':
             fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(15, 11),
                 gridspec_kw={'height_ratios': [1.5, 1, 1]})
@@ -395,10 +400,11 @@ def run_one_file(xlsx_path, energy_label):
 
     stem     = os.path.splitext(os.path.basename(xlsx_path))[0]
     safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
-    if SAVE_FIGURES:
+    if SAVE_FIGURES or SAVE_REPORT:
         fig.suptitle(f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}', fontsize=14)
         fig.tight_layout(rect=[0, 0, 1, 0.95])
         fig.subplots_adjust(hspace=0.45)
+    if SAVE_FIGURES:
         s1 = SHEET1_NAME.replace(' ', '')
         s2 = SHEET2_NAME.replace(' ', '')
         out_png = os.path.join(RESULTS_DIR, f"{s1}_{s2}_{energy_label}_{safe_tag}.png")
@@ -416,10 +422,11 @@ def run_one_file(xlsx_path, energy_label):
 
 def main():
     from datetime import datetime
-    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)   # also creates COMPARISON_DIR and PDD_DIR
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     s1 = SHEET1_NAME.replace(' ', ''); s2 = SHEET2_NAME.replace(' ', '')
-    summary_csv = os.path.join(RESULTS_DIR, f"{s1}_{s2}_pdd_summary_{timestamp}.csv")
+    summary_csv = os.path.join(PDD_DIR, f"{s1}_{s2}_pdd_summary_{timestamp}.csv")
     all_results = []
 
     if FILE_MODE == 'flat':
@@ -440,7 +447,7 @@ def main():
         energy_dirs = sorted([
             d for d in os.listdir(BASE_PATH)
             if os.path.isdir(os.path.join(BASE_PATH, d))
-            and os.path.join(BASE_PATH, d) != RESULTS_DIR
+            and os.path.join(BASE_PATH, d) != os.path.join(BASE_PATH, "Results")
         ])
         file_pairs = []
         for energy_label in energy_dirs:
@@ -542,9 +549,21 @@ def main():
             from reportlab.pdfgen import canvas as rl_canvas
             from reportlab.lib.utils import ImageReader
 
-            pdf_path = summary_csv.replace('.csv', '.pdf')
+            pdf_path = os.path.join(PDD_DIR, os.path.basename(summary_csv).replace('.csv', '.pdf'))
             rl_w, rl_h = rl_letter
             c = rl_canvas.Canvas(pdf_path, pagesize=rl_letter)
+
+            # ── summary front page ────────────────────────────────────────────
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(36, rl_h - 48, f"PDD Summary Report — {SHEET1_NAME} vs {SHEET2_NAME}")
+            c.setFont("Helvetica", 11)
+            c.drawString(36, rl_h - 68, f"Analysis: {_criteria_str}")
+            c.setFont("Courier", 7)
+            y = rl_h - 100
+            for line in df_table.to_string(index=False).split('\n'):
+                c.drawString(36, y, line)
+                y -= 10
+            c.showPage()
 
             for energy_label, energy_text, fig in all_figs:
                 # — text block (top of page) —
@@ -568,8 +587,33 @@ def main():
                     fig_h = max(fig_top - 18, 10)
                     fig_w = fig_h * (iw / float(ih))
                 c.drawImage(img, 36, fig_top - fig_h, width=fig_w, height=fig_h)
-                plt.close(fig)
                 c.showPage()
+
+                # — individual per-energy PDF in Reports/ —
+                energy_pdf = os.path.join(REPORTS_DIR, f"{s1}_{s2}_{energy_label}.pdf")
+                ec = rl_canvas.Canvas(energy_pdf, pagesize=rl_letter)
+                ec.setFont("Courier", 9)
+                ey = rl_h - 36
+                for line in energy_text.split('\n'):
+                    ec.drawString(36, ey, line)
+                    ey -= 12
+                    if ey < rl_h * 0.45:
+                        break
+                buf2 = io.BytesIO()
+                fig.savefig(buf2, format='png', dpi=REPORT_DPI, bbox_inches='tight')
+                buf2.seek(0)
+                img2 = ImageReader(buf2)
+                iw2, ih2 = img2.getSize()
+                fw2 = rl_w - 72
+                fh2 = fw2 * (ih2 / float(iw2))
+                ft2 = ey - 8
+                if ft2 - fh2 < 18:
+                    fh2 = max(ft2 - 18, 10)
+                    fw2 = fh2 * (iw2 / float(ih2))
+                ec.drawImage(img2, 36, ft2 - fh2, width=fw2, height=fh2)
+                ec.save()
+
+                plt.close(fig)
 
             c.save()
             print(f"PDF report saved: {pdf_path}")

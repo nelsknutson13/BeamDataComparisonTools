@@ -95,7 +95,12 @@ MARKER_SIZE  = 4                   # plot marker size
 DPI          = 600                 # figure output resolution
 SAVE_FIGURES = False                # set False to skip figure generation (faster, stats only)
 
-RESULTS_DIR = os.path.join(BASE_PATH, "Results")
+_s1 = SHEET1_NAME.replace(' ', '')
+_s2 = SHEET2_NAME.replace(' ', '')
+COMPARISON_DIR = os.path.join(BASE_PATH, "Results", f"{_s1}_vs_{_s2}")
+PROFILE_DIR    = os.path.join(COMPARISON_DIR, "Profile")
+RESULTS_DIR    = os.path.join(PROFILE_DIR, "Individual Figures")
+REPORTS_DIR    = os.path.join(PROFILE_DIR, "Individual Reports")
 # ─────────────────────────────────────────────
 
 
@@ -688,7 +693,7 @@ def run_one_file(xlsx_path, energy_label):
         title_tag = 'Plots Only'
 
     safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
-    if SAVE_FIGURES:
+    if SAVE_FIGURES or SAVE_REPORT:
         axes_label = '+'.join(axes)
         fig.suptitle(
             f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}  [{axes_label}]',
@@ -696,6 +701,7 @@ def run_one_file(xlsx_path, energy_label):
         )
         fig.tight_layout(rect=[0, 0, 1, 0.95])
         fig.subplots_adjust(hspace=0.45)
+    if SAVE_FIGURES:
         s1 = SHEET1_NAME.replace(' ', '')
         s2 = SHEET2_NAME.replace(' ', '')
         out_png = os.path.join(RESULTS_DIR, f"{s1}_{s2}_{energy_label}_{safe_tag}.png")
@@ -713,10 +719,11 @@ def run_one_file(xlsx_path, energy_label):
 
 def main():
     from datetime import datetime
-    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)   # also creates COMPARISON_DIR and PROFILE_DIR
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
     s1 = SHEET1_NAME.replace(' ', ''); s2 = SHEET2_NAME.replace(' ', '')
-    summary_xlsx = os.path.join(RESULTS_DIR, f"{s1}_{s2}_profile_summary_{timestamp}.xlsx")
+    summary_xlsx = os.path.join(PROFILE_DIR, f"{s1}_{s2}_profile_summary_{timestamp}.xlsx")
     all_results = []
 
     # ── discover files ────────────────────────────────────────────────────────
@@ -735,7 +742,7 @@ def main():
         energy_dirs = sorted([
             d for d in os.listdir(BASE_PATH)
             if os.path.isdir(os.path.join(BASE_PATH, d))
-            and os.path.join(BASE_PATH, d) != RESULTS_DIR
+            and os.path.join(BASE_PATH, d) != os.path.join(BASE_PATH, "Results")
         ])
         file_pairs = []
         for energy_label in energy_dirs:
@@ -892,9 +899,34 @@ def main():
         from reportlab.pdfgen import canvas as rl_canvas
         from reportlab.lib.utils import ImageReader
 
-        pdf_path = summary_xlsx.replace('.xlsx', '.pdf')
+        pdf_path = os.path.join(PROFILE_DIR, os.path.basename(summary_xlsx).replace('.xlsx', '.pdf'))
         rl_w, rl_h = rl_letter
         c = rl_canvas.Canvas(pdf_path, pagesize=rl_letter)
+
+        # ── summary front page(s) ─────────────────────────────────────────────
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(36, rl_h - 48, f"Profile Summary Report — {SHEET1_NAME} vs {SHEET2_NAME}")
+        c.setFont("Helvetica", 11)
+        c.drawString(36, rl_h - 68, f"Analysis: {_criteria_str}")
+        c.setFont("Courier", 7)
+        y = rl_h - 100
+        for e, df_mat in all_matrix_blocks:
+            header = f"  {e}  —  Depth x FS pass rate"
+            if y < 80:
+                c.showPage()
+                c.setFont("Courier", 7)
+                y = rl_h - 36
+            c.drawString(36, y, header)
+            y -= 10
+            for line in df_mat.to_string(index=False).split('\n'):
+                if y < 80:
+                    c.showPage()
+                    c.setFont("Courier", 7)
+                    y = rl_h - 36
+                c.drawString(36, y, line)
+                y -= 10
+            y -= 8  # gap between energy blocks
+        c.showPage()
 
         for energy_label, fig in all_figs:
             etext = energy_texts.get(energy_label, f'  {energy_label}\n')
@@ -919,8 +951,33 @@ def main():
                 fig_h = max(fig_top - 18, 10)
                 fig_w = fig_h * (iw / float(ih))
             c.drawImage(img, 36, fig_top - fig_h, width=fig_w, height=fig_h)
-            plt.close(fig)
             c.showPage()
+
+            # — individual per-energy PDF in Reports/ —
+            energy_pdf = os.path.join(REPORTS_DIR, f"{s1}_{s2}_{energy_label}.pdf")
+            ec = rl_canvas.Canvas(energy_pdf, pagesize=rl_letter)
+            ec.setFont("Courier", 9)
+            ey = rl_h - 36
+            for line in etext.split('\n'):
+                ec.drawString(36, ey, line)
+                ey -= 12
+                if ey < rl_h * 0.45:
+                    break
+            buf2 = io.BytesIO()
+            fig.savefig(buf2, format='png', dpi=REPORT_DPI, bbox_inches='tight')
+            buf2.seek(0)
+            img2 = ImageReader(buf2)
+            iw2, ih2 = img2.getSize()
+            fw2 = rl_w - 72
+            fh2 = fw2 * (ih2 / float(iw2))
+            ft2 = ey - 8
+            if ft2 - fh2 < 18:
+                fh2 = max(ft2 - 18, 10)
+                fw2 = fh2 * (iw2 / float(ih2))
+            ec.drawImage(img2, 36, ft2 - fh2, width=fw2, height=fh2)
+            ec.save()
+
+            plt.close(fig)
 
         c.save()
         print(f"PDF report saved: {pdf_path}")

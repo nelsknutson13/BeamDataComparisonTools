@@ -47,7 +47,9 @@ def run_conversion():
     for fn in files_to_process:
         try:
             # Use extended path prefix to handle paths > 260 chars on Windows
-            fn_open = fn if fn.startswith('\\\\?\\') else '\\\\?\\' + fn
+            # \\?\ prefix requires backslashes, so normalize forward slashes first
+            fn_bs = fn.replace('/', '\\')
+            fn_open = fn_bs if fn_bs.startswith('\\\\?\\') else '\\\\?\\' + fn_bs
             tree = ET.parse(fn_open)
             xml_root = tree.getroot()
 

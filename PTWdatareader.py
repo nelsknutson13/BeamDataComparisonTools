@@ -335,8 +335,9 @@ def process_one_file(fn):
 
     selected_ids = scan_selection_dialog(root, scans_info)
     if selected_ids is None:
-        # user cancelled → keep all
-        selected_ids = {s["scan_id"] for s in scans_info}
+        # user cancelled → abort
+        status_label.config(text=f"Status: Cancelled — {os.path.basename(fn)}")
+        return
 
     # filter to selected
     keep_mask = df['scan_id'].isin(selected_ids)

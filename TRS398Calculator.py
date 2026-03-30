@@ -11,17 +11,39 @@ from datetime import datetime
 # Mode A: kQ(TPR20/10) = a * exp[b * (TPR20,10 - 0.57)]
 # L [cm]: cavity length along beam axis for FFF volume-averaging correction.
 CHAMBERS = {
+    # NE chambers
+    "NE 2561/2611A":       {"a": 1.07699, "b": -0.08732, "L": 3.07},
     "NE 2571":             {"a": 1.08918, "b": -0.09222, "L": 2.41},
-    "PTW 30013":           {"a": 1.12594, "b": -0.10740, "L": 2.30},
+    # PTW Farmer-type
+    "PTW 30010":           {"a": 1.12594, "b": -0.10740, "L": 2.30},
+    "PTW 30011":           {"a": 1.10850, "b": -0.10107, "L": 2.30},
+    "PTW 30012":           {"a": 1.12442, "b": -0.10415, "L": 2.30},
+    "PTW 30013":           {"a": 1.18273, "b": -0.13256, "L": 2.30},
+    # PTW Semiflex / PinPoint
+    "PTW 31010 Semiflex":  {"a": 1.23755, "b": -0.15295, "L": 1.65},
+    "PTW 31013 Semiflex":  {"a": 1.19297, "b": -0.13366, "L": 1.65},
+    "PTW 31016 PinPoint3D":{"a": 1.11650, "b": -0.10841, "L": 0.29},
+    "PTW 31021 Semiflex3D":{"a": 1.29612, "b": -0.16514, "L": 1.65},
+    "PTW 31022 PinPoint3D":{"a": 1.14435, "b": -0.11130, "L": 0.29},
+    # Capintec
+    "Capintec PR-06C":     {"a": 1.06833, "b": -0.08262, "L": 2.27},
+    # Exradin
+    "Exradin A1SL":        {"a": 1.21633, "b": -0.13351, "L": 0.57},
     "Exradin A12":         {"a": 1.09783, "b": -0.09544, "L": 2.58},
+    "Exradin A12S":        {"a": 1.11499, "b": -0.10057, "L": 2.00},
+    "Exradin A18":         {"a": 1.10487, "b": -0.09670, "L": 2.25},
+    "Exradin A19":         {"a": 1.12024, "b": -0.10493, "L": 3.17},
+    "Exradin A26":         {"a": 1.09587, "b": -0.09383, "L": 0.24},
+    "Exradin A28":         {"a": 1.12453, "b": -0.10278, "L": 0.25},
+    # IBA
     "IBA FC65-G":          {"a": 1.09752, "b": -0.09642, "L": 2.31},
     "IBA FC65-P":          {"a": 1.12374, "b": -0.10784, "L": 2.31},
     "IBA FC23-C":          {"a": 1.09189, "b": -0.09346, "L": 0.88},
     "IBA CC13":            {"a": 1.11441, "b": -0.10260, "L": 0.58},
     "IBA CC25":            {"a": 1.08981, "b": -0.09254, "L": 1.00},
+    # Sun Nuclear
     "Sun Nuclear SNC600c": {"a": 1.06800, "b": -0.08485, "L": 2.27},
     "Sun Nuclear SNC125c": {"a": 1.09700, "b": -0.09749, "L": 0.705},
-    # Add more chambers here in the same format if needed.
 }
 # ks coefficients for pulsed beams (TRS-398 Table 10 / 4.VII)
 KS_PULSED = {
@@ -93,10 +115,11 @@ def compute():
 
         # k_TP
         T = float(entry_T.get().strip())
-        p = float(entry_p.get().strip())
+        p_raw = float(entry_p.get().strip())
         T0 = float(entry_T0.get().strip())
         P0 = float(entry_P0.get().strip())
-        kTP = ((273.15 + T) / (273.15 + T0)) * (P0 / p)
+        # P0 and p are in the same units (hPa or mmHg) — ratio is dimensionless
+        kTP = ((273.15 + T) / (273.15 + T0)) * (P0 / p_raw)
 
 
         # Readings (all in nC):
@@ -144,20 +167,9 @@ def compute():
         k_s = a0 + a1 * R + a2 * (R ** 2)
 
 
-        # k_vol / k_prof
-        is_fff = (fff_var.get() == 1)
-        if is_fff:
-            sdd_txt = entry_SDD.get().strip()
-            if not sdd_txt:
-                raise ValueError("Enter SDD (cm) for FFF k_vol.")
-            SDD = float(sdd_txt)
-            kvol = get_kvol(chamber, tpr, SDD, True)
-            entry_kvol.delete(0, tk.END)
-            entry_kvol.insert(0, f"{kvol:.5f}")
-        else:
-            # flattened: default 1.000 but allow manual override
-            s = entry_kvol.get().strip()
-            kvol = float(s) if s else 1.0
+        # k_vol — use whatever is in the entry (user-typed or from Calc k_vol button)
+        s = entry_kvol.get().strip()
+        kvol = float(s) if s else 1.0
 
         # k_elec
         kele = float(entry_kelec.get().strip())
@@ -226,8 +238,8 @@ def compute():
             f"Electrometer SN#: {em_sn}",
             f"Electrometer Cal Date: {em_cal}",
             f"N_D,w(60Co) = {NDw:.3f} cGy/nC",
-            f"TPR20,10 = {tpr}  -> k_Q = {kQ:.5f}",
-            f"T = {T:.1f} °C, p = {p:.1f} hPa, T0 = {T0:.1f} °C, P0 = {P0:.2f} hPa " ,
+            f"TPR20,10 = {tpr}  -> k_Q = {kQ:.5f}  (a={CHAMBERS[chamber]['a']}, b={CHAMBERS[chamber]['b']})",
+            f"T = {T:.1f} °C, p = {p_raw:.1f} {pressure_unit_var.get()}, T0 = {T0:.1f} °C, P0 = {P0:.2f} {pressure_unit_var.get()}",
 
             # Three raw readings + mean for V_high (+)
             f"M(Vref , V_high) readings [nC] = {plus_Vh_str}",
@@ -462,7 +474,8 @@ entry_T0.grid(row=r, column=3, sticky="w", pady=(2,2))
 r += 1
 
 # P0
-ttk.Label(main, text="P0 [hPa] (from ND,w cert):").grid(row=r, column=2, sticky="w", pady=(2,2))
+lbl_P0_unit = ttk.Label(main, text="P0 [hPa] (from ND,w cert):")
+lbl_P0_unit.grid(row=r, column=2, sticky="w", pady=(2,2))
 entry_P0 = ttk.Entry(main, width=8)
 entry_P0.insert(0, "1013.25")
 entry_P0.grid(row=r, column=3, sticky="w", pady=(2,2))
@@ -480,14 +493,24 @@ r += 1
 # Ambient T, p
 ttk.Label(main, text="T [°C]:").grid(row=r, column=0, sticky="w", pady=(2,2))
 entry_T = ttk.Entry(main, width=8)
-entry_T.insert(0, "20.0")
 entry_T.grid(row=r, column=1, sticky="w", pady=(2,2))
 
-ttk.Label(main, text="p [hPa]:").grid(row=r, column=2, sticky="w", pady=(2,2))
+pressure_unit_var = tk.StringVar(value="hPa")
+lbl_p_unit = ttk.Label(main, text="p [hPa]:")
+lbl_p_unit.grid(row=r, column=2, sticky="w", pady=(2,2))
 entry_p = ttk.Entry(main, width=8)
-entry_p.insert(0, "1013.25")
 entry_p.grid(row=r, column=3, sticky="w", pady=(2,2))
+def _on_unit_change():
+    u = pressure_unit_var.get()
+    lbl_p_unit.config(text=f"p [{u}]:")
+    lbl_P0_unit.config(text=f"P0 [{u}] (from ND,w cert):")
+    entry_p.delete(0, tk.END)
+    entry_p.insert(0, "760.00" if u == "mmHg" else "1013.25")
+    entry_P0.delete(0, tk.END)
+    entry_P0.insert(0, "760.00" if u == "mmHg" else "1013.25")
+ttk.Radiobutton(main, text="hPa",  variable=pressure_unit_var, value="hPa",  command=_on_unit_change).grid(row=r, column=4, sticky="w", pady=(2,2))
 r += 1
+ttk.Radiobutton(main, text="mmHg", variable=pressure_unit_var, value="mmHg", command=_on_unit_change).grid(row=r, column=4, sticky="w", pady=(2,2))
 
 ttk.Label(main, text="k_TP:").grid(row=r, column=2, sticky="e", pady=(2,2))
 lbl_kTP = ttk.Label(main, text="—")
@@ -561,42 +584,32 @@ lbl_ks = ttk.Label(main, text="—")
 lbl_ks.grid(row=r, column=3, sticky="w", pady=(2,2))
 r += 1
 
-# FFF / k_vol
-fff_var = tk.IntVar(value=0)
-
-fff_cb = ttk.Checkbutton(
-    main,
-    text="FFF beam (use k_vol formula)",
-    variable=fff_var,
-    onvalue=1,
-    offvalue=0
-)
-fff_cb.grid(row=r, column=0, columnspan=2, sticky="w", pady=(2,2))
-fff_cb.state(["!alternate"])
-
-def toggle_fff():
-    new_val = 0 if fff_var.get() == 1 else 1
-    fff_var.set(new_val)
-    if new_val == 1:
-        fff_cb.state(["selected", "!alternate"])
-    else:
-        fff_cb.state(["!selected", "!alternate"])
-    print("FFF =", fff_var.get())
-
-fff_cb.configure(command=toggle_fff)
-ttk.Label(main, text="SDD [cm] 110 for SSD 100 for SAD depth = 10:").grid(row=r, column=2, sticky="w", pady=(2,2))
+# k_vol
+ttk.Label(main, text="SDD [cm]:").grid(row=r, column=0, sticky="w", pady=(2,2))
 entry_SDD = ttk.Entry(main, width=8)
-entry_SDD.grid(row=r, column=3, sticky="w", pady=(2,2))
 entry_SDD.insert(0, "110")
+entry_SDD.grid(row=r, column=1, sticky="w", pady=(2,2))
+
+def calc_kvol():
+    try:
+        chamber = chamber_combo.get().strip()
+        tpr = float(entry_TPR.get().strip())
+        sdd = float(entry_SDD.get().strip())
+        kvol = get_kvol(chamber, tpr, sdd, True)
+        entry_kvol.delete(0, tk.END)
+        entry_kvol.insert(0, f"{kvol:.5f}")
+    except Exception as e:
+        messagebox.showerror("k_vol error", str(e))
+
+ttk.Button(main, text="Calc k_vol", command=calc_kvol).grid(row=r, column=2, sticky="w", pady=(2,2))
 r += 1
 
 ttk.Label(main, text="k_vol:").grid(row=r, column=0, sticky="w", pady=(2,2))
 entry_kvol = ttk.Entry(main, width=8)
 entry_kvol.insert(0, "1.000")
 entry_kvol.grid(row=r, column=1, sticky="w", pady=(2,2))
-ttk.Label(main, text="->").grid(row=r, column=2, sticky="e", pady=(2,2))
 lbl_kvol_val = ttk.Label(main, text="—")
-lbl_kvol_val.grid(row=r, column=3, sticky="w", pady=(2,2))
+lbl_kvol_val.grid(row=r, column=2, sticky="w", pady=(2,2))
 r += 1
 
 # Clinical PDD for Dmax

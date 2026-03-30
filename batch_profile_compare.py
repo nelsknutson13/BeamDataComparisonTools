@@ -44,7 +44,7 @@ SHEET1_NAME = "TPS SN 20"             # reference / measured sheet name
 SHEET2_NAME = "SN 20"         # comparison sheet name
 
 # Data selection — 'all' means use all common values found in each file
-FIELD_SIZES = 'all'                # e.g. [5.0, 10.0, 20.0]  or  'all'
+FIELD_SIZES = [1.5, 3.0, 4.5, 6.0, 9.0, 10.5, 12.0, 15.0, 20.0, 30.0, 40.0]                # e.g. [5.0, 10.0, 20.0]  or  'all'
 AXES        = 'all'                # e.g. ['X', 'Y']          or  'all'  (Z excluded always)
 DEPTHS_CM   = 'all'                # e.g. [1.5, 5.0, 10.0]   or  'all'
 

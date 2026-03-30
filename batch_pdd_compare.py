@@ -39,13 +39,14 @@ BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NG
 
 
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
+FS_FILTER   = [1.5, 3.0, 4.5, 6.0, 9.0, 10.5, 12.0, 15.0, 20.0, 30.0, 40.0]      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
 
-SHEET1_NAME = "TPS SN 20"   # reference / measured sheet name
-SHEET2_NAME = "SN 20"            # comparison sheet name
+SHEET1_NAME = "TPS SN 21"   # reference / measured sheet name
+SHEET2_NAME = "SN 19"            # comparison sheet name
 
 ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
-DD_CRITERIA   = 1           # dose difference threshold [%]
-DTA_CRITERIA  = 0.1           # DTA threshold [cm]  (2 mm)
+DD_CRITERIA   = 2           # dose difference threshold [%]
+DTA_CRITERIA  = 0.2           # DTA threshold [cm]  (2 mm)
 NORM          = 1             # 1 = normalize to dmax, 2 = normalize to fixed depth per energy
 
 # Fixed normalization depth [cm] per energy folder name
@@ -57,7 +58,7 @@ NORM_DEPTH = {
     '15X':  3.5,
 }
 DEPTH_SHIFT1  = 0.0           # depth shift for sheet 1 [cm]
-DEPTH_SHIFT2  = 0           # depth shift for sheet 2 [cm]
+DEPTH_SHIFT2  = -0.15           # depth shift for sheet 2 [cm]
 CUTOFF_DEPTH  = 0.1           # discard points shallower than this [cm]; GUI uses 0.1 cm
 CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 0.48 cm
 CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
@@ -154,6 +155,8 @@ def run_one_file(xlsx_path, energy_label):
     fs1 = set(df1.loc[df1['Axis'] == 'Z', 'FS'].unique())
     fs2 = set(df2.loc[df2['Axis'] == 'Z', 'FS'].unique())
     fsl = sorted(fs1 & fs2)
+    if FS_FILTER:
+        fsl = [fs for fs in fsl if fs in FS_FILTER]
 
     if not fsl:
         print("  No common field sizes found — skipping.")

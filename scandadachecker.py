@@ -2,12 +2,14 @@ import os
 import re
 import threading
 import pickle
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import sys
 import pandas as pd
+import numpy as np
 
 CACHE_FILE = Path.home() / ".scan_inventory_cache.pkl"
 
@@ -28,6 +30,50 @@ def save_cache(cache):
         pass
 
 # ---------- Core logic ----------
+
+def count_dup_groups(df):
+    """Return (identical_dups, conflicting_dups) counts across (FS, Depth, Axis) groups.
+    identical_dups:   groups with multiple copies of the same curve (same fingerprint)
+    conflicting_dups: groups with multiple copies with different data (different fingerprints)
+    """
+    try:
+        required = ["FS", "Depth", "Axis", "Pos", "Dose"]
+        if not all(c in df.columns for c in required):
+            return 0, 0
+        logic = df[required].copy()
+        for c in ("FS", "Depth", "Pos", "Dose"):
+            logic[c] = pd.to_numeric(logic[c], errors="coerce")
+        logic["Axis"] = logic["Axis"].astype(str).str.strip()
+        logic = logic.dropna()
+        identical = 0
+        conflicting = 0
+        for _, g in logic.groupby(["FS", "Depth", "Axis"]):
+            g_orig = logic.loc[g.index].sort_index()
+            pos = g_orig["Pos"].to_numpy()
+            resets = [0]
+            for i in range(1, len(pos)):
+                if pos[i] < pos[i - 1]:
+                    resets.append(i)
+            resets.append(len(pos))
+            n_segments = len(resets) - 1
+            if n_segments < 2:
+                continue
+            fps = []
+            for a, b in zip(resets[:-1], resets[1:]):
+                sub = g_orig.iloc[a:b]
+                if sub.empty:
+                    continue
+                arr = sub[["Pos", "Dose"]].to_numpy(dtype=float)
+                arr = np.round(arr[np.argsort(arr[:, 0])], 6)
+                fps.append(hashlib.md5(arr.tobytes()).hexdigest())
+            unique_fps = len(set(fps))
+            if unique_fps == 1:
+                identical += 1
+            else:
+                conflicting += 1
+        return identical, conflicting
+    except Exception:
+        return 0, 0
 
 def pick_col(cols, keywords):
     for c in cols:
@@ -139,14 +185,21 @@ def load_requirements(want_path):
     device_cols = [c for c in want.columns if c not in base_cols]
     return want, device_cols, base_cols
 
-def inventory_for_excel(xlsx_path):
+def inventory_for_excel(xlsx_path, sheet_filter=None):
     rows = []
     try:
         xls = pd.ExcelFile(xlsx_path)
     except Exception as e:
         return pd.DataFrame([{"File": str(xlsx_path), "Error": str(e)}])
 
-    for sh in xls.sheet_names:
+    sheets_to_process = xls.sheet_names
+    if sheet_filter:
+        if sheet_filter in xls.sheet_names:
+            sheets_to_process = [sheet_filter]
+        else:
+            return pd.DataFrame()  # file doesn't have this sheet, skip silently
+
+    for sh in sheets_to_process:
         try:
             df = xls.parse(sh).dropna(how="all")
         except Exception as e:
@@ -156,6 +209,7 @@ def inventory_for_excel(xlsx_path):
         cols = list(df.columns)
         energy, ssd = get_energy_ssd(xlsx_path, sheet_name=sh, df=df)
         device = parse_device(sh)
+        ident_dups, conflict_dups = count_dup_groups(df)
 
         axis_col  = pick_col(cols, ["axis", "scan", "profiletype", "type"])
         fs_col    = pick_col(cols, ["fs", "field", "field size"])
@@ -214,7 +268,9 @@ def inventory_for_excel(xlsx_path):
                 "ScanType": st,
                 "FieldSizes": fs_vals,
                 "Depths": [] if st == "Z" else depth_vals,
-                "NumScans": num_scans
+                "NumScans": num_scans,
+                "IdenticalDups": ident_dups,
+                "ConflictingDups": conflict_dups,
             })
 
     inv_df = pd.DataFrame(rows)
@@ -231,7 +287,8 @@ def inventory_for_excel(xlsx_path):
     
     return (
         inv_df.groupby(["File", "Device", "Energy", "SSD", "ScanType"], dropna=False, as_index=False)
-              .agg({"FieldSizes": merge_lists, "Depths": merge_lists, "NumScans": "sum"})
+              .agg({"FieldSizes": merge_lists, "Depths": merge_lists, "NumScans": "sum", "IdenticalDups": "max", "ConflictingDups": "max"})
+
     )
 
 
@@ -285,10 +342,106 @@ def build_coverage(inventory, want, device_cols, base_cols):
 
 
 
-def run_audit(root, req_path, out_path, recursive=False, log_cb=lambda m: None):
+def clean_sheet_duplicates(xlsx_path, sheet_name, log_cb=lambda m: None):
+    """Remove duplicate curve copies from sheet_name in xlsx_path.
+    Keeps first occurrence of each unique curve per (FS, Depth, Axis) group.
+    Writes result to xlsx_path.stem + '_cleaned.xlsx'.
+    Returns (rows_before, rows_after, dup_groups_removed) or None if sheet missing/incompatible.
+    """
+    try:
+        xls = pd.ExcelFile(xlsx_path, engine="openpyxl")
+        if sheet_name not in xls.sheet_names:
+            return None
+        df = xls.parse(sheet_name)
+    except Exception as e:
+        log_cb(f"  ERROR reading {xlsx_path.name}: {e}")
+        return None
+
+    required = ["FS", "Depth", "Axis", "Pos", "Dose"]
+    if not all(c in df.columns for c in required):
+        log_cb(f"  SKIP {xlsx_path.name}: missing required columns")
+        return None
+
+    logic = df[required].copy()
+    for c in ("FS", "Depth", "Pos", "Dose"):
+        logic[c] = pd.to_numeric(logic[c], errors="coerce")
+    logic["Axis"] = logic["Axis"].astype(str).str.strip()
+
+    keep_idx = []
+    dup_groups_removed = 0
+
+    for _, g in logic.groupby(["FS", "Depth", "Axis"]):
+        g_orig = logic.loc[g.index].sort_index()
+        pos = g_orig["Pos"].to_numpy()
+        resets = [0]
+        for i in range(1, len(pos)):
+            if pos[i] < pos[i - 1]:
+                resets.append(i)
+        resets.append(len(pos))
+
+        if len(resets) - 1 <= 1:
+            keep_idx.extend(g_orig.index.tolist())
+            continue
+
+        # Build segments: list of (fingerprint, index_list)
+        segments = []
+        for a, b in zip(resets[:-1], resets[1:]):
+            sub = g_orig.iloc[a:b]
+            if sub.empty:
+                continue
+            arr = sub[["Pos", "Dose"]].to_numpy(dtype=float)
+            arr = np.round(arr[np.argsort(arr[:, 0])], 6)
+            fp = hashlib.md5(arr.tobytes()).hexdigest()
+            segments.append((fp, sub.index.tolist()))
+
+        if len(segments) <= 1:
+            if segments:
+                keep_idx.extend(segments[0][1])
+            continue
+
+        unique_fps = set(fp for fp, _ in segments)
+        if len(unique_fps) == 1:
+            # Identical copies — keep first
+            keep_idx.extend(segments[0][1])
+        else:
+            # Conflicting copies — keep largest by row count
+            largest = max(segments, key=lambda x: len(x[1]))
+            keep_idx.extend(largest[1])
+        dup_groups_removed += 1
+
+    if dup_groups_removed == 0:
+        return len(df), len(df), 0
+
+    cleaned = df.loc[sorted(keep_idx)].reset_index(drop=True)
+
+    out_path = xlsx_path.with_name(xlsx_path.stem + "_cleaned.xlsx")
+    with pd.ExcelWriter(out_path, engine="xlsxwriter") as w:
+        for sn in xls.sheet_names:
+            if sn == sheet_name:
+                cleaned.to_excel(w, sheet_name=sn, index=False)
+            else:
+                xls.parse(sn).to_excel(w, sheet_name=sn, index=False)
+
+    return len(df), len(cleaned), dup_groups_removed
+
+
+def run_audit(root, req_path, out_path, recursive=False, sheet_filter=None,
+              ssd_filter=None, energy_filter=None, log_cb=lambda m: None):
     import time
     _t0 = time.time()
     log_cb("Loading requirements…")
+
+    # Parse filters into sets
+    allowed_ssds = None
+    if ssd_filter:
+        try:
+            allowed_ssds = {int(x.strip()) for x in ssd_filter.split(",") if x.strip()}
+        except ValueError:
+            pass
+
+    allowed_energies = None
+    if energy_filter:
+        allowed_energies = {x.strip().upper() for x in energy_filter.split(",") if x.strip()}
 
     # Read requirements file (SCANS.xlsx)
     req_xls = pd.ExcelFile(req_path)
@@ -298,6 +451,12 @@ def run_audit(root, req_path, out_path, recursive=False, log_cb=lambda m: None):
         energy, ssd = parse_energy_ssd_from_sheet(sh)
         if not energy or not ssd:
             log_cb(f"WARNING: Could not parse Energy/SSD from sheet '{sh}'")
+
+        # Apply SSD and energy filters
+        if allowed_ssds and ssd not in allowed_ssds:
+            continue
+        if allowed_energies and (energy or "").upper() not in allowed_energies:
+            continue
         df = req_xls.parse(sh)
         df.columns = [c.strip() for c in df.columns]
 
@@ -361,7 +520,7 @@ def run_audit(root, req_path, out_path, recursive=False, log_cb=lambda m: None):
     to_read = {}
     for i, p in enumerate(excel_files):
         mtime = p.stat().st_mtime
-        key = str(p)
+        key = (str(p), sheet_filter or "")
         if key in cache and cache[key][0] == mtime:
             inv_parts[i] = cache[key][1]
             log_cb(f"[cached] {p.name}")
@@ -371,12 +530,12 @@ def run_audit(root, req_path, out_path, recursive=False, log_cb=lambda m: None):
     # Read only new/modified files in parallel
     if to_read:
         with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(inventory_for_excel, p): (i, p) for i, p in to_read.items()}
+            futures = {executor.submit(inventory_for_excel, p, sheet_filter): (i, p) for i, p in to_read.items()}
             for future in as_completed(futures):
                 i, p = futures[future]
                 result = future.result()
                 inv_parts[i] = result
-                cache[str(p)] = (p.stat().st_mtime, result)
+                cache[(str(p), sheet_filter or "")] = (p.stat().st_mtime, result)
                 log_cb(f"[{sum(x is not None for x in inv_parts)}/{total}] Indexed {p.name} …")
         save_cache(cache)
 
@@ -398,12 +557,39 @@ def run_audit(root, req_path, out_path, recursive=False, log_cb=lambda m: None):
     # Existing keys (E,SSD,ST,Device)
     inv_keys = set(zip(inventory["Energy"], inventory["SSD"], inventory["ScanType"], inventory["Device"]))
 
-    # Add rows for required but missing scan types
+    # Master device list across all energies/SSDs
+    all_devices = sorted(set(v for v in inventory["Device"] if isinstance(v, str) and v))
+
+    # All (energy, SSD) combos that have requirements
+    req_combos = set(
+        zip(req_df["Energy"].astype(str).str.upper().str.strip(),
+            pd.to_numeric(req_df["SSD"], errors="coerce"))
+    )
+    req_combos = {(e, s) for e, s in req_combos if pd.notna(s)}
+
+    # Add rows for required but missing scan types (within devices that are present)
     missing_rows = []
     for (e, ssd), devices in dev_by_group.items():
         for st in needed_scans_for(e, ssd):
             for dev in devices:
                 if (e, ssd, st, dev) not in inv_keys:
+                    missing_rows.append({
+                        "File": "",
+                        "Device": dev,
+                        "Energy": e,
+                        "SSD": ssd,
+                        "ScanType": st,
+                        "FieldSizes": [],
+                        "Depths": [],
+                        "NumScans": 0,
+                    })
+
+    # Cross-energy check: flag devices entirely absent for a required energy/SSD
+    for (e, ssd) in req_combos:
+        present_devices = dev_by_group.get((e, ssd), [])
+        for dev in all_devices:
+            if dev not in present_devices:
+                for st in needed_scans_for(e, ssd):
                     missing_rows.append({
                         "File": "",
                         "Device": dev,
@@ -456,10 +642,15 @@ def run_audit(root, req_path, out_path, recursive=False, log_cb=lambda m: None):
     inventory["Complete"]          = complete
 
     # Sort & write
+    inventory["FileName"] = inventory["File"].apply(lambda x: Path(x).name if x else "")
     inventory = inventory.sort_values(
         by=["Device", "Energy", "SSD", "ScanType", "File"],
         kind="mergesort"
     ).reset_index(drop=True)
+
+    # Reorder: FileName first, full File path after
+    cols = ["FileName"] + [c for c in inventory.columns if c != "FileName"]
+    inventory = inventory[cols]
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     out_path = Path(out_path)
@@ -502,21 +693,42 @@ class App(tk.Tk):
         ttk.Entry(self, textvariable=self.out_var, width=70).grid(row=2, column=1, **pad)
         ttk.Button(self, text="Choose…", command=self.pick_out).grid(row=2, column=2, **pad)
 
+        ttk.Label(self, text="Sheet name filter (optional):").grid(row=3, column=0, sticky="w", **pad)
+        self.sheet_filter_var = tk.StringVar(self)
+        ttk.Entry(self, textvariable=self.sheet_filter_var, width=40).grid(row=3, column=1, sticky="w", **pad)
+        ttk.Label(self, text="(e.g. 'SN 20' — leave blank to check all sheets)").grid(row=3, column=2, sticky="w", **pad)
+
+        ttk.Label(self, text="SSD filter (comma-separated):").grid(row=4, column=0, sticky="w", **pad)
+        self.ssd_filter_var = tk.StringVar(self, value="90, 100")
+        ttk.Entry(self, textvariable=self.ssd_filter_var, width=20).grid(row=4, column=1, sticky="w", **pad)
+        ttk.Label(self, text="(leave blank = all SSDs)").grid(row=4, column=2, sticky="w", **pad)
+
+        ttk.Label(self, text="Energy filter (comma-separated):").grid(row=5, column=0, sticky="w", **pad)
+        self.energy_filter_var = tk.StringVar(self, value="6X, 10X, 15X, 6FFF, 8FFF, 10FFF")
+        ttk.Entry(self, textvariable=self.energy_filter_var, width=40).grid(row=5, column=1, sticky="w", **pad)
+        ttk.Label(self, text="(e.g. '6X, 10X, 6FFF' — leave blank = all energies)").grid(row=5, column=2, sticky="w", **pad)
+
         self.recursive_var = tk.BooleanVar(self, value=False)
         ttk.Checkbutton(self, text="Search subfolders recursively",
-                        variable=self.recursive_var).grid(row=3, column=0, sticky="w", **pad)
+                        variable=self.recursive_var).grid(row=6, column=0, sticky="w", **pad)
 
         self.run_btn = ttk.Button(self, text="Run Audit", command=self.on_run)
-        self.run_btn.grid(row=3, column=1, sticky="e", **pad)
+        self.run_btn.grid(row=6, column=1, sticky="e", **pad)
+
+        self.clean_btn = ttk.Button(self, text="Clean Duplicates in Folder", command=self.on_clean)
+        self.clean_btn.grid(row=6, column=2, sticky="w", **pad)
+
+        self.replace_btn = ttk.Button(self, text="Replace Originals with Cleaned", command=self.on_replace)
+        self.replace_btn.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
 
         self.log = tk.Text(self, height=14, width=96, state="disabled")
-        self.log.grid(row=4, column=0, columnspan=3, sticky="nsew", **pad)
+        self.log.grid(row=8, column=0, columnspan=3, sticky="nsew", **pad)
 
-        self.grid_rowconfigure(4, weight=1)
+        self.grid_rowconfigure(8, weight=1)
         self.grid_columnconfigure(1, weight=1)
 
         self.pb = ttk.Progressbar(self, mode="indeterminate")
-        self.pb.grid(row=5, column=0, columnspan=3, sticky="ew", **pad)
+        self.pb.grid(row=9, column=0, columnspan=3, sticky="ew", **pad)
 
     def pick_root(self):
         d = filedialog.askdirectory(title="Select root folder")
@@ -574,8 +786,14 @@ class App(tk.Tk):
         def worker():
             try:
                 # NO direct Tk calls in this thread; use after() for UI updates
+                sf  = self.sheet_filter_var.get().strip() or None
+                ssdf = self.ssd_filter_var.get().strip() or None
+                ef   = self.energy_filter_var.get().strip() or None
                 saved = run_audit(root, req, outp,
                           recursive=self.recursive_var.get(),
+                          sheet_filter=sf,
+                          ssd_filter=ssdf,
+                          energy_filter=ef,
                           log_cb=lambda m: self.after(0, lambda: self.append_log(m)))
                 self.after(0, lambda p=saved: self.append_log(f"Report written to: {p}"))
                 self.after(0, lambda p=saved: self.open_file(str(p)))
@@ -587,6 +805,104 @@ class App(tk.Tk):
                 self.after(0, self.pb.stop)
                 self.after(0, lambda: self.run_btn.config(state="normal"))
 
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_replace(self):
+        root = self.root_var.get().strip()
+        if not root or not os.path.isdir(root):
+            messagebox.showerror("Missing root folder", "Please choose a valid root folder.")
+            return
+
+        pattern = "**/*_cleaned.xlsx" if self.recursive_var.get() else "*_cleaned.xlsx"
+        cleaned_files = list(Path(root).glob(pattern))
+
+        if not cleaned_files:
+            messagebox.showinfo("Nothing to replace", "No '_cleaned.xlsx' files found in the folder.")
+            return
+
+        if not messagebox.askyesno("Confirm replace",
+                f"Found {len(cleaned_files)} '_cleaned.xlsx' file(s).\n\n"
+                "Each original will be renamed to '_orig.xlsx' as a backup, "
+                "then the cleaned file will take its place.\n\nContinue?"):
+            return
+
+        replaced = 0
+        errors = 0
+        for cleaned_path in cleaned_files:
+            # e.g. SN 20_cleaned.xlsx → original is SN 20.xlsx
+            stem = cleaned_path.stem[: -len("_cleaned")]
+            orig_path = cleaned_path.with_name(stem + ".xlsx")
+            backup_path = cleaned_path.with_name(stem + "_orig.xlsx")
+
+            if not orig_path.exists():
+                self.append_log(f"  SKIP {cleaned_path.name}: original '{orig_path.name}' not found")
+                continue
+            try:
+                orig_path.rename(backup_path)
+                cleaned_path.rename(orig_path)
+                self.append_log(f"  Replaced {orig_path.name} (backup → {backup_path.name})")
+                replaced += 1
+            except Exception as e:
+                self.append_log(f"  ERROR replacing {orig_path.name}: {e}")
+                errors += 1
+
+        self.append_log(f"Done. {replaced} file(s) replaced, {errors} error(s).")
+
+    def on_clean(self):
+        root = self.root_var.get().strip()
+        sf = self.sheet_filter_var.get().strip()
+
+        if not root or not os.path.isdir(root):
+            messagebox.showerror("Missing root folder", "Please choose a valid root folder.")
+            return
+        if not sf:
+            messagebox.showerror("Sheet name required", "Enter a sheet name filter before cleaning (e.g. 'SN 20').")
+            return
+
+        if not messagebox.askyesno("Confirm clean",
+                f"This will write '_cleaned.xlsx' files for any files in:\n{root}\n\n"
+                f"that have duplicate curves in sheet '{sf}'.\n\nContinue?"):
+            return
+
+        self.clean_btn.config(state="disabled")
+        self.run_btn.config(state="disabled")
+        self.pb.start(15)
+        self.append_log(f"Cleaning duplicates in sheet '{sf}'…")
+
+        def worker():
+            try:
+                pattern = "**/*.xlsx" if self.recursive_var.get() else "*.xlsx"
+                files = [p for p in Path(root).glob(pattern)
+                         if "~$" not in p.name and "_cleaned" not in p.name]
+                cleaned_count = 0
+                total = len(files)
+                for idx, p in enumerate(files, 1):
+                    self.after(0, lambda msg=f"[{idx}/{total}] Checking {p.name}…": self.append_log(msg))
+                    result = clean_sheet_duplicates(
+                        p, sf,
+                        log_cb=lambda m: self.after(0, lambda msg=m: self.append_log(msg))
+                    )
+                    if result is None:
+                        self.after(0, lambda msg=f"  Skipped {p.name} (sheet not found or missing columns)": self.append_log(msg))
+                        continue
+                    rows_before, rows_after, dups_removed = result
+                    if dups_removed > 0:
+                        cleaned_count += 1
+                        self.after(0, lambda msg=f"  → Cleaned: {dups_removed} dup group(s) resolved, {rows_before - rows_after} rows dropped → saved as {p.stem}_cleaned.xlsx":
+                                   self.append_log(msg))
+                    else:
+                        self.after(0, lambda msg=f"  → OK: no duplicates found": self.append_log(msg))
+                self.after(0, lambda: self.append_log(
+                    f"Done. {cleaned_count} file(s) cleaned." if cleaned_count
+                    else "Done. No duplicates found — no files written."))
+            except Exception as exc:
+                err = str(exc)
+                self.after(0, lambda msg=err: messagebox.showerror("Error", msg))
+            finally:
+                self.after(0, self.pb.stop)
+                self.after(0, lambda: self.clean_btn.config(state="normal"))
+                self.after(0, lambda: self.run_btn.config(state="normal"))
 
         threading.Thread(target=worker, daemon=True).start()
 

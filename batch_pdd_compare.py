@@ -25,6 +25,105 @@ from scipy.ndimage import gaussian_filter1d
 from comp import dosedif, dta as dtafunc
 from gamma import gamma as gammafunc
 
+# ── EPOM shift helpers (inlined from PDDCompare.py to avoid launching GUI) ───
+import enum
+from typing import NamedTuple
+from scipy.interpolate import UnivariateSpline, BSpline, PPoly
+
+class _IonChamberData(NamedTuple):
+    radius_cavity_mm: float
+    wall_thickness_mm: float
+
+class _IonChambers(str, enum.Enum):
+    PTW_31021 = "PTW31021"
+    IBA_CC13  = "IBA CC13"
+    PTW_31010 = "PTW31010"
+    def _parameters(self):
+        if self is _IonChambers.PTW_31021: return _IonChamberData(2.4, 0.57 + 0.09)
+        if self is _IonChambers.PTW_31010: return _IonChamberData(2.75, 0.55 + 0.15)
+        if self is _IonChambers.IBA_CC13:  return _IonChamberData(3.0, 0.4)
+        return _IonChamberData(2.4, 0.66)
+    @property
+    def outer_radius(self):
+        p = self._parameters(); return p.radius_cavity_mm + p.wall_thickness_mm
+    @property
+    def simple_photon_effective_point_of_measurement(self):
+        return 0.6 * self._parameters().radius_cavity_mm
+    @property
+    def simple_electron_effective_point_of_measurement(self):
+        return 0.5 * self._parameters().radius_cavity_mm
+
+class _Modality(str, enum.Enum):
+    PHOTON   = "PHOTON"
+    ELECTRON = "ELECTRON"
+
+class _PDDCurve:
+    def __init__(self, z, dose, unit="cm", lam=0.0):
+        z = np.asarray(z, dtype=float); dose = np.asarray(dose, dtype=float)
+        idx = np.argsort(z); self.z = z[idx]; self.dose = dose[idx]
+        self.z_distance_unit = unit
+        N = max(1, self.z.size); s = max(0.0, lam * N * float(np.var(self.dose)))
+        k = min(3, max(1, N - 1))
+        self.curve = UnivariateSpline(self.z, self.dose, s=s, k=k)
+    def _ppoly(self):
+        t, c, k = self.curve._eval_args; return PPoly.from_spline(BSpline(t, c, k))
+    def _deriv(self, order=1): return self._ppoly().derivative(order)
+    def _mm_to_z(self, mm): return mm / (10.0 if self.z_distance_unit == "cm" else 1.0)
+    def _surface(self):
+        try:
+            roots = self._ppoly().derivative(2).roots()
+            if roots.size:
+                return float(roots[int(np.argmax(self._deriv(1)(roots)))])
+        except Exception:
+            pass
+        zmin, zmax = float(self.z.min()), float(self.z.max())
+        win = 2.0 if self.z_distance_unit == "cm" else 20.0
+        zfine = np.linspace(zmin, min(zmax, zmin + win), max(1000, 10 * len(self.z)))
+        d1 = np.nan_to_num(self._deriv(1)(zfine), nan=-np.inf, posinf=-np.inf, neginf=-np.inf)
+        return float(zfine[int(np.argmax(d1))])
+    def epom_shift(self, chamber, modality):
+        epom_mm = (chamber.simple_photon_effective_point_of_measurement
+                   if modality == _Modality.PHOTON
+                   else chamber.simple_electron_effective_point_of_measurement)
+        return self._mm_to_z(chamber.outer_radius - epom_mm) - self._surface()
+
+def _map_detector(name):
+    """Map a raw detector string to an _IonChambers enum, or None for no-shift detectors.
+    Canonical names (TN31021, TN31010, TN60019, CC13) are matched first.
+    Fuzzy fallbacks handle any remaining legacy variants.
+    Returns None for no-shift detectors (TPS, TN60019 microDiamond).
+    """
+    key = (name or "").strip().lower().replace("-","").replace("_","").replace(" ","")
+    # No-shift detectors
+    if key.startswith("tps"):                      return None  # TPS M5, TPS M6, etc.
+    if key in ("tn60019",) or "microdiamond" in key or "60019" in key: return None
+    # PTW 31010
+    if key in ("tn31010",) or "31010" in key:     return _IonChambers.PTW_31010
+    # IBA CC13
+    if key in ("cc13",) or "cc13" in key:         return _IonChambers.IBA_CC13
+    # PTW 31021 — canonical TN31021, serial TN31XXX, or legacy name variants
+    if key in ("tn31021",) or key.startswith("tn31") or key.startswith("tn32") or "31021" in key or "semiflex" in key:
+                                                   return _IonChambers.PTW_31021
+    # Unrecognised — warn and default to PTW31021
+    print(f"[_map_detector] unrecognised detector '{name}' -- defaulting to PTW31021")
+    return _IonChambers.PTW_31021
+
+def compute_epom_shifts(z1, d1, det1, z2, d2, det2, modality="PHOTON", unit="cm"):
+    import numpy as _np
+    z1a = _np.asarray(z1, dtype=float); z2a = _np.asarray(z2, dtype=float)
+    ic1 = _map_detector(det1); ic2 = _map_detector(det2)
+    mod = _Modality(modality)
+    def _shift(za, d, ic):
+        if ic is None:
+            return 0.0
+        if not _np.any(za < 0):
+            return 0.0
+        return float(_PDDCurve(za, d, unit=unit).epom_shift(ic, mod))
+    s1 = _shift(z1a, d1, ic1)
+    s2 = _shift(z2a, d2, ic2)
+    return s1, s2
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ─────────────────────────────────────────────
 #  CONFIG  — edit these as needed
 # ─────────────────────────────────────────────
@@ -42,11 +141,11 @@ FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx'
 FS_FILTER   = [1.5, 3.0, 4.5, 6.0, 9.0, 10.5, 12.0, 15.0, 20.0, 30.0, 40.0]      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
 
 SHEET1_NAME = "TPS SN 21"   # reference / measured sheet name
-SHEET2_NAME = "SN 19"            # comparison sheet name
+SHEET2_NAME = "SN 21"            # comparison sheet name
 
 ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
-DD_CRITERIA   = 2           # dose difference threshold [%]
-DTA_CRITERIA  = 0.2           # DTA threshold [cm]  (2 mm)
+DD_CRITERIA   = 1           # dose difference threshold [%]
+DTA_CRITERIA  = 0.1           # DTA threshold [cm]  (2 mm)
 NORM          = 1             # 1 = normalize to dmax, 2 = normalize to fixed depth per energy
 
 # Fixed normalization depth [cm] per energy folder name
@@ -57,8 +156,12 @@ NORM_DEPTH = {
     '10FFF':2.2,
     '15X':  3.5,
 }
-DEPTH_SHIFT1  = 0.0           # depth shift for sheet 1 [cm]
-DEPTH_SHIFT2  = -0.15           # depth shift for sheet 2 [cm]
+DEPTH_SHIFT1  = 0.0           # depth shift for sheet 1 [cm]  (ignored when AUTO_EPOM_SHIFT=True)
+DEPTH_SHIFT2  = 0.0          # depth shift for sheet 2 [cm]  (ignored when AUTO_EPOM_SHIFT=True)
+AUTO_EPOM_SHIFT = False       # True = compute EPOM depth shift automatically per file (like GUI)
+EPOM_DETECTOR1  = 'PTW31021' # detector for sheet 1: 'PTW31021', 'PTW31010', 'IBACC13'
+EPOM_DETECTOR2  = 'PTW31021' # detector for sheet 2
+EPOM_MODALITY   = 'PHOTON'   # 'PHOTON' or 'ELECTRON'
 CUTOFF_DEPTH  = 0.1           # discard points shallower than this [cm]; GUI uses 0.1 cm
 CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 0.48 cm
 CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
@@ -151,6 +254,8 @@ def run_one_file(xlsx_path, energy_label):
     df1 = df1.sort_values(by=['FS', 'Axis', 'Pos'])
     df2 = df2.sort_values(by=['FS', 'Axis', 'Pos'])
 
+    # Detector is resolved per-FS inside the loop (each scan may use a different detector)
+
     # FS values common to both sheets (Z-axis rows only)
     fs1 = set(df1.loc[df1['Axis'] == 'Z', 'FS'].unique())
     fs2 = set(df2.loc[df2['Axis'] == 'Z', 'FS'].unique())
@@ -238,8 +343,23 @@ def run_one_file(xlsx_path, energy_label):
         sort2 = y2.argsort(); y2, d2 = y2.iloc[sort2].reset_index(drop=True), d2.iloc[sort2].reset_index(drop=True)
 
         # ── depth shifts ───────────────────
-        y1 = y1 + DEPTH_SHIFT1
-        y2 = y2 + DEPTH_SHIFT2
+        if AUTO_EPOM_SHIFT:
+            # Resolve detector per-curve from data column; fall back to config value
+            def _curve_detector(df, mask, config_det):
+                if 'Detector' in df.columns:
+                    vals = df.loc[mask, 'Detector'].dropna().unique()
+                    if len(vals) > 0:
+                        return str(vals[0]).strip()
+                return config_det
+            _det1 = _curve_detector(df1, mask1, EPOM_DETECTOR1)
+            _det2 = _curve_detector(df2, mask2, EPOM_DETECTOR2)
+            s1, s2 = compute_epom_shifts(y1, d1, _det1, y2, d2, _det2,
+                                         modality=EPOM_MODALITY, unit="cm")
+            print(f"  FS {fs_val}: EPOM  {SHEET1_NAME}({_det1}): {s1:+.3f} cm  |  {SHEET2_NAME}({_det2}): {s2:+.3f} cm")
+        else:
+            s1, s2 = DEPTH_SHIFT1, DEPTH_SHIFT2
+        y1 = y1 + s1
+        y2 = y2 + s2
 
         # ── cutoff ─────────────────────────
         if CUTOFF_DEPTH > 0:

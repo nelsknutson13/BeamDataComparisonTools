@@ -539,11 +539,20 @@ def apply_detector_convolution(profile_y, profile_dose, fwhm_cm):
 
     return dose_smoothed
 
-def _to_ionchamber(name: str) -> IonChambers:
+def _to_ionchamber(name: str):
+    """Map detector name to IonChambers enum, or None for no-shift detectors.
+    Canonical names (TN31021, TN31010, TN60019, CC13) are matched first.
+    Fuzzy fallbacks handle any remaining legacy variants.
+    Returns None for TPS curves and TN60019 microDiamond.
+    """
     key = (name or "").strip().lower().replace("-", "").replace("_", "").replace(" ", "")
-    if key in ("ptw31021",): return IonChambers.PTW_31021
-    if key in ("ptw31010",): return IonChambers.PTW_31010
-    if key in ("ibacc13","cc13","ibacc-13","iba cc13"): return IonChambers.IBA_CC13
+    if key.startswith("tps"):                      return None
+    if key in ("tn60019",) or "microdiamond" in key or "60019" in key: return None
+    if key in ("tn31010",) or "31010" in key:     return IonChambers.PTW_31010
+    if key in ("cc13",) or "cc13" in key:         return IonChambers.IBA_CC13
+    if key in ("tn31021",) or key.startswith("tn31") or key.startswith("tn32") or "31021" in key or "semiflex" in key:
+                                                   return IonChambers.PTW_31021
+    print(f"[_to_ionchamber] unrecognised detector '{name}' -- defaulting to PTW31021")
     return IonChambers.PTW_31021
 
 def autofill_depth_shifts_epom_ui(y1, d1, y2, d2, unit="cm"):
@@ -551,31 +560,30 @@ def autofill_depth_shifts_epom_ui(y1, d1, y2, d2, unit="cm"):
         ic1 = _to_ionchamber(det1_combo.get())
         ic2 = _to_ionchamber(det2_combo.get())
         mod = Modality(modality_combo.get()) if modality_combo.get() in ("PHOTON","ELECTRON") else Modality.PHOTON
+        z1a = np.asarray(y1, float); z2a = np.asarray(y2, float)
 
-        p1 = PDDCurve(np.asarray(y1, float), np.asarray(d1, float), z_distance_unit=unit, lam=0.0)
-        p2 = PDDCurve(np.asarray(y2, float), np.asarray(d2, float), z_distance_unit=unit, lam=0.0)
-
-        # --- Raw EPOM shifts ---
-        s1_raw = p1.getShiftToIonChamberEPOM(ic1, mod)
-        s2_raw = p2.getShiftToIonChamberEPOM(ic2, mod)
-
-        # --- Local resolution near surface ---
-        res1 = _surface_resolution(y1, unit=unit)
-        res2 = _surface_resolution(y2, unit=unit)
-
-        # --- Apply half-step correction (shift shallower by 0.5 * res) ---
-        s1 = s1_raw + 0.5 * res1 if res1 > 0 else s1_raw
-        s2 = s2_raw + 0.5 * res2 if res2 > 0 else s2_raw
+        # --- Per-curve: skip EPOM if no sub-zero depth data ---
+        def _gui_shift(za, d, ic, y_raw, label):
+            if ic is None:
+                print(f"[Auto-shift EPOM] {label}: no-shift detector -- shift = 0.0")
+                return 0.0
+            if not np.any(za < 0):
+                print(f"[Auto-shift EPOM] {label}: no sub-zero depth data -- shift = 0.0")
+                return 0.0
+            p = PDDCurve(za, np.asarray(d, float), z_distance_unit=unit, lam=0.0)
+            s_raw = p.getShiftToIonChamberEPOM(ic, mod)
+            res = _surface_resolution(y_raw, unit=unit)
+            s = s_raw + 0.5 * res if res > 0 else s_raw
+            print(f"[Auto-shift EPOM] {label} {ic.value}: raw={s_raw:.3f} cm, res={res:.3f} cm, corrected={s:.3f} cm")
+            return s
+        s1 = _gui_shift(z1a, d1, ic1, y1, "Det1")
+        s2 = _gui_shift(z2a, d2, ic2, y2, "Det2")
 
         # --- Update GUI entries ---
         depth_shift1_entry.delete(0, tk.END)
         depth_shift1_entry.insert(0, f"{s1:.3f}")
         depth_shift2_entry.delete(0, tk.END)
         depth_shift2_entry.insert(0, f"{s2:.3f}")
-
-        # --- Debug printout ---
-        print(f"[Auto-shift EPOM] Det1={ic1.value}: raw={s1_raw:.3f} cm, res={res1:.3f} cm, corrected={s1:.3f} cm")
-        print(f"[Auto-shift EPOM] Det2={ic2.value}: raw={s2_raw:.3f} cm, res={res2:.3f} cm, corrected={s2:.3f} cm")
 
     except Exception as e:
         print(f"[Auto-shift] failed: {e}")
@@ -685,6 +693,14 @@ def run_comparison():
     df2=pd.read_excel(fn,sheet_name=sn2,header=0);   
     df1=df1.sort_values(by=['FS','Axis','Pos'])
     df2=df2.sort_values(by=['FS','Axis','Pos'])
+    # Auto-populate detector combos from data column if present
+    for _df, _combo in ((df1, det1_combo), (df2, det2_combo)):
+        if 'Detector' in _df.columns:
+            _vals = _df['Detector'].dropna().unique()
+            if len(_vals) > 0:
+                _det = str(_vals[0]).strip()
+                _combo.set(_det)
+                print(f"[Detector] auto-set from data: {_det}")
     # Before starting the loop, check the type and contents of fsl
     print("Type of fsl:", type(fsl))
     print("Contents of fsl:", fsl)
@@ -720,6 +736,12 @@ def run_comparison():
         s2 = y2.argsort(); y2, d2 = y2.iloc[s2].reset_index(drop=True), d2.iloc[s2].reset_index(drop=True)
 
         if auto_shift_var.get():
+            # Update detector combos from per-curve data so each FS uses its own detector
+            for _df_cur, _combo in ((df1, det1_combo), (df2, det2_combo)):
+                if 'Detector' in _df_cur.columns:
+                    _cur_dets = _df_cur.loc[_df_cur['FS'] == fsl[j], 'Detector'].dropna().unique()
+                    if len(_cur_dets) > 0:
+                        _combo.set(str(_cur_dets[0]).strip())
             autofill_depth_shifts_epom_ui(y1, d1, y2, d2, unit="cm")
 
         # Retrieve user-specified shifts

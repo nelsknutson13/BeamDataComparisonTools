@@ -30,21 +30,21 @@ from center import center as center_function
 #  CONFIG  — edit these as needed
 # ─────────────────────────────────────────────
 
-FILE_MODE = 'flat'
+FILE_MODE = 'hierarchical'
 # 'hierarchical' : BASE_PATH contains energy subfolders (e.g. 6X/, 10FFF/),
 #                  each holding one *Profile*.xlsx file.
 # 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
 #                  parsed from each filename.
 
-BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
+BASE_PATH = r"C:\Users\nknutson\Box\Knutson\Research\Projects underway\Radformation research\RADMC Photon VALIDATION\TrueBeam\ProcessedData"
 
 FILE_FILTER = '*Profile*.xlsx'    # glob used in 'flat' mode only
 
-SHEET1_NAME = "TPS SN 20"             # reference / measured sheet name
-SHEET2_NAME = "SN 20"         # comparison sheet name
+SHEET1_NAME = "Measurement"             # reference / measured sheet name
+SHEET2_NAME = "MC"         # comparison sheet name
 
 # Data selection — 'all' means use all common values found in each file
-FIELD_SIZES = [1.5, 3.0, 4.5, 6.0, 9.0, 10.5, 12.0, 15.0, 20.0, 30.0, 40.0]                # e.g. [5.0, 10.0, 20.0]  or  'all'
+FIELD_SIZES = 'all'               # e.g. [5.0, 10.0, 20.0]  or  'all'
 AXES        = 'all'                # e.g. ['X', 'Y']          or  'all'  (Z excluded always)
 DEPTHS_CM   = 'all'                # e.g. [1.5, 5.0, 10.0]   or  'all'
 
@@ -52,7 +52,7 @@ DEPTH_ROUND_CM = 0.1               # rounding resolution for depth matching [cm]
 
 ANALYSIS      = 'mppg'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg'
 DD_CRITERIA   = 2.0                # dose difference threshold [%]
-DTA_CRITERIA  = 0.2                # DTA threshold [cm]  (2 mm)
+DTA_CRITERIA  = 0.3                # DTA threshold [cm]  (2 mm)
 
 # Normalization
 NORM = 1
@@ -79,11 +79,11 @@ CENTER = 3
 CENTER_THRESHOLD = 0.3             # threshold fraction passed to center()
 
 # Detector convolution
-CONV_FWHM_CM = 0.0                 # detector FWHM [cm]; 0 = disabled
-CONV_TARGET  = 'none'              # 'none', 'curve1', 'curve2', or 'both'
+CONV_FWHM_CM = 0.45                 # detector FWHM [cm]; 0 = disabled
+CONV_TARGET  = 'curve2'              # 'none', 'curve1', 'curve2', or 'both'
 
 # MPPG-specific parameters (used only when ANALYSIS == 'mppg')
-MPPG_DDTAIL  = 2.0                 # tail dose-difference criterion [% of Dmax]
+MPPG_DDTAIL  = 3.0                 # tail dose-difference criterion [% of Dmax]
 MPPG_PEN_CM  = 0.25                # penumbra half-width [cm]  (GUI default: pupper_entry="0.5" / 2)
 MPPG_OVR_CM  = 1.0                 # overlap buffer zone [cm]  (GUI default: pulower_entry="1")
 MPPG_DIAG_FACTOR = 0.80            # diagonal field size factor (GUI default: 0.80)
@@ -102,7 +102,12 @@ _s2 = SHEET2_NAME.replace(' ', '')
 # criteria land in separate folders automatically (e.g. mppg_2pct_2mm).
 _dd  = f"{DD_CRITERIA:.4g}".rstrip('0').rstrip('.')
 _dta = f"{DTA_CRITERIA*10:.4g}".rstrip('0').rstrip('.')
-_criteria_tag = f"{ANALYSIS}_{_dd}pct_{_dta}mm"
+_tail = f"{MPPG_DDTAIL:.4g}".rstrip('0').rstrip('.')
+_criteria_tag = (
+    f"{ANALYSIS}_{_dd}pct_{_dta}mm_{_tail}pctDmax"
+    if ANALYSIS == 'mppg' else
+    f"{ANALYSIS}_{_dd}pct_{_dta}mm"
+)
 
 # Output folder hierarchy:
 #   Results/
@@ -321,6 +326,13 @@ def run_one_file(xlsx_path, energy_label):
     total_pts_axis  = 0
     total_fail_axis = 0
     gvtot = []
+
+    # MPPG regional accumulators
+    reg_in_pass = reg_in_tot = 0
+    reg_pen_pass = reg_pen_tot = 0
+    reg_tail_pass = reg_tail_tot = 0
+    reg_ovr_hi_pass = reg_ovr_hi_tot = 0
+    reg_ovr_lo_pass = reg_ovr_lo_tot = 0
 
     # ── outer loop: all axes overlaid onto the same figure ────────────────
     for axis in axes:
@@ -623,6 +635,18 @@ def run_one_file(xlsx_path, energy_label):
                     total_pts_axis  += total
                     total_fail_axis += failed
 
+                    # Accumulate MPPG regional counts
+                    reg_in_pass     += int((in_core_x    & pass_dd).sum())
+                    reg_in_tot      += int(in_core_x.sum())
+                    reg_pen_pass    += int((pen_core_dta & pass_dta).sum())
+                    reg_pen_tot     += int(pen_core_dta.sum())
+                    reg_tail_pass   += int((tail_core_x  & pass_ddtail).sum())
+                    reg_tail_tot    += int(tail_core_x.sum())
+                    reg_ovr_hi_pass += int(overlap_hi_pass.sum())
+                    reg_ovr_hi_tot  += int(near_hi_x.sum())
+                    reg_ovr_lo_pass += int(overlap_lo_pass.sum())
+                    reg_ovr_lo_tot  += int(near_lo_x.sum())
+
                     # Plotting — ax1 (DTA penumbra)
                     ax1.plot(dtax, dtav_a * 10, '.k', ms=MARKER_SIZE)
                     ax1.plot(dtax[pen_core_dta &  pass_dta],
@@ -653,6 +677,16 @@ def run_one_file(xlsx_path, energy_label):
                         'Depth_cm': depth, 'PassRate_pct': round(passrate, 2),
                         'MeanDoseDiff_pct': round(mean_dd, 3),
                         'TotalPoints': total, 'FailPoints': failed,
+                        'InField_Pass': int((in_core_x    & pass_dd).sum()),
+                        'InField_Tot':  int(in_core_x.sum()),
+                        'Penumbra_Pass': int((pen_core_dta & pass_dta).sum()),
+                        'Penumbra_Tot':  int(pen_core_dta.sum()),
+                        'Tails_Pass':    int((tail_core_x  & pass_ddtail).sum()),
+                        'Tails_Tot':     int(tail_core_x.sum()),
+                        'Overlap_Hi_Pass': int(overlap_hi_pass.sum()),
+                        'Overlap_Hi_Tot':  int(near_hi_x.sum()),
+                        'Overlap_Lo_Pass': int(overlap_lo_pass.sum()),
+                        'Overlap_Lo_Tot':  int(near_lo_x.sum()),
                     })
                     print(f"    FS {fs_val} depth {depth:.2f}: MPPG Pass={passrate:.2f}%  Fail={failed}/{total}")
 
@@ -700,6 +734,15 @@ def run_one_file(xlsx_path, energy_label):
             f'MPPG {DD_CRITERIA:.0f}%/{DTA_CRITERIA*10:.0f}mm/'
             f'{MPPG_DDTAIL:.0f}%Dmax'
         )
+        if reg_in_tot + reg_pen_tot + reg_tail_tot > 0:
+            def _fmt_reg(p, t):
+                return f"{p/t*100:.1f}% (n={t})" if t > 0 else "n/a"
+            print(f"\n  Region breakdown (MPPG):")
+            print(f"    In-field  (DD {DD_CRITERIA:.1f}%)         : {_fmt_reg(reg_in_pass, reg_in_tot)}")
+            print(f"    Penumbra  (DTA {DTA_CRITERIA*10:.1f}mm)      : {_fmt_reg(reg_pen_pass, reg_pen_tot)}")
+            print(f"    Tails     (DD {MPPG_DDTAIL:.1f}% of Dmax) : {_fmt_reg(reg_tail_pass, reg_tail_tot)}")
+            print(f"    Overlap   in-field side          : {_fmt_reg(reg_ovr_hi_pass, reg_ovr_hi_tot)}")
+            print(f"    Overlap   tail side              : {_fmt_reg(reg_ovr_lo_pass, reg_ovr_lo_tot)}")
         ax3.set_xlabel(
             f'Outside {DD_CRITERIA:.1f}% in-field | {DTA_CRITERIA*10:.1f}mm pen | '
             f'{MPPG_DDTAIL:.1f}%Dmax tails  '

@@ -127,26 +127,26 @@ def compute_epom_shifts(z1, d1, det1, z2, d2, det2, modality="PHOTON", unit="cm"
 # ─────────────────────────────────────────────
 #  CONFIG  — edit these as needed
 # ─────────────────────────────────────────────
-FILE_MODE = 'flat'
+FILE_MODE = 'hierarchical'
 # 'hierarchical' : BASE_PATH contains energy subfolders (e.g. 6X/, 10FFF/),
 #                  each holding one *PDD*.xlsx file.
 # 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
 #                  parsed from each filename (e.g. 6X_100SSD_PDDData.xlsx -> 6X_100SSD).
 #                  Use FILE_FILTER to restrict which files are processed.
 
-BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
+BASE_PATH = r"C:\Users\nknutson\Box\Knutson\Research\Projects underway\Radformation research\RADMC Photon VALIDATION\TrueBeam\ProcessedData"
 
 
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
-FS_FILTER   = [1.5, 3.0, 4.5, 6.0, 9.0, 10.5, 12.0, 15.0, 20.0, 30.0, 40.0]      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
+FS_FILTER   = []      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
 
-SHEET1_NAME = "TPS SN 21"   # reference / measured sheet name
-SHEET2_NAME = "SN 21"            # comparison sheet name
+SHEET1_NAME = "Measurement"   # reference / measured sheet name
+SHEET2_NAME = "MC"            # comparison sheet name
 
 ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
-DD_CRITERIA   = 1           # dose difference threshold [%]
-DTA_CRITERIA  = 0.1           # DTA threshold [cm]  (2 mm)
-NORM          = 1             # 1 = normalize to dmax, 2 = normalize to fixed depth per energy
+DD_CRITERIA   = 2           # dose difference threshold [%]
+DTA_CRITERIA  = 0.2           # DTA threshold [cm]  (2 mm)
+NORM          = 2             # 1 = each dmax, 2 = fixed depth per energy, 3 = dmax of curve 1, 4 = dmax of curve 2
 
 # Fixed normalization depth [cm] per energy folder name
 NORM_DEPTH = {
@@ -162,7 +162,7 @@ AUTO_EPOM_SHIFT = False       # True = compute EPOM depth shift automatically pe
 EPOM_DETECTOR1  = 'PTW31021' # detector for sheet 1: 'PTW31021', 'PTW31010', 'IBACC13'
 EPOM_DETECTOR2  = 'PTW31021' # detector for sheet 2
 EPOM_MODALITY   = 'PHOTON'   # 'PHOTON' or 'ELECTRON'
-CUTOFF_DEPTH  = 0.1           # discard points shallower than this [cm]; GUI uses 0.1 cm
+CUTOFF_DEPTH  = 0.0           # discard points shallower than this [cm]; GUI uses 0.1 cm
 CONV_FWHM_CM  = 0.48          # PTW 31021: 2 × 2.4 mm cavity radius = 4.8 mm = 0.48 cm
 CONV_TARGET   = 'none'      # which curve to convolve: 'none', 'curve1', 'curve2', or 'both'
 MARKER_SIZE   = 4             # plot marker size
@@ -372,6 +372,9 @@ def run_one_file(xlsx_path, energy_label):
                 continue
 
         # ── normalization ──────────────────
+        def _norm_at_depth(y, d, depth):
+            return float(interp.pchip(y, d)(depth))
+
         if NORM == 1:
             d1 = d1 / d1.max() * 100
             d2 = d2 / d2.max() * 100
@@ -382,10 +385,18 @@ def run_one_file(xlsx_path, energy_label):
                 d1 = d1 / d1.max() * 100
                 d2 = d2 / d2.max() * 100
             else:
-                d1_fixed = float(interp.pchip(y1, d1)(fixed_depth))
-                d2_fixed = float(interp.pchip(y2, d2)(fixed_depth))
-                d1 = d1 / d1_fixed * 100
-                d2 = d2 / d2_fixed * 100
+                d1 = d1 / _norm_at_depth(y1, d1, fixed_depth) * 100
+                d2 = d2 / _norm_at_depth(y2, d2, fixed_depth) * 100
+        elif NORM == 3:
+            dmax_depth = float(y1.iloc[d1.values.argmax()])
+            print(f"  Norm 3 (Dmax curve 1)  FS={fs_val}  dmax depth = {dmax_depth:.3f} cm")
+            d1 = d1 / _norm_at_depth(y1, d1, dmax_depth) * 100
+            d2 = d2 / _norm_at_depth(y2, d2, dmax_depth) * 100
+        elif NORM == 4:
+            dmax_depth = float(y2.iloc[d2.values.argmax()])
+            print(f"  Norm 4 (Dmax curve 2)  FS={fs_val}  dmax depth = {dmax_depth:.3f} cm")
+            d1 = d1 / _norm_at_depth(y1, d1, dmax_depth) * 100
+            d2 = d2 / _norm_at_depth(y2, d2, dmax_depth) * 100
 
         # ── detector convolution ──────────────────
         if CONV_TARGET in ('curve1', 'both'):

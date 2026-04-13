@@ -792,40 +792,45 @@ def run_comparison():
 
         # Normalization
         norm = int(norm_combo.get())
-        
+
+        def _norm_at_depth(y, d, depth):
+            """Return dose value interpolated at depth; fallback to nearest if out of range."""
+            if depth < y.min() or depth > y.max():
+                return d.loc[(y - depth).abs().idxmin()]
+            return float(interp.pchip(y, d)(depth))
+
         if norm == 0:
             pass  # No normalization
-        
+
         elif norm == 1:
             d1 = d1 / d1.max() *100
             d2 = d2 / d2.max() *100
-        
+
         elif norm == 2:
             try:
                 fixed_depth = float(fixed_depth_entry.get())
             except:
                 fixed_depth = 1.5  # fallback
-        
-            # Dataset 1
-            if fixed_depth < y1.min() or fixed_depth > y1.max():
-                print(f"Warning: Fixed depth {fixed_depth} cm out of range for dataset 1. Using closest value.")
-                closest_idx = (y1 - fixed_depth).abs().idxmin()
-                d1_fixed = d1.loc[closest_idx]
-            else:
-                interp1 = interp.pchip(y1, d1)
-                d1_fixed = interp1(fixed_depth)
-        
-            # Dataset 2
-            if fixed_depth < y2.min() or fixed_depth > y2.max():
-                print(f"Warning: Fixed depth {fixed_depth} cm out of range for dataset 2. Using closest value.")
-                closest_idx = (y2 - fixed_depth).abs().idxmin()
-                d2_fixed = d2.loc[closest_idx]
-            else:
-                interp2 = interp.pchip(y2, d2)
-                d2_fixed = interp2(fixed_depth)
-        
-            d1 = d1 / d1_fixed *100
-            d2 = d2 / d2_fixed *100
+            d1 = d1 / _norm_at_depth(y1, d1, fixed_depth) * 100
+            d2 = d2 / _norm_at_depth(y2, d2, fixed_depth) * 100
+
+        elif norm == 3:
+            # Normalize both curves to the dmax depth of curve 1
+            dmax_depth1 = float(y1.iloc[d1.values.argmax()])
+            fixed_depth_entry.delete(0, 'end')
+            fixed_depth_entry.insert(0, f"{dmax_depth1:.3f}")
+            print(f"  Norm 3 (Dmax curve 1)  FS={fsl[j]}  dmax depth = {dmax_depth1:.3f} cm")
+            d1 = d1 / _norm_at_depth(y1, d1, dmax_depth1) * 100
+            d2 = d2 / _norm_at_depth(y2, d2, dmax_depth1) * 100
+
+        elif norm == 4:
+            # Normalize both curves to the dmax depth of curve 2
+            dmax_depth2 = float(y2.iloc[d2.values.argmax()])
+            fixed_depth_entry.delete(0, 'end')
+            fixed_depth_entry.insert(0, f"{dmax_depth2:.3f}")
+            print(f"  Norm 4 (Dmax curve 2)  FS={fsl[j]}  dmax depth = {dmax_depth2:.3f} cm")
+            d1 = d1 / _norm_at_depth(y1, d1, dmax_depth2) * 100
+            d2 = d2 / _norm_at_depth(y2, d2, dmax_depth2) * 100
             
         if conv_fwhm > 0:
             
@@ -1247,10 +1252,10 @@ processing_frame.grid(row=4, column=0, sticky="ew")
 
 # Normalization dropdown
 ttk.Label(processing_frame, text="Normalization:").grid(row=1, column=0, sticky="w")
-norm_combo = ttk.Combobox(processing_frame, values=[0, 1, 2], width=5)
+norm_combo = ttk.Combobox(processing_frame, values=[0, 1, 2, 3, 4], width=5)
 norm_combo.grid(row=1, column=1, padx=5)
 norm_combo.set(1)
-ttk.Label(processing_frame, text="0: None, 1: Normalize to dmax, 2: Normalize to Fixed Depth").grid(row=1, column=2, sticky="w")
+ttk.Label(processing_frame, text="0: None  1: Each Dmax  2: Fixed Depth  3: Dmax of Curve 1  4: Dmax of Curve 2").grid(row=1, column=2, sticky="w")
 
 # Fixed Depth Input for normalization option 2
 ttk.Label(processing_frame, text="Fixed Depth [cm] for Norm:").grid(row=2, column=0, sticky="w")

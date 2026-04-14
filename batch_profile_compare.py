@@ -866,8 +866,87 @@ def main():
     else:
         _criteria_str = _aname
 
+    # ── all-energies Depth × FS summary (printed first) ─────────────────────
+    all_depths_u = sorted(df_out['Depth_cm'].unique())
+    all_fss_u    = sorted(df_out['FS'].unique())
+    all_fs_cols  = [
+        f"{int(fs)} cm" if float(fs).is_integer() else f"{fs} cm"
+        for fs in all_fss_u
+    ]
+
+    def _build_matrix(data):
+        """Build a Depth × FS weighted pass rate matrix from data."""
+        rows = []
+        for d in all_depths_u:
+            row = {'Depth': f"{d:g} cm"}
+            for fs, col in zip(all_fss_u, all_fs_cols):
+                sub = data[(data['Depth_cm'] == d) & (data['FS'] == fs)]
+                row[col] = fmt(weighted_pass(sub)) if len(sub) > 0 else '—'
+            row['All FS'] = fmt(weighted_pass(data[data['Depth_cm'] == d]))
+            rows.append(row)
+        footer = {'Depth': 'All Depths'}
+        for fs, col in zip(all_fss_u, all_fs_cols):
+            footer[col] = fmt(weighted_pass(data[data['FS'] == fs]))
+        footer['All FS'] = fmt(weighted_pass(data))
+        rows.append(footer)
+        return pd.DataFrame(rows)
+
+    def _build_region_matrix(data, pass_col, tot_col, depths=None, fss=None, fs_cols=None):
+        """Build a Depth × FS pass rate matrix using regional pass/total columns."""
+        if depths  is None: depths  = all_depths_u
+        if fss     is None: fss     = all_fss_u
+        if fs_cols is None: fs_cols = all_fs_cols
+
+        def _wp(grp):
+            p = grp[pass_col].sum(); t = grp[tot_col].sum()
+            return p / t * 100 if t > 0 else float('nan')
+
+        rows = []
+        for d in depths:
+            row = {'Depth': f"{d:g} cm"}
+            for fs, col in zip(fss, fs_cols):
+                sub = data[(data['Depth_cm'] == d) & (data['FS'] == fs)]
+                row[col] = fmt(_wp(sub)) if len(sub) > 0 else '—'
+            row['All FS'] = fmt(_wp(data[data['Depth_cm'] == d]))
+            rows.append(row)
+        footer = {'Depth': 'All Depths'}
+        for fs, col in zip(fss, fs_cols):
+            footer[col] = fmt(_wp(data[data['FS'] == fs]))
+        footer['All FS'] = fmt(_wp(data))
+        rows.append(footer)
+        return pd.DataFrame(rows)
+
+    df_ae_overall = _build_matrix(df_out)
+
+    # MPPG regional sub-tables
+    _mppg_regions = []
+    if ANALYSIS == 'mppg' and 'InField_Tot' in df_out.columns:
+        _region_defs = [
+            ('In-field',          'InField_Pass',    'InField_Tot'),
+            ('Penumbra',          'Penumbra_Pass',   'Penumbra_Tot'),
+            ('Tails',             'Tails_Pass',      'Tails_Tot'),
+            ('Overlap in-field',  'Overlap_Hi_Pass', 'Overlap_Hi_Tot'),
+            ('Overlap tail',      'Overlap_Lo_Pass', 'Overlap_Lo_Tot'),
+        ]
+        for label, pcol, tcol in _region_defs:
+            _mppg_regions.append((label, _build_region_matrix(df_out, pcol, tcol)))
+
+    _ae_buf = io.StringIO()
+    with contextlib.redirect_stdout(_ae_buf):
+        print(f"\n{'='*60}")
+        print(f"  ALL ENERGIES  —  Depth x FS pass rate  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]")
+        print(f"{'='*60}")
+        print(df_ae_overall.to_string(index=False))
+        for label, df_reg in _mppg_regions:
+            print(f"\n{'='*60}")
+            print(f"  ALL ENERGIES  —  {label}  [{_criteria_str}]")
+            print(f"{'='*60}")
+            print(df_reg.to_string(index=False))
+    ae_text = _ae_buf.getvalue()
+    print(ae_text, end='')
+
     # ── per-energy Depth × FS matrices ────────────────────────────────────────
-    all_matrix_blocks = []   # list of (energy, df_matrix) for CSV output
+    all_matrix_blocks = []   # list of (energy, df_matrix, [(label, df_region), ...]) for xlsx output
     energy_texts = {}        # energy -> captured summary text for PDF
 
     for e in energy_order:
@@ -897,16 +976,33 @@ def main():
         rows.append(footer)
 
         df_mat = pd.DataFrame(rows)
-        all_matrix_blocks.append((e, df_mat))
+        e_regions = []
+        if ANALYSIS == 'mppg' and 'InField_Tot' in de.columns:
+            for label, pcol, tcol in _region_defs:
+                e_regions.append((label, _build_region_matrix(
+                    de, pcol, tcol, depths=depths, fss=fss, fs_cols=fs_col_names)))
+        all_matrix_blocks.append((e, df_mat, e_regions))
 
-        _buf = io.StringIO()
-        with contextlib.redirect_stdout(_buf):
+        _main_buf = io.StringIO()
+        with contextlib.redirect_stdout(_main_buf):
             print(f"\n{'='*60}")
             print(f"  {e}  —  Depth x FS pass rate  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]")
             print(f"{'='*60}")
             print(df_mat.to_string(index=False))
-        energy_texts[e] = _buf.getvalue()
-        print(energy_texts[e], end='')
+        main_text = _main_buf.getvalue()
+
+        _reg_buf = io.StringIO()
+        with contextlib.redirect_stdout(_reg_buf):
+            for label, df_reg_e in e_regions:
+                print(f"\n{'='*60}")
+                print(f"  {e}  —  {label}  [{_criteria_str}]")
+                print(f"{'='*60}")
+                print(df_reg_e.to_string(index=False))
+        region_text = _reg_buf.getvalue()
+
+        energy_texts[e] = (main_text, region_text)
+        print(main_text, end='')
+        print(region_text, end='')
 
     # ── skipped scan summary ──────────────────────────────────────────────────
     print(f"\n{'='*60}")
@@ -921,15 +1017,38 @@ def main():
     # ── write Excel workbook (Summary tab + Detail tab) ──────────────────────
     def _write_xlsx(path):
         with pd.ExcelWriter(path, engine='openpyxl') as writer:
-            # ── Sheet 1: Summary (Depth × FS matrices, one block per energy) ──
+            # ── Sheet 1: Summary ──────────────────────────────────────────────
             row_cursor = 0
             summary_entries = []   # (start_row, df_block, write_header)
-            for e, df_mat in all_matrix_blocks:
+
+            # All-energies block first
+            ae_hdr = pd.DataFrame([[f'ALL ENERGIES  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]']])
+            summary_entries.append((row_cursor, ae_hdr, False))
+            row_cursor += 1
+            summary_entries.append((row_cursor, df_ae_overall, True))
+            row_cursor += len(df_ae_overall) + 2
+
+            # MPPG regional sub-tables
+            for label, df_reg in _mppg_regions:
+                reg_hdr = pd.DataFrame([[f'ALL ENERGIES — {label}  [{_criteria_str}]']])
+                summary_entries.append((row_cursor, reg_hdr, False))
+                row_cursor += 1
+                summary_entries.append((row_cursor, df_reg, True))
+                row_cursor += len(df_reg) + 2
+
+            # Per-energy blocks
+            for e, df_mat, e_regions in all_matrix_blocks:
                 header_df = pd.DataFrame([[f'{e}  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]']])
-                summary_entries.append((row_cursor, header_df, False))  # no col header row
+                summary_entries.append((row_cursor, header_df, False))
                 row_cursor += 1
                 summary_entries.append((row_cursor, df_mat, True))
-                row_cursor += len(df_mat) + 2   # +1 for df_mat header row + 1 blank
+                row_cursor += len(df_mat) + 2
+                for label, df_reg_e in e_regions:
+                    reg_hdr = pd.DataFrame([[f'{e}  —  {label}  [{_criteria_str}]']])
+                    summary_entries.append((row_cursor, reg_hdr, False))
+                    row_cursor += 1
+                    summary_entries.append((row_cursor, df_reg_e, True))
+                    row_cursor += len(df_reg_e) + 2
 
             for start_row, df_block, with_header in summary_entries:
                 df_block.to_excel(writer, sheet_name='Summary',
@@ -969,71 +1088,79 @@ def main():
         c.drawString(36, rl_h - 68, f"Analysis: {_criteria_str}")
         c.setFont("Courier", 7)
         y = rl_h - 100
-        for e, df_mat in all_matrix_blocks:
-            header = f"  {e}  —  Depth x FS pass rate"
+        for line in ae_text.split('\n'):
             if y < 80:
                 c.showPage()
                 c.setFont("Courier", 7)
                 y = rl_h - 36
-            c.drawString(36, y, header)
+            c.drawString(36, y, line)
             y -= 10
-            for line in df_mat.to_string(index=False).split('\n'):
+        y -= 8  # gap before per-energy blocks
+        for e, _, _ in all_matrix_blocks:
+            main_text_e, _ = energy_texts[e]
+            for line in main_text_e.split('\n'):
                 if y < 80:
                     c.showPage()
                     c.setFont("Courier", 7)
                     y = rl_h - 36
                 c.drawString(36, y, line)
                 y -= 10
-            y -= 8  # gap between energy blocks
+            y -= 4  # gap between energy blocks
         c.showPage()
 
-        for energy_label, fig in all_figs:
-            etext = energy_texts.get(energy_label, f'  {energy_label}\n')
-            # — text block (top of page) —
-            c.setFont("Courier", 9)
-            y = rl_h - 36
-            for line in etext.split('\n'):
-                c.drawString(36, y, line)
-                y -= 12
-                if y < rl_h * 0.45:
-                    break
-            # — figure (below text) —
+        def _draw_fig_page(canvas, fig, y_top):
+            """Draw figure below y_top on the current page."""
             buf = io.BytesIO()
             fig.savefig(buf, format='png', dpi=REPORT_DPI, bbox_inches='tight')
             buf.seek(0)
             img = ImageReader(buf)
             iw, ih = img.getSize()
-            fig_w = rl_w - 72
-            fig_h = fig_w * (ih / float(iw))
-            fig_top = y - 8
-            if fig_top - fig_h < 18:
-                fig_h = max(fig_top - 18, 10)
-                fig_w = fig_h * (iw / float(ih))
-            c.drawImage(img, 36, fig_top - fig_h, width=fig_w, height=fig_h)
-            c.showPage()
+            fw = rl_w - 72
+            fh = fw * (ih / float(iw))
+            ft = y_top - 8
+            if ft - fh < 18:
+                fh = max(ft - 18, 10)
+                fw = fh * (iw / float(ih))
+            canvas.drawImage(img, 36, ft - fh, width=fw, height=fh)
+
+        def _draw_text_block(canvas, text, y):
+            """Draw lines of text starting at y, paginating as needed. Returns final y."""
+            canvas.setFont("Courier", 9)
+            for line in text.split('\n'):
+                if y < 36:
+                    canvas.showPage()
+                    canvas.setFont("Courier", 9)
+                    y = rl_h - 36
+                canvas.drawString(36, y, line)
+                y -= 12
+            return y
+
+        def _draw_energy_page(canvas, main_text, region_text, fig):
+            """Page layout: main table → figure → regional tables (new page if needed)."""
+            # — main table (top half) —
+            canvas.setFont("Courier", 9)
+            y = rl_h - 36
+            for line in main_text.split('\n'):
+                if y < rl_h * 0.45:
+                    break
+                canvas.drawString(36, y, line)
+                y -= 12
+            # — figure (bottom half of first page) —
+            _draw_fig_page(canvas, fig, y)
+            canvas.showPage()
+            # — regional tables (new page) —
+            if region_text.strip():
+                _draw_text_block(canvas, region_text, rl_h - 36)
+                canvas.showPage()
+
+        for energy_label, fig in all_figs:
+            main_text, region_text = energy_texts.get(energy_label, (f'  {energy_label}\n', ''))
+            _draw_energy_page(c, main_text, region_text, fig)
 
             # — individual per-energy PDF in Reports/ —
             energy_pdf = os.path.join(REPORTS_DIR, f"{s1}_{s2}_{energy_label}.pdf")
             ec = rl_canvas.Canvas(energy_pdf, pagesize=rl_letter)
-            ec.setFont("Courier", 9)
-            ey = rl_h - 36
-            for line in etext.split('\n'):
-                ec.drawString(36, ey, line)
-                ey -= 12
-                if ey < rl_h * 0.45:
-                    break
-            buf2 = io.BytesIO()
-            fig.savefig(buf2, format='png', dpi=REPORT_DPI, bbox_inches='tight')
-            buf2.seek(0)
-            img2 = ImageReader(buf2)
-            iw2, ih2 = img2.getSize()
-            fw2 = rl_w - 72
-            fh2 = fw2 * (ih2 / float(iw2))
-            ft2 = ey - 8
-            if ft2 - fh2 < 18:
-                fh2 = max(ft2 - 18, 10)
-                fw2 = fh2 * (iw2 / float(ih2))
-            ec.drawImage(img2, 36, ft2 - fh2, width=fw2, height=fh2)
+            _draw_energy_page(ec, main_text, region_text, fig)
             ec.save()
 
             plt.close(fig)

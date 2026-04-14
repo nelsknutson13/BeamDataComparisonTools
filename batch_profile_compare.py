@@ -866,6 +866,13 @@ def main():
     else:
         _criteria_str = _aname
 
+    # ── combine overlap zones into in-field and tails for reporting ──────────
+    if ANALYSIS == 'mppg' and 'InField_Tot' in df_out.columns:
+        df_out['InField_Comb_Pass'] = df_out['InField_Pass'] + df_out['Overlap_Hi_Pass']
+        df_out['InField_Comb_Tot']  = df_out['InField_Tot']  + df_out['Overlap_Hi_Tot']
+        df_out['Tails_Comb_Pass']   = df_out['Tails_Pass']   + df_out['Overlap_Lo_Pass']
+        df_out['Tails_Comb_Tot']    = df_out['Tails_Tot']    + df_out['Overlap_Lo_Tot']
+
     # ── all-energies Depth × FS summary (printed first) ─────────────────────
     all_depths_u = sorted(df_out['Depth_cm'].unique())
     all_fss_u    = sorted(df_out['FS'].unique())
@@ -874,15 +881,27 @@ def main():
         for fs in all_fss_u
     ]
 
+    DMAX_COLLAPSE_CM = 5.0   # depths < this are pooled into a single "Dmax" row in all-energies tables
+
+    def _ae_depth_groups(data):
+        """Return list of (label, mask) for all-energies depth rows (dmax pooled, rest individual)."""
+        groups = []
+        dmax_mask = data['Depth_cm'] < DMAX_COLLAPSE_CM
+        if dmax_mask.any():
+            groups.append(('Dmax', dmax_mask))
+        for d in sorted(data.loc[~dmax_mask, 'Depth_cm'].unique()):
+            groups.append((f"{d:g} cm", data['Depth_cm'] == d))
+        return groups
+
     def _build_matrix(data):
-        """Build a Depth × FS weighted pass rate matrix from data."""
+        """Build a Depth × FS weighted pass rate matrix from data (all-energies version with dmax pooling)."""
         rows = []
-        for d in all_depths_u:
-            row = {'Depth': f"{d:g} cm"}
+        for label, depth_mask in _ae_depth_groups(data):
+            row = {'Depth': label}
             for fs, col in zip(all_fss_u, all_fs_cols):
-                sub = data[(data['Depth_cm'] == d) & (data['FS'] == fs)]
+                sub = data[depth_mask & (data['FS'] == fs)]
                 row[col] = fmt(weighted_pass(sub)) if len(sub) > 0 else '—'
-            row['All FS'] = fmt(weighted_pass(data[data['Depth_cm'] == d]))
+            row['All FS'] = fmt(weighted_pass(data[depth_mask]))
             rows.append(row)
         footer = {'Depth': 'All Depths'}
         for fs, col in zip(all_fss_u, all_fs_cols):
@@ -893,7 +912,6 @@ def main():
 
     def _build_region_matrix(data, pass_col, tot_col, depths=None, fss=None, fs_cols=None):
         """Build a Depth × FS pass rate matrix using regional pass/total columns."""
-        if depths  is None: depths  = all_depths_u
         if fss     is None: fss     = all_fss_u
         if fs_cols is None: fs_cols = all_fs_cols
 
@@ -901,13 +919,19 @@ def main():
             p = grp[pass_col].sum(); t = grp[tot_col].sum()
             return p / t * 100 if t > 0 else float('nan')
 
+        # Use dmax pooling when called for all-energies (depths is None); exact depths otherwise
+        if depths is None:
+            depth_groups = _ae_depth_groups(data)
+        else:
+            depth_groups = [(f"{d:g} cm", data['Depth_cm'] == d) for d in depths]
+
         rows = []
-        for d in depths:
-            row = {'Depth': f"{d:g} cm"}
+        for label, depth_mask in depth_groups:
+            row = {'Depth': label}
             for fs, col in zip(fss, fs_cols):
-                sub = data[(data['Depth_cm'] == d) & (data['FS'] == fs)]
+                sub = data[depth_mask & (data['FS'] == fs)]
                 row[col] = fmt(_wp(sub)) if len(sub) > 0 else '—'
-            row['All FS'] = fmt(_wp(data[data['Depth_cm'] == d]))
+            row['All FS'] = fmt(_wp(data[depth_mask]))
             rows.append(row)
         footer = {'Depth': 'All Depths'}
         for fs, col in zip(fss, fs_cols):
@@ -922,11 +946,9 @@ def main():
     _mppg_regions = []
     if ANALYSIS == 'mppg' and 'InField_Tot' in df_out.columns:
         _region_defs = [
-            ('In-field',          'InField_Pass',    'InField_Tot'),
-            ('Penumbra',          'Penumbra_Pass',   'Penumbra_Tot'),
-            ('Tails',             'Tails_Pass',      'Tails_Tot'),
-            ('Overlap in-field',  'Overlap_Hi_Pass', 'Overlap_Hi_Tot'),
-            ('Overlap tail',      'Overlap_Lo_Pass', 'Overlap_Lo_Tot'),
+            ('In-field', 'InField_Comb_Pass', 'InField_Comb_Tot'),
+            ('Penumbra', 'Penumbra_Pass',      'Penumbra_Tot'),
+            ('Tails',    'Tails_Comb_Pass',    'Tails_Comb_Tot'),
         ]
         for label, pcol, tcol in _region_defs:
             _mppg_regions.append((label, _build_region_matrix(df_out, pcol, tcol)))

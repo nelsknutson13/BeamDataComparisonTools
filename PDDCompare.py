@@ -27,6 +27,26 @@ from scipy.ndimage import gaussian_filter1d
 # Function to handle file selection and populate sheet names
 
 
+# ---------------- PDD lookup table (SSD=100, 10.5 cm field, normalized at dmax) ----------------
+# First key of each dict is the dmax depth [cm] — used as buildup/past-dmax region boundary.
+PDD_TABLE = {
+    "6X":   {1.42: 1.000,  5.0: 0.865, 10.0: 0.668, 20.0: 0.382, 30.0: 0.218},
+    "6FFF": {1.32: 1.000,  5.0: 0.848, 10.0: 0.636, 20.0: 0.346, 30.0: 0.190},
+    "8FFF": {1.88: 1.000,  5.0: 0.891, 10.0: 0.693, 20.0: 0.406, 30.0: 0.240},
+    "10X":  {2.22: 1.000,  5.0: 0.925, 10.0: 0.744, 20.0: 0.469, 30.0: 0.296},
+    "10FFF":{2.16: 1.000,  5.0: 0.904, 10.0: 0.708, 20.0: 0.423, 30.0: 0.256},
+    "15X":  {2.72: 1.000,  5.0: 0.949, 10.0: 0.774, 20.0: 0.502, 30.0: 0.325},
+}
+
+
+def dmax_for_energy(energy):
+    """Return tabled dmax depth [cm] for an energy token, or None if missing."""
+    if energy is None:
+        return None
+    key = str(energy).strip().upper().replace(' ', '').replace('MV', '')
+    if key in PDD_TABLE:
+        return float(next(iter(PDD_TABLE[key].keys())))
+    return None
 
 
 # ---------------- Ion chamber models ----------------
@@ -690,9 +710,18 @@ def run_comparison():
     dist_results = []
     print("Comparison started...")
     df1=pd.read_excel(fn,sheet_name=sn1,header=0);
-    df2=pd.read_excel(fn,sheet_name=sn2,header=0);   
+    df2=pd.read_excel(fn,sheet_name=sn2,header=0);
     df1=df1.sort_values(by=['FS','Axis','Pos'])
     df2=df2.sort_values(by=['FS','Axis','Pos'])
+
+    # Energy from dataframe (for region boundary lookup); fall back to None.
+    _energy_token = None
+    if 'Energy' in df1.columns:
+        _vals = df1['Energy'].dropna().unique()
+        if len(_vals) > 0:
+            _energy_token = str(_vals[0])
+    _region_dmax = dmax_for_energy(_energy_token)
+    comp_region_results = []   # list of (fs, buildup_fails, buildup_total, past_fails, past_total)
     # Auto-populate detector combos from data column if present
     for _df, _combo in ((df1, det1_combo), (df2, det2_combo)):
         if 'Detector' in _df.columns:
@@ -955,6 +984,23 @@ def run_comparison():
 
             print(f"FS {fsl[j]:.1f} cm : PassRate={prtot:.2f}%, MeanDoseDiff={mean_dose_diff:.2f}%, MeanDTA={mean_dta_val*10:.2f} mm, Failing points = {totalfail}/{total}")
 
+            # ── Region breakdown (buildup vs past-dmax) ──
+            # Count only how existing composite failures distribute across regions.
+            if _region_dmax is not None:
+                _xarr = np.asarray(dtax, dtype=float)
+                buildup_mask = _xarr <= _region_dmax
+                past_mask    = _xarr >  _region_dmax
+                fail_mask_arr = np.zeros(len(_xarr), dtype=bool)
+                if totalfailloc:
+                    _idx = np.fromiter(totalfailloc, dtype=int)
+                    _idx = _idx[(_idx >= 0) & (_idx < len(_xarr))]
+                    fail_mask_arr[_idx] = True
+                b_total = int(buildup_mask.sum())
+                p_total = int(past_mask.sum())
+                b_fails = int((buildup_mask & fail_mask_arr).sum())
+                p_fails = int((past_mask    & fail_mask_arr).sum())
+                comp_region_results.append((fsl[j], b_fails, b_total, p_fails, p_total))
+
 
             
             ax0.set_xlim(max(min(y1),min(y2)),min(max(y1),max(y2)))
@@ -995,7 +1041,32 @@ def run_comparison():
         
         report_lines.append("---------------------------------------------------------------------------------")
         report_lines.append(f"{'Overall':<15} | {overall_pass:>12.2f} | {overall_diff:>18.2f} | {overall_dta:>12.2f} | {total_fails_cumulative}/{total_points_cumulative}")
-        
+
+        # ── Region breakdown table (buildup vs past-dmax) ──
+        if comp_region_results and _region_dmax is not None:
+            report_lines.append("")
+            report_lines.append(f"Region breakdown ({_energy_token}, dmax boundary = {_region_dmax:.2f} cm)")
+            report_lines.append("---------------------------------------------------------------------------------")
+            report_lines.append("Field Size [cm] | Buildup Pass [%] | Buildup Fails/Total | Past-dmax Pass [%] | Past-dmax Fails/Total")
+            report_lines.append("---------------------------------------------------------------------------------")
+            tot_b_f = tot_b_t = tot_p_f = tot_p_t = 0
+            for fs_val, b_f, b_t, p_f, p_t in comp_region_results:
+                b_pr = 100 * (b_t - b_f) / b_t if b_t > 0 else float('nan')
+                p_pr = 100 * (p_t - p_f) / p_t if p_t > 0 else float('nan')
+                report_lines.append(
+                    f"{fs_val:<15.1f} | {b_pr:>16.2f} | {b_f:>6}/{b_t:<12} | {p_pr:>18.2f} | {p_f:>6}/{p_t:<12}"
+                )
+                tot_b_f += b_f; tot_b_t += b_t; tot_p_f += p_f; tot_p_t += p_t
+            report_lines.append("---------------------------------------------------------------------------------")
+            b_pr_all = 100 * (tot_b_t - tot_b_f) / tot_b_t if tot_b_t > 0 else float('nan')
+            p_pr_all = 100 * (tot_p_t - tot_p_f) / tot_p_t if tot_p_t > 0 else float('nan')
+            report_lines.append(
+                f"{'Overall':<15} | {b_pr_all:>16.2f} | {tot_b_f:>6}/{tot_b_t:<12} | {p_pr_all:>18.2f} | {tot_p_f:>6}/{tot_p_t:<12}"
+            )
+        elif comp_region_results:
+            report_lines.append("")
+            report_lines.append(f"Region breakdown skipped: no dmax table entry for energy '{_energy_token}'")
+
         report_text = "\n".join(report_lines)
         print("\n" + report_text)
         

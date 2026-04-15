@@ -9,6 +9,7 @@ Parameters are set in the CONFIG section below.
 """
 
 import os
+import sys
 import io
 import glob
 import contextlib
@@ -134,8 +135,7 @@ FILE_MODE = 'hierarchical'
 #                  parsed from each filename (e.g. 6X_100SSD_PDDData.xlsx -> 6X_100SSD).
 #                  Use FILE_FILTER to restrict which files are processed.
 
-BASE_PATH = r"C:\Users\nknutson\Box\Knutson\Research\Projects underway\Radformation research\RADMC Photon VALIDATION\TrueBeam\ProcessedData"
-
+BASE_PATH = r"C:\Users\nknutson\Box\Knutson\Research\Projects underway\Radformation research\RADMC Photon VALIDATION\Water Tank Data\ProcessedData"
 
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
 FS_FILTER   = []      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
@@ -198,6 +198,28 @@ REPORTS_DIR    = os.path.join(PDD_DIR, "Individual Reports")
 # ─────────────────────────────────────────────
 
 
+# ── PDD lookup table (SSD=100, 10.5 cm field, normalized at dmax) ────────────
+# First key of each dict is the dmax depth [cm] — used as buildup/past-dmax region boundary.
+PDD_TABLE = {
+    "6X":   {1.42: 1.000,  5.0: 0.865, 10.0: 0.668, 20.0: 0.382, 30.0: 0.218},
+    "6FFF": {1.32: 1.000,  5.0: 0.848, 10.0: 0.636, 20.0: 0.346, 30.0: 0.190},
+    "8FFF": {1.88: 1.000,  5.0: 0.891, 10.0: 0.693, 20.0: 0.406, 30.0: 0.240},
+    "10X":  {2.22: 1.000,  5.0: 0.925, 10.0: 0.744, 20.0: 0.469, 30.0: 0.296},
+    "10FFF":{2.16: 1.000,  5.0: 0.904, 10.0: 0.708, 20.0: 0.423, 30.0: 0.256},
+    "15X":  {2.72: 1.000,  5.0: 0.949, 10.0: 0.774, 20.0: 0.502, 30.0: 0.325},
+}
+
+
+def dmax_for_energy(energy):
+    """Return tabled dmax depth [cm] for an energy token, or None if missing."""
+    if energy is None:
+        return None
+    key = str(energy).strip().upper().replace(' ', '').replace('MV', '')
+    if key in PDD_TABLE:
+        return float(next(iter(PDD_TABLE[key].keys())))
+    return None
+
+
 # ── helpers copied from PDDCompare.py ────────
 
 def apply_detector_convolution(profile_y, profile_dose, fwhm_cm):
@@ -253,6 +275,16 @@ def run_one_file(xlsx_path, energy_label):
     df2 = pd.read_excel(xlsx_path, sheet_name=SHEET2_NAME, header=0)
     df1 = df1.sort_values(by=['FS', 'Axis', 'Pos'])
     df2 = df2.sort_values(by=['FS', 'Axis', 'Pos'])
+
+    # Energy from dataframe for region boundary lookup; falls back to energy_label if not found.
+    _energy_token = None
+    if 'Energy' in df1.columns:
+        _vals = df1['Energy'].dropna().unique()
+        if len(_vals) > 0:
+            _energy_token = str(_vals[0])
+    if _energy_token is None:
+        _energy_token = energy_label
+    _region_dmax = dmax_for_energy(_energy_token)
 
     # Detector is resolved per-FS inside the loop (each scan may use a different detector)
 
@@ -437,9 +469,27 @@ def run_one_file(xlsx_path, energy_label):
             passrate = (total - totalfail) / total * 100 if total > 0 else 0.0
             total_points_cumulative += total
             total_fails_cumulative  += totalfail
+            # Region breakdown (buildup vs past-dmax) — only how existing comp failures distribute.
+            b_fails = b_total = p_fails = p_total = 0
+            if _region_dmax is not None:
+                _xarr = np.asarray(dtax, dtype=float)
+                buildup_mask = _xarr <= _region_dmax
+                past_mask    = _xarr >  _region_dmax
+                fail_mask_arr = np.zeros(len(_xarr), dtype=bool)
+                if fail_set:
+                    _idx = np.fromiter(fail_set, dtype=int)
+                    _idx = _idx[(_idx >= 0) & (_idx < len(_xarr))]
+                    fail_mask_arr[_idx] = True
+                b_total = int(buildup_mask.sum())
+                p_total = int(past_mask.sum())
+                b_fails = int((buildup_mask & fail_mask_arr).sum())
+                p_fails = int((past_mask    & fail_mask_arr).sum())
+
             results.append({'Energy': energy_label, 'FS': fs_val,
                 'PassRate_pct': round(passrate, 2), 'MeanDoseDiff_pct': round(mean_dd, 3),
-                'MeanDTA_mm': round(mean_dta * 10, 3), 'TotalPoints': total, 'FailPoints': totalfail})
+                'MeanDTA_mm': round(mean_dta * 10, 3), 'TotalPoints': total, 'FailPoints': totalfail,
+                'BuildupFails': b_fails, 'BuildupTotal': b_total,
+                'PastFails': p_fails, 'PastTotal': p_total})
             print(f"  FS {fs_val:.1f} cm : Pass={passrate:.2f}%  "
                   f"MeanDD={mean_dd:.2f}%  MeanDTA={mean_dta*10:.2f}mm  Fail={totalfail}/{total}")
             for ax in (ax1, ax2):
@@ -559,7 +609,24 @@ def run_one_file(xlsx_path, energy_label):
         s2 = SHEET2_NAME.replace(' ', '')
         out_png = os.path.join(RESULTS_DIR, f"{s1}_{s2}_{energy_label}_{safe_tag}.png")
         fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
-        print(f"  Figure saved: {out_png}")
+        # Bypass stdout capture so the path line doesn't land in the per-energy PDF page.
+        sys.__stdout__.write(f"  Figure saved: {out_png}\n")
+
+    # ── Per-energy region breakdown (comp mode only) ──
+    if ANALYSIS == 'comp' and _region_dmax is not None and results:
+        tot_b_f = tot_b_t = tot_p_f = tot_p_t = 0
+        print(f"\n  Region breakdown ({_energy_token}, dmax boundary = {_region_dmax:.2f} cm)")
+        print(f"  {'FS [cm]':<10}{'Buildup Pass':>16}{'Buildup Fails/Total':>24}{'Past Pass':>14}{'Past Fails/Total':>24}")
+        for r in results:
+            b_f = r.get('BuildupFails', 0); b_t = r.get('BuildupTotal', 0)
+            p_f = r.get('PastFails',    0); p_t = r.get('PastTotal',    0)
+            b_pr = f"{(b_t - b_f)/b_t*100:.2f}%" if b_t > 0 else "—"
+            p_pr = f"{(p_t - p_f)/p_t*100:.2f}%" if p_t > 0 else "—"
+            print(f"  {r['FS']:<10.1f}{b_pr:>16}{f'{b_f}/{b_t}':>24}{p_pr:>14}{f'{p_f}/{p_t}':>24}")
+            tot_b_f += b_f; tot_b_t += b_t; tot_p_f += p_f; tot_p_t += p_t
+        b_pr_all = f"{(tot_b_t - tot_b_f)/tot_b_t*100:.2f}%" if tot_b_t > 0 else "—"
+        p_pr_all = f"{(tot_p_t - tot_p_f)/tot_p_t*100:.2f}%" if tot_p_t > 0 else "—"
+        print(f"  {'Overall':<10}{b_pr_all:>16}{f'{tot_b_f}/{tot_b_t}':>24}{p_pr_all:>14}{f'{tot_p_f}/{tot_p_t}':>24}")
 
     if not SAVE_REPORT:
         plt.close(fig)
@@ -679,19 +746,78 @@ def main():
 
         df_table = pd.DataFrame(table_rows)
 
+        # ── Region breakdown tables (buildup / past-dmax) ─────────────────
+        # Only emitted for comp analysis where per-region fail counts were recorded.
+        df_buildup = None
+        df_past    = None
+        if ANALYSIS == 'comp' and all(c in df_out.columns for c in
+                                      ('BuildupFails', 'BuildupTotal', 'PastFails', 'PastTotal')):
+            def _region_pass(g, fail_col, tot_col):
+                t = g[tot_col].sum()
+                f = g[fail_col].sum()
+                return (t - f) / t * 100 if t > 0 else float('nan')
+
+            def _build_region_table(fail_col, tot_col):
+                pivot_r = df_out.pivot_table(
+                    index='Energy', columns='FS',
+                    values=[fail_col, tot_col], aggfunc='sum'
+                ).reindex(index=energy_order, columns=pd.MultiIndex.from_product(
+                    [[fail_col, tot_col], fss]))
+                rows = []
+                for e in energy_order:
+                    row = {'Energy': e}
+                    for fs, col in zip(fss, fs_col_names):
+                        try:
+                            f_v = pivot_r.loc[e, (fail_col, fs)]
+                            t_v = pivot_r.loc[e, (tot_col,  fs)]
+                            row[col] = fmt((t_v - f_v) / t_v * 100) if t_v > 0 else "—"
+                        except KeyError:
+                            row[col] = "—"
+                    e_rows = df_out[df_out['Energy'] == e]
+                    row['All Field Sizes'] = fmt(_region_pass(e_rows, fail_col, tot_col))
+                    rows.append(row)
+                footer_r = {'Energy': 'All Energies'}
+                for fs, col in zip(fss, fs_col_names):
+                    fs_rows = df_out[df_out['FS'] == fs]
+                    footer_r[col] = fmt(_region_pass(fs_rows, fail_col, tot_col))
+                footer_r['All Field Sizes'] = f"All Data: {fmt(_region_pass(df_out, fail_col, tot_col))}"
+                rows.append(footer_r)
+                return pd.DataFrame(rows)
+
+            df_buildup = _build_region_table('BuildupFails', 'BuildupTotal')
+            df_past    = _build_region_table('PastFails',    'PastTotal')
+
+        def _write_csv(path):
+            with open(path, 'w', newline='', encoding='utf-8') as fh:
+                df_table.to_csv(fh, index=False)
+                if df_buildup is not None:
+                    fh.write('\n')
+                    fh.write('Buildup region pass rate (depth <= dmax)\n')
+                    df_buildup.to_csv(fh, index=False)
+                if df_past is not None:
+                    fh.write('\n')
+                    fh.write('Past-dmax region pass rate (depth > dmax)\n')
+                    df_past.to_csv(fh, index=False)
+
         try:
-            df_table.to_csv(summary_csv, index=False)
+            _write_csv(summary_csv)
             print(f"\nSummary CSV saved: {summary_csv}")
         except PermissionError:
             from datetime import datetime
             fallback = summary_csv.replace('.csv', f'_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
-            df_table.to_csv(fallback, index=False)
+            _write_csv(fallback)
             print(f"\nCSV locked (close it in Excel first next time).")
             print(f"Saved to fallback: {fallback}")
         print(f"\n{'='*60}")
         print(f"  PDD pass rate  ({SHEET1_NAME} vs {SHEET2_NAME})  [{_criteria_str}]")
         print(f"{'='*60}")
         print(df_table.to_string(index=False))
+        if df_buildup is not None:
+            print(f"\nBuildup region pass rate (depth <= dmax)")
+            print(df_buildup.to_string(index=False))
+        if df_past is not None:
+            print(f"\nPast-dmax region pass rate (depth > dmax)")
+            print(df_past.to_string(index=False))
 
         # ── PDF report ────────────────────────────────────────────────────────
         if SAVE_REPORT and all_figs:
@@ -711,8 +837,36 @@ def main():
             c.setFont("Courier", 7)
             y = rl_h - 100
             for line in df_table.to_string(index=False).split('\n'):
+                if y < 40:
+                    c.showPage()
+                    c.setFont("Courier", 7)
+                    y = rl_h - 36
                 c.drawString(36, y, line)
                 y -= 10
+
+            def _draw_region_block(title, df_block):
+                nonlocal y
+                if y < 80:
+                    c.showPage()
+                    c.setFont("Courier", 7)
+                    y = rl_h - 36
+                y -= 14
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(36, y, title)
+                y -= 12
+                c.setFont("Courier", 7)
+                for line in df_block.to_string(index=False).split('\n'):
+                    if y < 40:
+                        c.showPage()
+                        c.setFont("Courier", 7)
+                        y = rl_h - 36
+                    c.drawString(36, y, line)
+                    y -= 10
+
+            if df_buildup is not None:
+                _draw_region_block("Buildup region pass rate (depth <= dmax)", df_buildup)
+            if df_past is not None:
+                _draw_region_block("Past-dmax region pass rate (depth > dmax)", df_past)
             c.showPage()
 
             for energy_label, energy_text, fig in all_figs:

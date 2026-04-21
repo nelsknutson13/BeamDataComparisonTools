@@ -128,25 +128,25 @@ def compute_epom_shifts(z1, d1, det1, z2, d2, det2, modality="PHOTON", unit="cm"
 # ─────────────────────────────────────────────
 #  CONFIG  — edit these as needed
 # ─────────────────────────────────────────────
-FILE_MODE = 'hierarchical'
+FILE_MODE = 'flat'
 # 'hierarchical' : BASE_PATH contains energy subfolders (e.g. 6X/, 10FFF/),
 #                  each holding one *PDD*.xlsx file.
 # 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
 #                  parsed from each filename (e.g. 6X_100SSD_PDDData.xlsx -> 6X_100SSD).
 #                  Use FILE_FILTER to restrict which files are processed.
 
-BASE_PATH = r"C:\Users\nknutson\Box\Knutson\Research\Projects underway\Radformation research\RADMC Photon VALIDATION\Water Tank Data\ProcessedData"
+BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
 
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
 FS_FILTER   = []      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
 
-SHEET1_NAME = "Measurement"   # reference / measured sheet name
-SHEET2_NAME = "MC"            # comparison sheet name
+SHEET1_NAME = "TPS SN 1003"   # reference / measured sheet name
+SHEET2_NAME = "TPS SN 21"            # comparison sheet name
 
 ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
-DD_CRITERIA   = 2           # dose difference threshold [%]
-DTA_CRITERIA  = 0.2           # DTA threshold [cm]  (2 mm)
-NORM          = 2             # 1 = each dmax, 2 = fixed depth per energy, 3 = dmax of curve 1, 4 = dmax of curve 2
+DD_CRITERIA   = 1           # dose difference threshold [%]
+DTA_CRITERIA  = 0.1           # DTA threshold [cm]  (2 mm)
+NORM          = 1             # 1 = each dmax, 2 = fixed depth per energy, 3 = dmax of curve 1, 4 = dmax of curve 2
 
 # Fixed normalization depth [cm] per energy folder name
 NORM_DEPTH = {
@@ -393,15 +393,14 @@ def run_one_file(xlsx_path, energy_label):
         y1 = y1 + s1
         y2 = y2 + s2
 
-        # ── cutoff ─────────────────────────
-        if CUTOFF_DEPTH > 0:
-            m1 = y1 >= CUTOFF_DEPTH
-            m2 = y2 >= CUTOFF_DEPTH
-            y1, d1 = y1[m1].reset_index(drop=True), d1[m1].reset_index(drop=True)
-            y2, d2 = y2[m2].reset_index(drop=True), d2[m2].reset_index(drop=True)
-            if len(y1) < 2 or len(y2) < 2:
-                print(f"  FS {fs_val}: cutoff removed too many points — skipping.")
-                continue
+        # ── cutoff: always applied at CUTOFF_DEPTH ──
+        m1 = y1 >= CUTOFF_DEPTH
+        m2 = y2 >= CUTOFF_DEPTH
+        y1, d1 = y1[m1].reset_index(drop=True), d1[m1].reset_index(drop=True)
+        y2, d2 = y2[m2].reset_index(drop=True), d2[m2].reset_index(drop=True)
+        if len(y1) < 2 or len(y2) < 2:
+            print(f"  FS {fs_val}: cutoff removed too many points — skipping.")
+            continue
 
         # ── normalization ──────────────────
         def _norm_at_depth(y, d, depth):

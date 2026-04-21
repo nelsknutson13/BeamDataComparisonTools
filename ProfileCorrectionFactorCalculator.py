@@ -58,18 +58,20 @@ def select_file():
 
         def on_combobox_change(event):
             print(f"Sheet 1 selected: {sheet1_combo.get()}")
-            
+
             preload_two_sheets()
             populate_fsl()
             populate_scl()
             populate_depths()
+            populate_energies()
 
         sheet1_combo.bind("<<ComboboxSelected>>", on_combobox_change)
-        
+
         populate_fsl()
         populate_scl()
         populate_depths()
-        print("Ready: field sizes, scan types, and depths populated.")
+        populate_energies()
+        print("Ready: field sizes, scan types, depths, and energies populated.")
 
     except Exception as e:
         print(f"Error reading sheets: {e}")
@@ -77,7 +79,7 @@ def select_file():
 def preload_two_sheets():
     """Read only FS, Axis, Depth from the selected sheet ONCE and cache it."""
     global sheet_cache, xf
-    usecols = ['FS', 'Axis', 'Depth', 'Pos', 'Dose']
+    usecols = ['FS', 'Axis', 'Depth', 'Pos', 'Dose', 'Energy']
     sn = sheet1_combo.get()
     if not sn or xf is None:
         return
@@ -86,14 +88,11 @@ def preload_two_sheets():
     try:
         df = pd.read_excel(xf, sheet_name=sn, usecols=usecols, engine="pyarrow")
     except Exception:
-        df = pd.read_excel(xf, sheet_name=sn)  # fallback
-        # subset if the columns exist
-        missing = [c for c in usecols if c not in df.columns]
-        if not missing:
-            df = df[usecols]
-        else:
-            print(f"Warning: missing columns in '{sn}': {missing}")
-        sheet_cache[sn] = df       
+        # Fallback: read everything then keep only the columns that exist.
+        df = pd.read_excel(xf, sheet_name=sn)
+        present = [c for c in usecols if c in df.columns]
+        df = df[present]
+    sheet_cache[sn] = df
 def parse_ssd_energy(path: str, default_ssd=100.0, default_energy="6X"):
     """
     Extract SSD (cm) and Energy (6X, 6FFF, 8FFF, 10X, 10FFF, 15X) from the full path.
@@ -281,6 +280,29 @@ def populate_scl():
         print(f"Error loading scan types: {e}")
 
 
+def populate_energies():
+    try:
+        df1 = sheet_cache[sheet1_combo.get()]
+        if 'Energy' not in df1.columns:
+            energy_listbox.delete(0, tk.END)
+            print("No 'Energy' column — single-energy file.")
+            return
+        raw = {str(e).strip() for e in df1['Energy'].dropna().unique()}
+        preferred = ['6X', '10X', '15X', '6FFF', '8FFF', '10FFF']
+        matched   = [e for e in preferred if e in raw]
+        rest      = sorted(raw - set(matched))   # anything unexpected goes after
+        common_energies = matched + rest
+        energy_listbox.delete(0, tk.END)
+        for v in common_energies:
+            energy_listbox.insert(tk.END, v)
+        # Default: select all so multi-energy files run everything by default
+        if len(common_energies) > 1:
+            energy_listbox.selection_set(0, tk.END)
+        print("Energies:", common_energies)
+    except Exception as e:
+        print(f"Error populating energies: {e}")
+
+
 def populate_depths():
     try:
         df1 = sheet_cache[sheet1_combo.get()]
@@ -313,6 +335,57 @@ def _second_deriv_at_zero(x, y, win=0.5):
 
 
 def run_comparison():
+    """Wrapper: loops over selected energies × axes (and adds X+Y avg when both selected)."""
+    sel = energy_listbox.curselection()
+    if sel:
+        energies = [energy_listbox.get(i) for i in sel]
+    else:
+        energies = [None]
+
+    sel_scl = scl_listbox.curselection()
+    if not sel_scl:
+        print("Select at least one Scan Type.")
+        return
+    axes = [scl_listbox.get(i) for i in sel_scl]
+    axis_runs = list(axes)
+    if 'X' in axes and 'Y' in axes:
+        axis_runs.append('AVG')
+
+    summary = []
+    for energy in energies:
+        if energy is not None:
+            print(f"\n{'='*60}\n  Energy: {energy}\n{'='*60}")
+        for axis in axis_runs:
+            print(f"\n--- Axis: {axis} ---")
+            metrics = _run_comparison_single_energy(energy, axis)
+            if metrics is not None:
+                metrics['Energy'] = energy if energy is not None else '-'
+                metrics['Axis']   = axis
+                summary.append(metrics)
+
+    if summary:
+        # One table per axis
+        for axis in axis_runs:
+            rows = [m for m in summary if m['Axis'] == axis]
+            if not rows:
+                continue
+            print("\n" + "=" * 72)
+            print(f"  Summary — Axis: {axis}")
+            print("=" * 72)
+            hdr = f"{'Energy':<10}{'S_eq [cm]':>12}{'SC_field':>12}{'VAE [%]':>10}{'Prp':>10}"
+            print(hdr)
+            print("-" * 72)
+            for m in rows:
+                print(f"{str(m['Energy']):<10}"
+                      f"{m['S_eq']:>12.3f}"
+                      f"{m['SC_field']:>12.6f}"
+                      f"{m['VAE_pct']:>10.3f}"
+                      f"{m['Prp']:>10.3f}")
+            print("=" * 72)
+
+
+def _run_comparison_single_energy(selected_energy=None, axis_sel='X'):
+    """axis_sel is 'X', 'Y', or 'AVG' (average of normalized X and Y profiles)."""
     msize = 5  # marker size
 
     # --- read single selections ---
@@ -321,12 +394,6 @@ def run_comparison():
         print("Select a Field Size.")
         return
     fs = float(fsl_listbox.get(sel[0]))
-
-    sel = scl_listbox.curselection()
-    if not sel:
-        print("Select a Scan Type.")
-        return
-    axis_sel = scl_listbox.get(sel[0])
 
     sel = depth_listbox.curselection()
     if not sel:
@@ -339,7 +406,8 @@ def run_comparison():
     sn1 = sheet1_combo.get()
     print(f"Selected File: {fn}")
     print(f"Sheet 1: {sn1}")
-    print(f"Plotting FS={fs}, Axis={axis_sel}, Depth={depth_sel}")
+    print(f"Plotting FS={fs}, Axis={axis_sel}, Depth={depth_sel}"
+          + (f", Energy={selected_energy}" if selected_energy is not None else ""))
 
     df1 = sheet_cache.get(sn1)
     if df1 is None:
@@ -349,25 +417,51 @@ def run_comparison():
             print(f"No cached data for '{sn1}'.")
             return
 
+    # --- filter by energy if requested ---
+    if selected_energy is not None and 'Energy' in df1.columns:
+        df1 = df1[df1['Energy'] == selected_energy].reset_index(drop=True)
+        if df1.empty:
+            print(f"No rows for energy '{selected_energy}'.")
+            return
+
     # --- slice selected profile ---
-    mask = (df1['FS'] == fs) & (df1['Axis'] == axis_sel) & (df1['Depth'] == depth_sel)
-    if mask.sum() == 0:
-        print(f"No rows for FS={fs}, Axis={axis_sel}, Depth={depth_sel}")
-        return
-    x = df1.loc[mask, 'Pos'].to_numpy()
-    y = df1.loc[mask, 'Dose'].to_numpy()
-    
-    # --- normalize to center (CAX) ---
     CAX_WIN_CM = 0.1  # ±1 mm
-    cax_mask = np.abs(x) <= CAX_WIN_CM
-    if np.any(cax_mask):
-        cax_val = float(y[cax_mask].mean())
+
+    def _load_axis_profile(axis_letter):
+        m = (df1['FS'] == fs) & (df1['Axis'] == axis_letter) & (df1['Depth'] == depth_sel)
+        if m.sum() == 0:
+            return None, None
+        xa = df1.loc[m, 'Pos'].to_numpy()
+        ya = df1.loc[m, 'Dose'].to_numpy()
+        order = np.argsort(xa)
+        xa, ya = xa[order], ya[order]
+        cm = np.abs(xa) <= CAX_WIN_CM
+        if np.any(cm):
+            cax = float(ya[cm].mean())
+        else:
+            cax = float(ya[np.argmin(np.abs(xa))])
+        if cax != 0:
+            ya = ya / cax
+        return xa, ya
+
+    if axis_sel == 'AVG':
+        xX, yX = _load_axis_profile('X')
+        xY, yY = _load_axis_profile('Y')
+        if xX is None or xY is None:
+            print(f"AVG needs both X and Y profiles; missing one at FS={fs}, Depth={depth_sel}.")
+            return
+        # Resample Y onto X's grid and average
+        lo = max(xX.min(), xY.min()); hi = min(xX.max(), xY.max())
+        x_common = xX[(xX >= lo) & (xX <= hi)]
+        yY_on_x  = np.interp(x_common, xY, yY)
+        yX_on_x  = np.interp(x_common, xX, yX)
+        x = x_common
+        y = 0.5 * (yX_on_x + yY_on_x)
     else:
-        cax_val = float(y[np.argmin(np.abs(x))])  # fallback: nearest to x=0
-    if cax_val != 0:
-        y = y / cax_val
-    else:
-        print("Warning: central value is zero; skipping normalization.")
+        x, y = _load_axis_profile(axis_sel)
+        if x is None:
+            print(f"No rows for FS={fs}, Axis={axis_sel}, Depth={depth_sel}")
+            return
     # --- detector inputs ---
     det_diam_cm = float(det_diam_var.get())
     det_len_cm  = float(det_len_var.get())
@@ -448,11 +542,18 @@ def run_comparison():
     print(f"VAE short-axis (cyl)  ±{det_diam_cm/2:.2f} cm: {vae_short_pct:.3f}%")
     print(f"VAE long-axis  (line) ±{det_len_cm/2:.2f} cm:  {vae_long_pct:.3f}%")
     print(f"VAE combined: {vae_total_pct:.3f}%")
-    print(f"Prp (point correction factor): {Prp:.5f}")
+    print(f"Prp (point correction factor): {Prp:.3f}")
 
 
-    # --- plot ---
-    #gs = gridspec.GridSpec(1, 1)
+    # --- plot (skipped when "Show plots" unchecked) ---
+    if not show_plots_var.get():
+        return {
+            'S_eq':     float(S_eq_uniform),
+            'SC_field': float(SC_field),
+            'VAE_pct':  float(vae_total_pct),
+            'Prp':      float(Prp),
+        }
+
     fig, ax0 = plt.subplots(1, 1, figsize=(10, 5))
     plt.rcParams.update({'font.size': 16})
 
@@ -461,7 +562,8 @@ def run_comparison():
     ax0.legend()
     ax0.set_ylabel('Off Axis Ratio')
     ax0.set_xlabel('Off Axis Position [cm]')
-    ax0.set_title(f"FS {fs} cm | Axis {axis_sel} | Depth {depth_sel} cm")
+    _title_tail = f" | Energy {selected_energy}" if selected_energy is not None else ""
+    ax0.set_title(f"FS {fs} cm | Axis {axis_sel} | Depth {depth_sel} cm{_title_tail}")
     ax0.set_xlim(x.min(), x.max())
     # --- visualize detector averaging window(s) about CAX as rectangles ---
     ymin, ymax = ax0.get_ylim()
@@ -535,7 +637,7 @@ def run_comparison():
         f"VAE Total: {vae_total_pct:+.2f}%"
     )
     info_lines.append(
-        f"Prp = {Prp:.5f}"
+        f"Prp = {Prp:.3f}"
 )
     
    
@@ -556,9 +658,17 @@ def run_comparison():
         pass
     fig.tight_layout()
     fig.subplots_adjust(hspace=.3)
+    plt.show(block=False)
+    plt.pause(0.001)   # let the tk event loop actually render the new figure
+
+    return {
+        'S_eq':     float(S_eq_uniform),
+        'SC_field': float(SC_field),
+        'VAE_pct':  float(vae_total_pct),
+        'Prp':      float(Prp),
+    }
 
 
-            
 # Initialize main window
 root = tk.Tk()
 root.title("Profile Compare Tool")
@@ -591,7 +701,7 @@ fsl_listbox.grid(row=1, column=0, padx=5, pady=5)
 # Scan Types Selection
 scl_label = ttk.Label(data_selection_frame, text="Select Scan Types")
 scl_label.grid(row=0, column=1, sticky="w", padx=20)
-scl_listbox = tk.Listbox(data_selection_frame, selectmode="browse", width=20, height=10, exportselection=0)
+scl_listbox = tk.Listbox(data_selection_frame, selectmode="extended", width=20, height=10, exportselection=0)
 scl_listbox.grid(row=1, column=1, padx=5, pady=5)
 
 # Depth Selection Listbox
@@ -599,6 +709,12 @@ depth_label = ttk.Label(data_selection_frame, text="Select Depths")
 depth_label.grid(row=0, column=2, sticky="w", padx=20)  # Place this next to the other selection lists
 depth_listbox = tk.Listbox(data_selection_frame, selectmode="browse", width=20, height=10, exportselection=0)
 depth_listbox.grid(row=1, column=2, padx=5, pady=5)
+
+# Energy Selection Listbox (extended: 0 selected = run once without filter)
+energy_label = ttk.Label(data_selection_frame, text="Select Energies")
+energy_label.grid(row=0, column=3, sticky="w", padx=20)
+energy_listbox = tk.Listbox(data_selection_frame, selectmode="extended", width=20, height=10, exportselection=0)
+energy_listbox.grid(row=1, column=3, padx=5, pady=5)
 
 # Data processing section with two entries
 processing_frame = ttk.LabelFrame(root, text="Data Processing", padding="10")
@@ -635,6 +751,10 @@ det_diam_var.set("0.61")
 det_orient_combo.set("Assume X and Y profile is same")
 root.update_idletasks()
 # Run comparison button
+show_plots_var = tk.BooleanVar(master=root, value=True)
+ttk.Checkbutton(root, text="Show plots", variable=show_plots_var).grid(
+    row=5, column=0, sticky="w", padx=10)
+
 run_button = ttk.Button(root, text="Run Comparison", command=run_comparison)
 run_button.grid(row=6, column=0, pady=10)
 

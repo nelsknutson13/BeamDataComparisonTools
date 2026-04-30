@@ -187,7 +187,7 @@ def write_scans(scans, source_dfs, machine_name, conflict_action, status_cb):
     from openpyxl import load_workbook
     from openpyxl.utils.dataframe import dataframe_to_rows
 
-    written = replaced = appended = created = 0
+    written = replaced = appended = skipped = created = 0
     for dest_path, scan_list in by_dest.items():
         # Load only the existing target sheet (if file + sheet both exist)
         old_df = None
@@ -199,6 +199,14 @@ def write_scans(scans, source_dfs, machine_name, conflict_action, status_cb):
                     old_df = pd.read_excel(xl, sheet_name=machine_name)
             except Exception as e:
                 status_cb(f"  ERROR reading {os.path.basename(dest_path)}: {e}")
+                continue
+
+        # If skipping EXISTS scans, drop them from the work list now
+        if conflict_action == 'skip' and old_df is not None:
+            n_skipped_now = sum(1 for s in scan_list if s['status'] == 'EXISTS')
+            scan_list = [s for s in scan_list if s['status'] != 'EXISTS']
+            skipped += n_skipped_now
+            if not scan_list:
                 continue
 
         # Build the new rows for this file (one DataFrame for the machine sheet)
@@ -224,7 +232,7 @@ def write_scans(scans, source_dfs, machine_name, conflict_action, status_cb):
                 final_df = pd.concat([kept, new_df], ignore_index=True)
                 replaced += sum(1 for s in scan_list if s['status'] == 'EXISTS')
                 written  += sum(1 for s in scan_list if s['status'] != 'EXISTS')
-            else:  # append
+            else:  # append (skip already filtered above, so no EXISTS rows here for skip)
                 final_df = pd.concat([old_df, new_df], ignore_index=True)
                 appended += sum(1 for s in scan_list if s['status'] == 'EXISTS')
                 written  += sum(1 for s in scan_list if s['status'] != 'EXISTS')
@@ -256,7 +264,7 @@ def write_scans(scans, source_dfs, machine_name, conflict_action, status_cb):
     status_cb("")
     status_cb("=" * 60)
     status_cb(f"  Scans written: {written}   Replaced: {replaced}   "
-              f"Appended: {appended}   New files: {created}")
+              f"Appended: {appended}   Skipped: {skipped}   New files: {created}")
     status_cb("=" * 60)
 
 
@@ -400,6 +408,8 @@ ttk.Radiobutton(conflict_frame, text="Replace",
                 variable=conflict_var, value='replace').pack(side='left', padx=2)
 ttk.Radiobutton(conflict_frame, text="Append",
                 variable=conflict_var, value='append').pack(side='left', padx=8)
+ttk.Radiobutton(conflict_frame, text="Skip",
+                variable=conflict_var, value='skip').pack(side='left', padx=2)
 
 # Row 4: action buttons
 btn_frame = ttk.Frame(main)

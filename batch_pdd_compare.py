@@ -140,12 +140,12 @@ BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NG
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
 FS_FILTER   = []      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
 
-SHEET1_NAME = "TPS SN 1003"   # reference / measured sheet name
-SHEET2_NAME = "TPS SN 21"            # comparison sheet name
+SHEET1_NAME = "SN 1003"   # reference / measured sheet name
+SHEET2_NAME = "TPS SN 1003"            # comparison sheet name
 
 ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
-DD_CRITERIA   = 1           # dose difference threshold [%]
-DTA_CRITERIA  = 0.1           # DTA threshold [cm]  (2 mm)
+DD_CRITERIA   = 2           # dose difference threshold [%]
+DTA_CRITERIA  = 0.2           # DTA threshold [cm]  (2 mm)
 NORM          = 1             # 1 = each dmax, 2 = fixed depth per energy, 3 = dmax of curve 1, 4 = dmax of curve 2
 
 # Fixed normalization depth [cm] per energy folder name

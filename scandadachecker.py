@@ -612,18 +612,27 @@ def run_audit(root, req_path, out_path, recursive=False, sheet_filter=None,
 
 
     # Compute Missing FS/Depths
+    DEPTH_ROUND_CM = 0.1   # match profile compare convention (1 mm grid)
+
+    def _round_depth(d):
+        try:
+            return round(round(float(d) / DEPTH_ROUND_CM) * DEPTH_ROUND_CM, 3)
+        except Exception:
+            return d
+
     missing_fs, missing_dp, complete = [], [], []
     for _, r in inventory.iterrows():
         energy_val = str(r["Energy"]).upper().strip()
         ssd_val    = pd.to_numeric(r["SSD"], errors="coerce")
         st         = norm_scan_type(r["ScanType"])
-    
+
         req_fs, req_dp = required_sets(energy_val, ssd_val, st)
         found_fs = sorted(set(r["FieldSizes"])) if isinstance(r["FieldSizes"], (list, set, tuple)) else []
         found_dp = sorted(set(r["Depths"]))     if isinstance(r["Depths"],   (list, set, tuple)) else []
-    
+        found_dp_rounded = {_round_depth(x) for x in found_dp}
+
         mf = [x for x in req_fs if x not in found_fs]
-        md = [x for x in req_dp if x not in found_dp]
+        md = [x for x in req_dp if _round_depth(x) not in found_dp_rounded]
     
         required_here = st in needed_scans_for(energy_val, ssd_val)
         if required_here and int(r.get("NumScans", 0)) == 0:

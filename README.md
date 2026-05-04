@@ -18,6 +18,9 @@ A collection of Python tools for radiation therapy beam data analysis, compariso
 | **OutputRoundRobinDataViewer.py** | Visualize round-robin QA consortium data as boxplots comparing institutions/systems by energy. |
 | **DataDuplicateCleaner.py** | Detect and manage duplicate profile curves in grouped beam data using MD5 fingerprinting. |
 | **BeamDataAvgTool.py** | Average beam profiles and PDDs across multiple datasets. Plots individual scans with the computed average and a clinical tolerance envelope (dose % / position mm). Exports averaged data to Excel in standard format. |
+| **beam_specifier_compare.py** | Extract single-value beam metrics (e.g. PDD at reference depth) from multiple sheets/files and plot the distribution as a box plot grouped by (Energy, SSD). |
+| **ProfileSSDConverter.py** | Geometrically scale profile positions from one SSD to another using `Pos_new = Pos * (SSD_target + Depth) / (SSD_source + Depth)`. Per-profile selection in the GUI. |
+| **DataMerger.py** | Merge an IBA/PTW reader output into the consortium combined-data folder. Per-scan picker shows NEW / EXISTS status against destination files; supports Replace / Append / Skip on conflicts. |
 
 ## Data Readers / Converters
 

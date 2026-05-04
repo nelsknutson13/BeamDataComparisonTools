@@ -21,6 +21,8 @@ A collection of Python tools for radiation therapy beam data analysis, compariso
 | **beam_specifier_compare.py** | Extract single-value beam metrics (e.g. PDD at reference depth) from multiple sheets/files and plot the distribution as a box plot grouped by (Energy, SSD). |
 | **ProfileSSDConverter.py** | Geometrically scale profile positions from one SSD to another using `Pos_new = Pos * (SSD_target + Depth) / (SSD_source + Depth)`. Per-profile selection in the GUI. |
 | **DataMerger.py** | Merge an IBA/PTW reader output into the consortium combined-data folder. Per-scan picker shows NEW / EXISTS status against destination files; supports Replace / Append / Skip on conflicts. |
+| **OFCompare.py** | Compare 2D output factor (Scp) tables. Loads a long-format combined OF dataset (or wide-format file with metadata prompt), filter Group A / Group B by Energy / SSD / Depth / SN / Detector, and view as 2D heatmap, diagonal trace, fixed-Y row, or fixed-X column. Single- or dual-file mode. |
+| **OFDataConverter.py** | Convert a wide-format 2D output factor table (Y rows × X columns) into the long-format combined OF dataset consumed by OFCompare. Auto-detects normalization (cell at reference FS ≈ 1.0), prompts for metadata, and merges into the destination xlsx with Replace / Skip on conflict. |
 
 ## Data Readers / Converters
 

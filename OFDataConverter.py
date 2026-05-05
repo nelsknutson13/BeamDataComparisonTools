@@ -308,18 +308,16 @@ def choose_dest():
         dest_path.set(p)
 
 
-def do_preview():
+def _preview_from_raw(raw, source_tag=''):
+    """Run the full preview/normalize/metadata pipeline on a raw wide DataFrame."""
     global _preview_df
     output.delete("1.0", tk.END)
-    p, sh = src_path.get().strip(), src_sheet.get().strip()
-    if not p or not sh:
-        messagebox.showerror("Error", "Pick a source file and sheet.")
-        return
+    if source_tag:
+        _log(f"Source: {source_tag}")
     try:
-        raw = pd.read_excel(p, sheet_name=sh, header=None)
         df = wide_to_long(raw)
     except Exception as e:
-        messagebox.showerror("Error", f"Failed to parse sheet: {e}")
+        messagebox.showerror("Error", f"Failed to parse: {e}")
         return
 
     try:
@@ -339,7 +337,6 @@ def do_preview():
     else:
         _log(f"Already normalized at ({ref_x}, {ref_y}) — no change.")
 
-    # Validate metadata
     energy = energy_var.get().strip()
     sn     = sn_var.get().strip()
     det    = detector_var.get().strip()
@@ -365,7 +362,6 @@ def do_preview():
     _log(f"Parsed {len(df)} rows  ({df['FS_X'].nunique()} X × {df['FS_Y'].nunique()} Y).")
     _log(f"  Energy={energy}  SSD={ssd:g}  Depth={depth:g}  SN={sn}  Detector={det}")
 
-    # Check overlap with destination
     dp = dest_path.get().strip()
     if dp:
         try:
@@ -376,7 +372,6 @@ def do_preview():
         if existing.empty:
             _log(f"  Destination is empty / new — all {len(df)} rows would be added.")
         else:
-            # Compute overlap count
             def _norm(d):
                 out = d.copy()
                 for c in ('FS_X', 'FS_Y', 'SSD', 'Depth'):
@@ -391,6 +386,72 @@ def do_preview():
             n_over = int(b_keys.isin(a_keys).sum())
             _log(f"  Destination has {len(existing)} rows already.")
             _log(f"  Of {len(df)} new rows, {n_over} match existing keys (will be {conflict_var.get()}d).")
+
+
+def do_preview():
+    p, sh = src_path.get().strip(), src_sheet.get().strip()
+    if not p or not sh:
+        messagebox.showerror("Error", "Pick a source file and sheet.")
+        return
+    try:
+        raw = pd.read_excel(p, sheet_name=sh, header=None)
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to read sheet: {e}")
+        return
+    _preview_from_raw(raw, source_tag=f"{os.path.basename(p)} :: {sh}")
+
+
+def do_paste():
+    """Open a popup with a text area, parse the pasted tab/space-delimited
+    wide-format table, and feed it through the same preview pipeline.
+    """
+    dlg = tk.Toplevel(root)
+    dlg.title("Paste OF data (tab- or space-delimited wide-format)")
+    dlg.transient(root)
+    info = ("Paste a 2D table here — first row is X values (with optional 'x' header in cell A1),\n"
+            "first column is Y values (with optional 'y' label), interior cells are Scp readings.\n"
+            "Tab-separated (e.g. straight from Excel) or comma/space-separated all work.")
+    ttk.Label(dlg, text=info, padding=8, justify='left').pack(anchor='w')
+    txt_frame = ttk.Frame(dlg, padding=(8, 0, 8, 0))
+    txt_frame.pack(fill='both', expand=True)
+    txt = tk.Text(txt_frame, wrap='none', font=('Courier', 9), width=110, height=20)
+    txt.grid(row=0, column=0, sticky='nsew')
+    vsb = ttk.Scrollbar(txt_frame, orient='vertical',   command=txt.yview)
+    hsb = ttk.Scrollbar(txt_frame, orient='horizontal', command=txt.xview)
+    txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    vsb.grid(row=0, column=1, sticky='ns')
+    hsb.grid(row=1, column=0, sticky='ew')
+    txt_frame.grid_rowconfigure(0, weight=1); txt_frame.grid_columnconfigure(0, weight=1)
+    txt.focus_set()
+
+    btns = ttk.Frame(dlg, padding=8)
+    btns.pack(fill='x')
+
+    def _parse_and_preview():
+        s = txt.get('1.0', tk.END)
+        if not s.strip():
+            messagebox.showerror("Empty", "Nothing to parse.", parent=dlg)
+            return
+        import io as _io
+        # Try whitespace-tolerant parse: tabs OR ≥2 spaces OR commas
+        raw = None
+        for sep in ('\t', r'\s{2,}', ','):
+            try:
+                cand = pd.read_csv(_io.StringIO(s), sep=sep, header=None, engine='python')
+                if cand.shape[1] >= 2:
+                    raw = cand
+                    break
+            except Exception:
+                continue
+        if raw is None:
+            messagebox.showerror("Parse error",
+                                 "Could not parse the pasted text as a table.", parent=dlg)
+            return
+        dlg.destroy()
+        _preview_from_raw(raw, source_tag='(pasted data)')
+
+    ttk.Button(btns, text="Parse & Preview", command=_parse_and_preview).pack(side='right', padx=4)
+    ttk.Button(btns, text="Cancel",          command=dlg.destroy        ).pack(side='right', padx=4)
 
 
 def do_write():
@@ -465,6 +526,7 @@ ttk.Radiobutton(conflict_frame, text="Skip",    variable=conflict_var, value='sk
 btns = ttk.Frame(main)
 btns.grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
 ttk.Button(btns, text="Read & Preview", command=do_preview).pack(side='left', padx=4)
+ttk.Button(btns, text="Paste data…",    command=do_paste  ).pack(side='left', padx=4)
 ttk.Button(btns, text="Write",          command=do_write  ).pack(side='left', padx=12)
 
 # Log

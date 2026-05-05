@@ -31,6 +31,9 @@ LONG_REQUIRED = {'FS_X', 'FS_Y', 'Scp'}
 FILTER_COLS   = ['Energy', 'SSD', 'Depth', 'SN', 'Detector']
 DEST_SHEET_DEFAULT = 'OutputFactors'
 ENERGY_TOKENS = ['6X', '10X', '15X', '6FFF', '8FFF', '10FFF']
+DEFAULT_FILE  = (r"C:\Users\nknutson\OneDrive - Washington University in St. Louis"
+                 r"\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
+                 r"\90 SSD\OF_Data\NGDSOutputFactorData.xlsx")
 
 
 def _is_numeric(v):
@@ -434,8 +437,8 @@ root.geometry(f"{_w}x{_h}")
 root.minsize(800, 500)
 
 mode_var    = tk.StringVar(master=root, value='single')   # 'single' or 'dual'
-file_a_var  = tk.StringVar(master=root)
-file_b_var  = tk.StringVar(master=root)
+file_a_var  = tk.StringVar(master=root, value=DEFAULT_FILE)
+file_b_var  = tk.StringVar(master=root, value=DEFAULT_FILE)
 status_var  = tk.StringVar(master=root, value="No file loaded.")
 
 # Per-group filter vars
@@ -515,6 +518,96 @@ ALL_TOKEN = 'All'   # special value to mean "iterate over every unique value"
 _ALL_COLS = {'SN', 'Detector', 'Energy'}
 
 
+class MultiSelectCombo(ttk.Frame):
+    """Read-only entry + dropdown button that opens a checkbox popup.
+    Mimics the ttk.Combobox API for cb['values'] = list, cb.get(), cb.set().
+    Stores selection as a comma-separated string in the bound StringVar:
+      ''       → no constraint (treated like All in filters)
+      'All'    → all current values selected
+      'A'      → single value
+      'A, B'   → multi-select
+    """
+    def __init__(self, parent, textvariable, width=12):
+        super().__init__(parent)
+        self._var = textvariable
+        self._values = []
+        self.entry = ttk.Entry(self, textvariable=self._var, width=max(4, width - 2), state='readonly')
+        self.entry.pack(side='left', fill='x', expand=True)
+        self.btn = ttk.Button(self, text='▼', width=2, command=self._open_popup)
+        self.btn.pack(side='left')
+        self.entry.bind('<Button-1>', lambda e: self._open_popup())
+
+    def __setitem__(self, key, value):
+        if key == 'values':
+            self._values = list(value)
+        else:
+            super().__setitem__(key, value)
+
+    def __getitem__(self, key):
+        if key == 'values':
+            return self._values
+        return super().__getitem__(key)
+
+    def get(self):
+        return self._var.get()
+
+    def set(self, text):
+        self._var.set(text)
+
+    def _parse_current(self):
+        s = self._var.get().strip()
+        opts = [v for v in self._values if v != ALL_TOKEN]
+        if not s:
+            return set()
+        if s == ALL_TOKEN:
+            return set(opts)
+        return set(t.strip() for t in s.split(','))
+
+    def _open_popup(self):
+        opts = [v for v in self._values if v != ALL_TOKEN]
+        if not opts:
+            return
+        dlg = tk.Toplevel(self.winfo_toplevel())
+        dlg.title('Select')
+        dlg.transient(self.winfo_toplevel())
+        dlg.grab_set()
+        current = self._parse_current()
+        check_vars = {}
+        container = ttk.Frame(dlg, padding=4)
+        container.pack(fill='both', expand=True)
+        for v in opts:
+            cv = tk.BooleanVar(value=(v in current))
+            check_vars[v] = cv
+            ttk.Checkbutton(container, text=str(v), variable=cv).pack(anchor='w', padx=4, pady=1)
+        btns = ttk.Frame(dlg, padding=4)
+        btns.pack(fill='x')
+        def _all():
+            for cv in check_vars.values(): cv.set(True)
+        def _none():
+            for cv in check_vars.values(): cv.set(False)
+        def _ok():
+            sel = [v for v in opts if check_vars[v].get()]
+            if len(sel) == len(opts):
+                self._var.set(ALL_TOKEN)
+            elif not sel:
+                self._var.set('')
+            elif len(sel) == 1:
+                self._var.set(sel[0])
+            else:
+                self._var.set(', '.join(sel))
+            dlg.destroy()
+        ttk.Button(btns, text='All',  command=_all ).pack(side='left',  padx=2)
+        ttk.Button(btns, text='None', command=_none).pack(side='left',  padx=2)
+        ttk.Button(btns, text='OK',   command=_ok  ).pack(side='right', padx=2)
+        self.update_idletasks()
+        dlg.geometry(f'+{self.winfo_rootx()}+{self.winfo_rooty() + self.winfo_height()}')
+
+
+def _split_filter_value(v):
+    """Return list of values from a filter StringVar string (comma-separated)."""
+    return [s.strip() for s in v.split(',') if s.strip()]
+
+
 def _populate_dropdowns_for(grp_letter, df):
     """Fill the comboboxes for one group from a DataFrame's unique values.
     Auto-selects when only one value exists; SN and Detector get an "All" option
@@ -534,10 +627,31 @@ def _populate_dropdowns_for(grp_letter, df):
                 cb.set(opts[0])
 
 
+def _apply_filter(df, col, var_value):
+    """Apply a single filter column to df given the StringVar string value.
+    Empty or 'All' = no constraint. Comma-separated = multi-select.
+    """
+    v = (var_value or '').strip()
+    if not v or v == ALL_TOKEN:
+        return df
+    values = _split_filter_value(v)
+    if not values:
+        return df
+    if col in ('SSD', 'Depth'):
+        try:
+            targets = [float(s) for s in values]
+        except ValueError:
+            return df
+        mask = pd.Series([False] * len(df), index=df.index)
+        for t in targets:
+            mask |= np.isclose(df[col].astype(float), t)
+        return df[mask]
+    return df[df[col].astype(str).isin(values)]
+
+
 def _refilter_options(grp_letter, group_vars, df_source):
     """Cascading filter: each combobox's options reflect what's possible given the OTHER selections.
-    Bidirectional — picking detector narrows SN list, picking SN narrows detector list, etc.
-    'All' on SN/Detector counts as no constraint for the cascade.
+    Multi-select supported via comma-separated values; 'All' counts as no constraint.
     """
     if df_source is None:
         return
@@ -546,17 +660,7 @@ def _refilter_options(grp_letter, group_vars, df_source):
         for other in FILTER_COLS:
             if other == col:
                 continue
-            v = group_vars[other].get().strip()
-            if not v or v == ALL_TOKEN:
-                continue
-            if other in ('SSD', 'Depth'):
-                try:
-                    target = float(v)
-                except ValueError:
-                    continue
-                sub = sub[np.isclose(sub[other].astype(float), target)]
-            else:
-                sub = sub[sub[other].astype(str) == v]
+            sub = _apply_filter(sub, other, group_vars[other].get())
         opts = sorted(sub[col].dropna().unique(), key=lambda v: (str(type(v)), v))
         opts_str = [_fmt_val(o) for o in opts]
         if col in _ALL_COLS and len(opts_str) > 1:
@@ -565,9 +669,19 @@ def _refilter_options(grp_letter, group_vars, df_source):
         if cb is None:
             continue
         cb['values'] = opts_str
-        cur = cb.get().strip()
-        if cur and cur not in opts_str:
-            cb.set('')
+        cur_vals = _split_filter_value(cb.get().strip())
+        # Drop any selected values that are no longer in the option list
+        valid = [v for v in cur_vals if v in opts_str]
+        new_text = cb.get().strip()
+        if new_text == ALL_TOKEN:
+            pass  # keep
+        elif valid != cur_vals:
+            if not valid:
+                cb.set('')
+            elif len(valid) == 1:
+                cb.set(valid[0])
+            else:
+                cb.set(', '.join(valid))
 
 
 def _choose_file(var):
@@ -628,17 +742,7 @@ def _filter_group(df_source, group_vars):
         return None
     df = df_source.copy()
     for col in FILTER_COLS:
-        v = group_vars[col].get().strip()
-        if not v or v == ALL_TOKEN:
-            continue
-        if col in ('SSD', 'Depth'):
-            try:
-                target = float(v)
-            except ValueError:
-                continue
-            df = df[np.isclose(df[col], target)]
-        else:
-            df = df[df[col].astype(str) == v]
+        df = _apply_filter(df, col, group_vars[col].get())
     return df
 
 
@@ -979,21 +1083,23 @@ def _plot():
 
 def _expand_traces(df_source, group_vars):
     """Expand the group into one DataFrame per (Energy/SN/Detector) combo when
-    those fields are set to ALL. Returns a list of (label, sub_df).
+    those fields are 'All' or multi-selected (comma-separated). Single
+    selections collapse to one trace. Returns a list of (label, sub_df).
     """
     df = _filter_group(df_source, group_vars)
     if df is None or df.empty:
         return []
-    en_all  = group_vars['Energy'].get().strip()   == ALL_TOKEN
-    sn_all  = group_vars['SN'].get().strip()       == ALL_TOKEN
-    det_all = group_vars['Detector'].get().strip() == ALL_TOKEN
-    if not (en_all or sn_all or det_all):
+    iter_cols = []
+    for col in ('Energy', 'SN', 'Detector'):
+        v = group_vars[col].get().strip()
+        if v == ALL_TOKEN or ',' in v:
+            iter_cols.append(col)
+    if not iter_cols:
         return [('group', df)]
-    keys = [k for k, flag in (('Energy', en_all), ('SN', sn_all), ('Detector', det_all)) if flag]
     out = []
-    for combo in df[keys].drop_duplicates().sort_values(keys).values:
+    for combo in df[iter_cols].drop_duplicates().sort_values(iter_cols).values:
         sub = df.copy()
-        for k, v in zip(keys, combo):
+        for k, v in zip(iter_cols, combo):
             sub = sub[sub[k].astype(str) == str(v)]
         lbl = ' / '.join(str(v) for v in combo)
         out.append((lbl, sub))
@@ -1195,10 +1301,10 @@ def _make_filter_frame(label, group_vars, grp_letter, row_idx):
         _refilter_options(grp_letter, group_vars, df_src)
     for i, c in enumerate(cols):
         ttk.Label(frame, text=f"{c}:").grid(row=0, column=2*i, sticky="e", padx=(4, 0))
-        cb = ttk.Combobox(frame, textvariable=group_vars[c], width=12, state='normal')
+        cb = MultiSelectCombo(frame, textvariable=group_vars[c], width=14)
         cb.grid(row=0, column=2*i+1, sticky="w", padx=(0, 4))
-        cb.bind('<<ComboboxSelected>>', _on_change)
-        cb.bind('<FocusOut>', _on_change)
+        # Refilter cascade when the StringVar changes (popup OK closes, sets var)
+        group_vars[c].trace_add('write', lambda *_a: _on_change())
         _combos[grp_letter][c] = cb
 
 

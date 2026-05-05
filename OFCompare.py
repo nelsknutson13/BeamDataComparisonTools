@@ -853,6 +853,23 @@ def _plot():
             fig.colorbar(im, ax=ax, label='Scp')
             ax.set_title(traces[0][0])
             ax.set_xlabel('FS_X [cm]'); ax.set_ylabel('FS_Y [cm]')
+        elif view == 'surface':
+            if len(traces) > 1:
+                messagebox.showinfo("Surface not multi-trace",
+                                    "3D surface supports a single trace; pick specific values "
+                                    "instead of 'All'.")
+                return
+            tdf = traces[0][1]
+            x_vals, y_vals, M = _matrix(tdf)
+            ax = fig.add_subplot(111, projection='3d')
+            X, Y = np.meshgrid(x_vals, y_vals)
+            ax.plot_surface(X, Y, M, cmap='viridis', alpha=0.85,
+                            edgecolor='none', antialiased=True)
+            # Scatter actual measured points
+            ax.scatter(tdf['FS_X'], tdf['FS_Y'], tdf['Scp'],
+                       c='black', s=12, depthshade=True)
+            ax.set_xlabel('FS_X [cm]'); ax.set_ylabel('FS_Y [cm]'); ax.set_zlabel('Scp')
+            ax.set_title(traces[0][0])
         else:
             ax = fig.add_subplot(111)
             xlabel_set = None
@@ -966,6 +983,54 @@ def _plot():
             fig.colorbar(im, ax=ax, label='Scp')
             ax.set_title(f'A: {label_a}')
         ax.set_xlabel('FS_X [cm]'); ax.set_ylabel('FS_Y [cm]')
+        fig.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.001)
+        return
+
+    if view == 'surface':
+        x_vals, y_vals, Ma, Mb = _common_axes_maybe_interp(dfA, dfB)
+        if x_vals is None:
+            messagebox.showerror("No overlap",
+                                 "Surface needs overlapping FS_X / FS_Y values.")
+            return
+        X, Y = np.meshgrid(x_vals, y_vals)
+        if mode == 'diff':
+            # Two-panel figure: both surfaces on top, diff surface on bottom
+            ax_top = fig.add_subplot(2, 1, 1, projection='3d')
+            ax_top.plot_surface(X, Y, Ma, color='tab:blue',  alpha=0.55,
+                                edgecolor='none', antialiased=True)
+            ax_top.plot_surface(X, Y, Mb, color='tab:orange', alpha=0.55,
+                                edgecolor='none', antialiased=True)
+            ax_top.scatter(dfA['FS_X'], dfA['FS_Y'], dfA['Scp'], c='tab:blue',  s=10, depthshade=True)
+            ax_top.scatter(dfB['FS_X'], dfB['FS_Y'], dfB['Scp'], c='tab:orange', s=10, depthshade=True)
+            ax_top.set_xlabel('FS_X'); ax_top.set_ylabel('FS_Y'); ax_top.set_zlabel('Scp')
+            ax_top.set_title(f'A (blue): {label_a}   |   B (orange): {label_b}')
+
+            pct = 100.0 * (Mb - Ma) / Ma
+            try:
+                zlim = abs(float(diff_lim_var.get()))
+            except ValueError:
+                zlim = None
+            ax_bot = fig.add_subplot(2, 1, 2, projection='3d')
+            ax_bot.plot_surface(X, Y, pct, cmap='RdBu_r', alpha=0.85,
+                                edgecolor='none', antialiased=True,
+                                vmin=-zlim if zlim else None,
+                                vmax= zlim if zlim else None)
+            if zlim:
+                ax_bot.set_zlim(-zlim, zlim)
+            ax_bot.set_xlabel('FS_X'); ax_bot.set_ylabel('FS_Y'); ax_bot.set_zlabel('% diff')
+            ax_bot.set_title(f'% diff   {label_b}  vs  {label_a}')
+        else:  # overlay only — both surfaces on one plot
+            ax = fig.add_subplot(111, projection='3d')
+            ax.plot_surface(X, Y, Ma, color='tab:blue',  alpha=0.5,
+                            edgecolor='none', antialiased=True)
+            ax.plot_surface(X, Y, Mb, color='tab:orange', alpha=0.5,
+                            edgecolor='none', antialiased=True)
+            ax.scatter(dfA['FS_X'], dfA['FS_Y'], dfA['Scp'], c='tab:blue',  s=10, depthshade=True)
+            ax.scatter(dfB['FS_X'], dfB['FS_Y'], dfB['Scp'], c='tab:orange', s=10, depthshade=True)
+            ax.set_xlabel('FS_X'); ax.set_ylabel('FS_Y'); ax.set_zlabel('Scp')
+            ax.set_title(f'A (blue): {label_a}   |   B (orange): {label_b}')
         fig.tight_layout()
         plt.show(block=False)
         plt.pause(0.001)
@@ -1315,6 +1380,7 @@ _make_filter_frame('B', group_b, 'B', 5)
 view_frame = ttk.LabelFrame(main, text="View", padding=4)
 view_frame.grid(row=6, column=0, columnspan=4, sticky="we", pady=(6, 0))
 ttk.Radiobutton(view_frame, text="2D heatmap", variable=view_var, value='heatmap').pack(side='left', padx=4)
+ttk.Radiobutton(view_frame, text="3D surface", variable=view_var, value='surface').pack(side='left', padx=4)
 ttk.Radiobutton(view_frame, text="Diagonal (X=Y)", variable=view_var, value='diagonal').pack(side='left', padx=4)
 ttk.Radiobutton(view_frame, text="Row (fixed Y)", variable=view_var, value='row').pack(side='left', padx=4)
 ttk.Entry(view_frame, textvariable=row_y_var, width=6).pack(side='left')

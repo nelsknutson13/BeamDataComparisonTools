@@ -128,6 +128,19 @@ def _guess_energy(text):
     return None
 
 
+def _guess_sn(text):
+    """Pull a serial-number-like token (e.g. 'SN 21', 'SN21', 'SN_1003') from a path or string."""
+    if not text:
+        return None
+    m = re.search(r'\bSN[\s_-]*\d+\b', str(text), re.IGNORECASE)
+    if not m:
+        return None
+    raw = m.group(0).upper()
+    # Normalize to "SN <digits>"
+    digits = re.search(r'\d+', raw).group(0)
+    return f"SN {digits}"
+
+
 def _guess_ssd(text):
     if not text:
         return None
@@ -259,16 +272,32 @@ def choose_src():
     if sheets:
         src_sheet.set(sheets[0])
         _on_sheet_change()
-    # Auto-fill SSD from filename if possible
-    g_ssd = _guess_ssd(os.path.basename(p))
-    if g_ssd is not None:
+    # Auto-fill from filename + directory path
+    g_ssd = _guess_ssd(p)
+    if g_ssd is not None and not ssd_var.get():
         ssd_var.set(str(g_ssd))
+    g_energy = _guess_energy(p)
+    if g_energy and not energy_var.get():
+        energy_var.set(g_energy)
+    g_sn = _guess_sn(p)
+    if g_sn and not sn_var.get():
+        sn_var.set(g_sn)
 
 
 def _on_sheet_change(*_):
-    g = _guess_energy(src_sheet.get())
-    if g and not energy_var.get():
-        energy_var.set(g)
+    sheet = src_sheet.get()
+    path  = src_path.get()
+    # Try sheet name first (more specific), fall back to full path.
+    for source in (sheet, path):
+        g_e = _guess_energy(source)
+        if g_e and not energy_var.get():
+            energy_var.set(g_e)
+        g_ssd = _guess_ssd(source)
+        if g_ssd is not None and not ssd_var.get():
+            ssd_var.set(str(g_ssd))
+        g_sn = _guess_sn(source)
+        if g_sn and not sn_var.get():
+            sn_var.set(g_sn)
 
 
 def choose_dest():

@@ -215,6 +215,213 @@ def _common_axes(dfA, dfB):
     return x_common, y_common, _select(xA, yA, Ma), _select(xB, yB, Mb)
 
 
+def _common_axes_maybe_interp(dfA, dfB):
+    """Like _common_axes, but uses the global interpolate flag. When on,
+    builds the union grid and interpolates each group's surface onto it
+    (NaN outside each group's measured range). When off, uses intersection.
+    """
+    if not interp_var.get():
+        return _common_axes(dfA, dfB)
+    xA, yA, _ = _matrix(dfA)
+    xB, yB, _ = _matrix(dfB)
+    x_union = np.array(sorted(set(xA.tolist()) | set(xB.tolist())), dtype=float)
+    y_union = np.array(sorted(set(yA.tolist()) | set(yB.tolist())), dtype=float)
+    if len(x_union) == 0 or len(y_union) == 0:
+        return None, None, None, None
+    method = interp_method_var.get()
+    Ma = _interp_to_grid(dfA, x_union, y_union, method=method)
+    Mb = _interp_to_grid(dfB, x_union, y_union, method=method)
+    return x_union, y_union, Ma, Mb
+
+
+def _stack_traces(traces_xy, interpolate=False, method='pchip'):
+    """Given a list of (xs, ys) arrays for individual traces, build a stacked
+    matrix at the union of x values. When interpolate=False, missing cells
+    stay NaN. When interpolate=True, each trace is interpolated onto the
+    union grid (within its measured x range; NaN outside).
+    Returns (xs_common, Y_stack) where Y_stack is shape (n_traces, n_x).
+    """
+    all_x = sorted(set().union(*[set(np.asarray(xs).tolist()) for xs, _ in traces_xy]))
+    xs_common = np.array(all_x, dtype=float)
+    Y = np.full((len(traces_xy), len(xs_common)), np.nan)
+    if interpolate:
+        from scipy.interpolate import PchipInterpolator
+    for i, (xs, ys) in enumerate(traces_xy):
+        if xs is None or len(xs) == 0:
+            continue
+        xs_arr = np.asarray(xs, dtype=float)
+        ys_arr = np.asarray(ys, dtype=float)
+        ok = ~np.isnan(ys_arr)
+        if ok.sum() == 0:
+            continue
+        xs_arr, ys_arr = xs_arr[ok], ys_arr[ok]
+        if interpolate and len(xs_arr) >= 2:
+            order = np.argsort(xs_arr)
+            xs_arr, ys_arr = xs_arr[order], ys_arr[order]
+            # de-duplicate any repeated x's by averaging
+            uniq_x, inv = np.unique(xs_arr, return_inverse=True)
+            uniq_y = np.zeros_like(uniq_x, dtype=float)
+            counts = np.zeros_like(uniq_x, dtype=float)
+            np.add.at(uniq_y, inv, ys_arr)
+            np.add.at(counts, inv, 1.0)
+            uniq_y /= counts
+            try:
+                if method == 'pchip':
+                    f = PchipInterpolator(uniq_x, uniq_y, extrapolate=False)
+                else:
+                    from scipy.interpolate import interp1d
+                    f = interp1d(uniq_x, uniq_y, kind='linear',
+                                 bounds_error=False, fill_value=np.nan)
+                Y[i, :] = f(xs_common)
+            except Exception:
+                # Fall back to exact-match placement
+                for x, y in zip(uniq_x, uniq_y):
+                    j = int(np.argmin(np.abs(xs_common - float(x))))
+                    if np.isclose(xs_common[j], float(x), atol=1e-6):
+                        Y[i, j] = y
+        else:
+            for x, y in zip(xs_arr, ys_arr):
+                j = int(np.argmin(np.abs(xs_common - float(x))))
+                if np.isclose(xs_common[j], float(x), atol=1e-6):
+                    Y[i, j] = y
+    return xs_common, Y
+
+
+def _interp_to_grid(df_trace, x_grid, y_grid, method='pchip'):
+    """Interpolate one trace's Scp surface onto (x_grid × y_grid). Returns 2D
+    array of shape (len(y_grid), len(x_grid)). NaN where (x, y) falls outside
+    the trace's measured range — no extrapolation.
+    """
+    pivot = df_trace.pivot_table(index='FS_Y', columns='FS_X', values='Scp', aggfunc='mean')
+    pivot = pivot.sort_index().sort_index(axis=1)
+    xs = pivot.columns.values.astype(float)
+    ys = pivot.index.values.astype(float)
+    M  = pivot.values.astype(float)
+    if M.size == 0 or len(xs) < 2 or len(ys) < 2:
+        return np.full((len(y_grid), len(x_grid)), np.nan)
+
+    from scipy.interpolate import RegularGridInterpolator
+    # Drop rows / columns that are entirely NaN to keep the interpolator happy
+    row_ok = ~np.all(np.isnan(M), axis=1)
+    col_ok = ~np.all(np.isnan(M), axis=0)
+    if not row_ok.any() or not col_ok.any():
+        return np.full((len(y_grid), len(x_grid)), np.nan)
+    ys2, xs2, M2 = ys[row_ok], xs[col_ok], M[np.ix_(row_ok, col_ok)]
+    # Fill any remaining isolated NaN by row/column nearest fill (RGI doesn't accept NaN)
+    if np.isnan(M2).any():
+        df_M = pd.DataFrame(M2, index=ys2, columns=xs2)
+        df_M = df_M.interpolate(axis=1, limit_direction='both').interpolate(axis=0, limit_direction='both')
+        M2 = df_M.values
+
+    try:
+        rgi = RegularGridInterpolator((ys2, xs2), M2, method=method, bounds_error=False, fill_value=np.nan)
+    except (ValueError, KeyError):
+        rgi = RegularGridInterpolator((ys2, xs2), M2, method='linear', bounds_error=False, fill_value=np.nan)
+
+    YY, XX = np.meshgrid(y_grid, x_grid, indexing='ij')
+    pts = np.stack([YY.ravel(), XX.ravel()], axis=1)
+    out = rgi(pts).reshape(len(y_grid), len(x_grid))
+    # Mask points outside the original measured range
+    out[(YY < ys2.min()) | (YY > ys2.max()) | (XX < xs2.min()) | (XX > xs2.max())] = np.nan
+    return out
+
+
+def _aggregate_traces_2d(traces, interpolate, method='pchip'):
+    """Stack all expanded traces onto a common (FS_X × FS_Y) grid and return
+    (x_grid, y_grid, stack) where stack has shape (n_traces, n_y, n_x). When
+    `interpolate` is False, just place each trace's values on the union grid
+    with NaN elsewhere.
+    """
+    all_x = sorted({float(v) for _, sub in traces for v in sub['FS_X'].unique()})
+    all_y = sorted({float(v) for _, sub in traces for v in sub['FS_Y'].unique()})
+    x_grid = np.array(all_x, dtype=float)
+    y_grid = np.array(all_y, dtype=float)
+    stack = np.full((len(traces), len(y_grid), len(x_grid)), np.nan)
+    for i, (_, sub) in enumerate(traces):
+        if interpolate:
+            stack[i] = _interp_to_grid(sub, x_grid, y_grid, method=method)
+        else:
+            piv = sub.pivot_table(index='FS_Y', columns='FS_X', values='Scp', aggfunc='mean')
+            for ry, yv in enumerate(y_grid):
+                if yv not in piv.index:
+                    continue
+                for cx, xv in enumerate(x_grid):
+                    if xv not in piv.columns:
+                        continue
+                    stack[i, ry, cx] = piv.loc[yv, xv]
+    return x_grid, y_grid, stack
+
+
+def _stats_per_cell(stack):
+    """Compute per-cell stats across axis 0 of stack. Returns dict of 2D arrays."""
+    Y = stack
+    with np.errstate(all='ignore'):
+        mean   = np.nanmean(Y, axis=0)
+        median = np.nanmedian(Y, axis=0)
+        std    = np.nanstd(Y, axis=0, ddof=1)
+        cv_pct = 100.0 * std / np.where(np.abs(mean) > 0, mean, np.nan)
+        q25    = np.nanpercentile(Y, 25, axis=0)
+        q75    = np.nanpercentile(Y, 75, axis=0)
+        iqr    = q75 - q25
+        mad    = np.nanmedian(np.abs(Y - median[None, :, :]), axis=0)
+        ymin   = np.nanmin(Y, axis=0)
+        ymax   = np.nanmax(Y, axis=0)
+        n      = np.sum(~np.isnan(Y), axis=0)
+    return {'Mean': mean, 'Median': median, 'Std': std, 'CV_pct': cv_pct,
+            'Q25': q25, 'Q75': q75, 'IQR': iqr, 'MAD': mad,
+            'Min': ymin, 'Max': ymax, 'N': n}
+
+
+def _print_stats_2d(traces, group_label=''):
+    """Print per-stat 2D matrices (Y rows × X columns) to stdout for the given
+    list of expanded traces. Honors the global Interpolate-to-common-grid flag.
+    """
+    if not traces or len(traces) < 2:
+        return
+    interpolate = interp_var.get()
+    method      = interp_method_var.get()
+    x_grid, y_grid, stack = _aggregate_traces_2d(traces, interpolate, method=method)
+    stats = _stats_per_cell(stack)
+    interp_tag = (f"PCHIP" if method == 'pchip' else "Linear") if interpolate else "no interp"
+    print(f"\n{'='*78}")
+    print(f"  Stats — 2D matrices   ({group_label}, {len(traces)} traces, {interp_tag})")
+    print(f"{'='*78}")
+    stat_order = ['Mean', 'Std', 'CV_pct', 'Median', 'IQR', 'MAD', 'Min', 'Max', 'N']
+    for sname in stat_order:
+        df_out = pd.DataFrame(stats[sname], index=y_grid, columns=x_grid)
+        df_out.index.name = 'FS_Y \\ FS_X'
+        print(f"\n-- {sname} --")
+        fmt = (lambda v: f"{int(v):d}") if sname == 'N' else (lambda v: f"{v:.4f}")
+        with pd.option_context('display.max_rows', None,
+                               'display.max_columns', None,
+                               'display.width', 250):
+            print(df_out.to_string(float_format=fmt))
+    print('=' * 78)
+
+
+def _compute_stats(Y_stack):
+    """Compute per-column stats on Y_stack (rows = traces, cols = x).
+    Returns dict of arrays keyed by name. NaNs are ignored.
+    """
+    Y = np.asarray(Y_stack, dtype=float)
+    with np.errstate(all='ignore'):
+        mean   = np.nanmean(Y, axis=0)
+        median = np.nanmedian(Y, axis=0)
+        std    = np.nanstd(Y, axis=0, ddof=1)
+        cv_pct = 100.0 * std / np.where(np.abs(mean) > 0, mean, np.nan)
+        q25    = np.nanpercentile(Y, 25, axis=0)
+        q75    = np.nanpercentile(Y, 75, axis=0)
+        iqr    = q75 - q25
+        # MAD around the median
+        mad    = np.nanmedian(np.abs(Y - median[None, :]), axis=0)
+        ymin   = np.nanmin(Y, axis=0)
+        ymax   = np.nanmax(Y, axis=0)
+        n      = np.sum(~np.isnan(Y), axis=0)
+    return {'mean': mean, 'median': median, 'std': std, 'cv_pct': cv_pct,
+            'q25': q25, 'q75': q75, 'iqr': iqr, 'mad': mad,
+            'min': ymin, 'max': ymax, 'n': n}
+
+
 # ── GUI ──────────────────────────────────────────────────────────────────────
 
 root = tk.Tk()
@@ -242,6 +449,22 @@ view_var    = tk.StringVar(master=root, value='diagonal')
 compare_var = tk.StringVar(master=root, value='diff')
 row_y_var   = tk.StringVar(master=root, value='10.5')
 col_x_var   = tk.StringVar(master=root, value='10.5')
+diff_lim_var = tk.StringVar(master=root, value='6')   # ± y-axis / colorbar limit for % diff plots
+
+# Stat overlay flags (apply when ≥2 traces exist)
+stat_mean    = tk.BooleanVar(master=root, value=False)
+stat_median  = tk.BooleanVar(master=root, value=False)
+stat_std     = tk.BooleanVar(master=root, value=False)
+stat_cv      = tk.BooleanVar(master=root, value=False)
+stat_iqr     = tk.BooleanVar(master=root, value=False)
+stat_minmax  = tk.BooleanVar(master=root, value=False)
+stat_curves  = tk.BooleanVar(master=root, value=True)   # show individual traces too
+std_k_var    = tk.StringVar(master=root, value='2')     # ± k × std band width
+iqr_k_var    = tk.StringVar(master=root, value='1.5')   # k × IQR Tukey fence (Q25 - k*IQR, Q75 + k*IQR)
+
+# Interpolation to common grid for stats aggregation
+interp_var   = tk.BooleanVar(master=root, value=False)   # off → use raw cell values, NaN where missing
+interp_method_var = tk.StringVar(master=root, value='pchip')   # 'pchip' or 'linear'
 
 _df_a     = None     # long-format DataFrame backing Group A
 _df_b     = None     # long-format DataFrame backing Group B (same as _df_a in single mode)
@@ -529,6 +752,7 @@ def _plot():
         else:
             ax = fig.add_subplot(111)
             xlabel_set = None
+            traces_xy = []   # collect (xs, ys) for stat aggregation
             for tlabel, tdf in traces:
                 x_vals, y_vals, M = _matrix(tdf)
                 if view == 'diagonal':
@@ -558,7 +782,51 @@ def _plot():
                         continue
                     xs = y_vals; ys = M[:, ix]
                     xlabel_set = f'FS_Y [cm]  (X = {x_vals[ix]:g})'
-                ax.plot(xs, ys, 'o-', label=tlabel)
+                traces_xy.append((xs, ys, tlabel))
+                if stat_curves.get():
+                    ax.plot(xs, ys, 'o-', label=tlabel, alpha=0.45, linewidth=1)
+
+            # Optional stat overlays when ≥2 traces
+            if len(traces_xy) >= 2 and any(v.get() for v in
+                    (stat_mean, stat_median, stat_std, stat_cv, stat_iqr, stat_minmax)):
+                xs_common, Y = _stack_traces(
+                    [(xs, ys) for xs, ys, _ in traces_xy],
+                    interpolate=interp_var.get(),
+                    method=interp_method_var.get())
+                stats = _compute_stats(Y)
+                # Print stats table to console
+                _print_stats_2d(traces, base_label)
+                try:
+                    k_std = abs(float(std_k_var.get()))
+                except ValueError:
+                    k_std = 1.0
+                try:
+                    k_iqr = abs(float(iqr_k_var.get()))
+                except ValueError:
+                    k_iqr = 1.0
+                if stat_std.get():
+                    ax.fill_between(xs_common, stats['mean'] - k_std * stats['std'],
+                                    stats['mean'] + k_std * stats['std'],
+                                    color='gray', alpha=0.25, label=f'±{k_std:g} std')
+                if stat_cv.get():
+                    band = k_std * stats['mean'] * stats['cv_pct'] / 100.0
+                    ax.fill_between(xs_common, stats['mean'] - band, stats['mean'] + band,
+                                    color='tab:orange', alpha=0.18, label=f'±{k_std:g} CV%')
+                if stat_iqr.get():
+                    lo = stats['q25'] - k_iqr * stats['iqr'] if k_iqr != 1.0 else stats['q25']
+                    hi = stats['q75'] + k_iqr * stats['iqr'] if k_iqr != 1.0 else stats['q75']
+                    # When k_iqr == 1, just show the IQR (Q25..Q75); otherwise show Tukey fences.
+                    label = 'IQR' if k_iqr == 1.0 else f'Q25-{k_iqr:g}·IQR .. Q75+{k_iqr:g}·IQR'
+                    ax.fill_between(xs_common, lo, hi,
+                                    color='tab:blue', alpha=0.18, label=label)
+                if stat_minmax.get():
+                    ax.plot(xs_common, stats['min'], ':', color='gray', linewidth=1, label='min/max')
+                    ax.plot(xs_common, stats['max'], ':', color='gray', linewidth=1)
+                if stat_mean.get():
+                    ax.plot(xs_common, stats['mean'], '-', color='black', linewidth=2.2, label='mean')
+                if stat_median.get():
+                    ax.plot(xs_common, stats['median'], '--', color='tab:purple', linewidth=2, label='median')
+
             ax.set_xlabel(xlabel_set or 'FS [cm]')
             ax.set_ylabel('Scp')
             ax.grid(True, alpha=0.3)
@@ -571,7 +839,7 @@ def _plot():
     # ── both groups active: comparison view ──
     if view == 'heatmap':
         # Heatmap diff still needs overlapping axes.
-        x_vals, y_vals, Ma, Mb = _common_axes(dfA, dfB)
+        x_vals, y_vals, Ma, Mb = _common_axes_maybe_interp(dfA, dfB)
         if x_vals is None:
             messagebox.showerror("No overlap",
                                  "Heatmap diff needs overlapping FS_X / FS_Y values.")
@@ -579,7 +847,10 @@ def _plot():
         ax = fig.add_subplot(111)
         if mode == 'diff':
             pct = 100.0 * (Mb - Ma) / Ma
-            vmax = max(abs(np.nanmin(pct)), abs(np.nanmax(pct)))
+            try:
+                vmax = abs(float(diff_lim_var.get()))
+            except ValueError:
+                vmax = max(abs(np.nanmin(pct)), abs(np.nanmax(pct)))
             im = ax.imshow(pct, origin='lower', aspect='auto',
                            cmap='RdBu_r', vmin=-vmax, vmax=vmax,
                            extent=[x_vals[0], x_vals[-1], y_vals[0], y_vals[-1]])
@@ -597,8 +868,20 @@ def _plot():
         return
 
     # ── 1-D views (diagonal/row/col): build each group's data independently ──
-    xA, yA, Ma = _matrix(dfA)
-    xB, yB, Mb = _matrix(dfB)
+    if interp_var.get():
+        # Interpolate each group's surface onto the union grid before slicing
+        xA_raw, yA_raw, _ = _matrix(dfA)
+        xB_raw, yB_raw, _ = _matrix(dfB)
+        x_union = np.array(sorted(set(xA_raw.tolist()) | set(xB_raw.tolist())), dtype=float)
+        y_union = np.array(sorted(set(yA_raw.tolist()) | set(yB_raw.tolist())), dtype=float)
+        method = interp_method_var.get()
+        Ma = _interp_to_grid(dfA, x_union, y_union, method=method)
+        Mb = _interp_to_grid(dfB, x_union, y_union, method=method)
+        xA, yA = x_union, y_union
+        xB, yB = x_union, y_union
+    else:
+        xA, yA, Ma = _matrix(dfA)
+        xB, yB, Mb = _matrix(dfB)
 
     if view == 'diagonal':
         diag_a = sorted(set(xA).intersection(yA))
@@ -683,10 +966,183 @@ def _plot():
         ax2.axhline(0, color='k', lw=0.5)
         ax2.set_xlabel(xlabel); ax2.set_ylabel('% diff (B − A) / A')
         ax2.grid(True, alpha=0.3)
+        try:
+            lim = abs(float(diff_lim_var.get()))
+            ax2.set_ylim(-lim, lim)
+        except ValueError:
+            pass
 
     fig.tight_layout()
     plt.show(block=False)
     plt.pause(0.001)
+
+
+def _expand_traces(df_source, group_vars):
+    """Expand the group into one DataFrame per (Energy/SN/Detector) combo when
+    those fields are set to ALL. Returns a list of (label, sub_df).
+    """
+    df = _filter_group(df_source, group_vars)
+    if df is None or df.empty:
+        return []
+    en_all  = group_vars['Energy'].get().strip()   == ALL_TOKEN
+    sn_all  = group_vars['SN'].get().strip()       == ALL_TOKEN
+    det_all = group_vars['Detector'].get().strip() == ALL_TOKEN
+    if not (en_all or sn_all or det_all):
+        return [('group', df)]
+    keys = [k for k, flag in (('Energy', en_all), ('SN', sn_all), ('Detector', det_all)) if flag]
+    out = []
+    for combo in df[keys].drop_duplicates().sort_values(keys).values:
+        sub = df.copy()
+        for k, v in zip(keys, combo):
+            sub = sub[sub[k].astype(str) == str(v)]
+        lbl = ' / '.join(str(v) for v in combo)
+        out.append((lbl, sub))
+    return out
+
+
+def _export_stats():
+    """Compute per-cell stats matrices across expanded traces for active groups.
+    Writes one sheet per (group, stat) to xlsx, prints matrices to terminal,
+    and shows them in a popup window.
+    """
+    if _df_a is None:
+        messagebox.showinfo("Load first", "Load a file first.")
+        return
+
+    interpolate = interp_var.get()
+    method      = interp_method_var.get()
+
+    out_groups = []   # list of (letter, x_grid, y_grid, stats_dict)
+    for letter, gv, df_src in (('A', group_a, _df_a), ('B', group_b, _df_b)):
+        if not _group_active(gv) or df_src is None:
+            continue
+        traces = _expand_traces(df_src, gv)
+        if not traces:
+            continue
+        x_grid, y_grid, stack = _aggregate_traces_2d(traces, interpolate, method=method)
+        stats = _stats_per_cell(stack)
+        out_groups.append((letter, x_grid, y_grid, stats, len(traces)))
+
+    if not out_groups:
+        messagebox.showinfo("Nothing to export", "No active groups with data.")
+        return
+
+    p = filedialog.asksaveasfilename(defaultextension=".xlsx",
+                                     filetypes=[("Excel", "*.xlsx")],
+                                     initialfile="OF_stats.xlsx")
+    if not p:
+        return
+
+    stat_order = ['Mean', 'Std', 'CV_pct', 'Median', 'IQR', 'MAD', 'Min', 'Max', 'N']
+
+    def _matrix_df(x_grid, y_grid, mat):
+        df = pd.DataFrame(mat, index=y_grid, columns=x_grid)
+        df.index.name = 'FS_Y \\ FS_X'
+        return df
+
+    def _slice_df(x_grid, y_grid, stats):
+        """Extract a 1D slice from each stat matrix based on the current view.
+        Returns (slice_label, DataFrame) or (None, None) if view is heatmap.
+        """
+        view = view_var.get()
+        if view == 'heatmap':
+            return None, None
+        if view == 'diagonal':
+            common = [v for v in x_grid if v in y_grid]
+            if not common:
+                return None, None
+            xs = np.array(common, dtype=float)
+            data = {}
+            for sname in stat_order:
+                M = stats[sname]
+                vals = np.array([M[list(y_grid).index(v), list(x_grid).index(v)] for v in common])
+                data[sname] = vals
+            df = pd.DataFrame(data, index=xs)
+            df.index.name = 'FS  (X=Y)'
+            return f"diagonal", df
+        if view == 'row':
+            try:
+                y_pick = float(row_y_var.get())
+            except ValueError:
+                return None, None
+            iy = int(np.argmin(np.abs(np.asarray(y_grid) - y_pick)))
+            if not np.isclose(y_grid[iy], y_pick, atol=0.01):
+                return None, None
+            data = {sname: stats[sname][iy, :] for sname in stat_order}
+            df = pd.DataFrame(data, index=np.asarray(x_grid, dtype=float))
+            df.index.name = f'FS_X  (Y={y_grid[iy]:g})'
+            return f"row_Y{y_grid[iy]:g}", df
+        # col
+        try:
+            x_pick = float(col_x_var.get())
+        except ValueError:
+            return None, None
+        ix = int(np.argmin(np.abs(np.asarray(x_grid) - x_pick)))
+        if not np.isclose(x_grid[ix], x_pick, atol=0.01):
+            return None, None
+        data = {sname: stats[sname][:, ix] for sname in stat_order}
+        df = pd.DataFrame(data, index=np.asarray(y_grid, dtype=float))
+        df.index.name = f'FS_Y  (X={x_grid[ix]:g})'
+        return f"col_X{x_grid[ix]:g}", df
+
+    try:
+        with pd.ExcelWriter(p, engine='openpyxl') as w:
+            for letter, x_grid, y_grid, stats, _ in out_groups:
+                for sname in stat_order:
+                    df_out = _matrix_df(x_grid, y_grid, stats[sname])
+                    df_out.to_excel(w, sheet_name=f"{letter}_{sname}"[:31])
+                slice_tag, slice_df = _slice_df(x_grid, y_grid, stats)
+                if slice_df is not None:
+                    slice_df.to_excel(w, sheet_name=f"{letter}_{slice_tag}"[:31])
+    except Exception as e:
+        messagebox.showerror("Export failed", str(e))
+        return
+
+    # Build a single text blob for both terminal and popup
+    lines = []
+    interp_tag = (f"PCHIP" if method == 'pchip' else "Linear") if interpolate else "no interp"
+    for letter, x_grid, y_grid, stats, n_traces in out_groups:
+        lines.append("=" * 78)
+        lines.append(f"  Group {letter}   ({n_traces} traces, {interp_tag})")
+        lines.append("=" * 78)
+        for sname in stat_order:
+            df_out = _matrix_df(x_grid, y_grid, stats[sname])
+            lines.append(f"\n-- {sname} --")
+            fmt = (lambda v: f"{int(v):d}") if sname == 'N' else (lambda v: f"{v:.4f}")
+            with pd.option_context('display.max_rows', None,
+                                   'display.max_columns', None,
+                                   'display.width', 250):
+                lines.append(df_out.to_string(float_format=fmt))
+        # 1D slice for current view
+        slice_tag, slice_df = _slice_df(x_grid, y_grid, stats)
+        if slice_df is not None:
+            lines.append(f"\n-- Slice: {slice_tag} --")
+            def _fmt(v):
+                # CV column gets a different format; N is integer; rest 4dp
+                return f"{v:.4f}" if not (np.isnan(v)) else "nan"
+            with pd.option_context('display.max_rows', None,
+                                   'display.max_columns', None,
+                                   'display.width', 250):
+                lines.append(slice_df.to_string(float_format=_fmt))
+        lines.append("")
+    text = "\n".join(lines)
+    print("\n" + text)
+
+    # Popup window
+    win = tk.Toplevel(root)
+    win.title("OF stats")
+    txt = tk.Text(win, wrap='none', font=('Courier', 9), width=110, height=35)
+    txt.grid(row=0, column=0, sticky='nsew')
+    vsb = ttk.Scrollbar(win, orient='vertical',   command=txt.yview)
+    hsb = ttk.Scrollbar(win, orient='horizontal', command=txt.xview)
+    txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    vsb.grid(row=0, column=1, sticky='ns')
+    hsb.grid(row=1, column=0, sticky='ew')
+    win.grid_rowconfigure(0, weight=1); win.grid_columnconfigure(0, weight=1)
+    txt.insert('1.0', text)
+    txt.configure(state='disabled')
+
+    messagebox.showinfo("Exported", f"Wrote stats matrices to {p}")
 
 
 # ── layout ───────────────────────────────────────────────────────────────────
@@ -759,11 +1215,33 @@ ttk.Entry(view_frame, textvariable=row_y_var, width=6).pack(side='left')
 ttk.Radiobutton(view_frame, text="Col (fixed X)", variable=view_var, value='col').pack(side='left', padx=(12, 4))
 ttk.Entry(view_frame, textvariable=col_x_var, width=6).pack(side='left')
 
+# Stats frame (overlay across traces when "All" expansion produces ≥2 subgroups)
+stats_frame = ttk.LabelFrame(main, text="Stats overlay (multi-trace)", padding=4)
+stats_frame.grid(row=7, column=0, columnspan=4, sticky="we", pady=(4, 0))
+ttk.Checkbutton(stats_frame, text="Curves",   variable=stat_curves ).pack(side='left', padx=4)
+ttk.Checkbutton(stats_frame, text="Mean",     variable=stat_mean   ).pack(side='left', padx=4)
+ttk.Checkbutton(stats_frame, text="Median",   variable=stat_median ).pack(side='left', padx=4)
+ttk.Checkbutton(stats_frame, text="±Std",     variable=stat_std    ).pack(side='left', padx=4)
+ttk.Checkbutton(stats_frame, text="±CV%",     variable=stat_cv     ).pack(side='left', padx=4)
+ttk.Label(stats_frame, text="k=").pack(side='left')
+ttk.Entry(stats_frame, textvariable=std_k_var, width=4).pack(side='left', padx=(0, 4))
+ttk.Checkbutton(stats_frame, text="IQR",      variable=stat_iqr    ).pack(side='left', padx=4)
+ttk.Label(stats_frame, text="k=").pack(side='left')
+ttk.Entry(stats_frame, textvariable=iqr_k_var, width=4).pack(side='left', padx=(0, 4))
+ttk.Checkbutton(stats_frame, text="Min/Max",  variable=stat_minmax ).pack(side='left', padx=4)
+ttk.Separator(stats_frame, orient='vertical').pack(side='left', fill='y', padx=8)
+ttk.Checkbutton(stats_frame, text="Interp to common grid", variable=interp_var).pack(side='left', padx=4)
+ttk.Combobox(stats_frame, textvariable=interp_method_var, values=['pchip', 'linear'],
+             width=8, state='readonly').pack(side='left', padx=2)
+ttk.Button(stats_frame, text="Export stats…", command=lambda: _export_stats()).pack(side='right', padx=4)
+
 # Compare
 cmp_frame = ttk.LabelFrame(main, text="Compare", padding=4)
-cmp_frame.grid(row=7, column=0, columnspan=4, sticky="we", pady=(4, 0))
+cmp_frame.grid(row=8, column=0, columnspan=4, sticky="we", pady=(4, 0))
 ttk.Radiobutton(cmp_frame, text="% difference (B vs A)", variable=compare_var, value='diff').pack(side='left', padx=4)
 ttk.Radiobutton(cmp_frame, text="Overlay only",          variable=compare_var, value='overlay').pack(side='left', padx=4)
+ttk.Label(cmp_frame, text="Diff range ±%:").pack(side='left', padx=(12, 2))
+ttk.Entry(cmp_frame, textvariable=diff_lim_var, width=5).pack(side='left')
 ttk.Button(cmp_frame, text="Plot", command=_plot).pack(side='right', padx=4)
 ttk.Button(cmp_frame, text="Clear all", command=_clear_all_filters).pack(side='right', padx=4)
 ttk.Button(cmp_frame, text="Clear B",   command=lambda: _clear_group('B')).pack(side='right', padx=4)

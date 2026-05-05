@@ -25,7 +25,6 @@ import pandas as pd
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib import pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
 
 LONG_REQUIRED = {'FS_X', 'FS_Y', 'Scp'}
@@ -220,6 +219,12 @@ def _common_axes(dfA, dfB):
 
 root = tk.Tk()
 root.title("Output Factor Compare v0.2")
+# Size the window to ~85% of screen height so it always fits on the visible display.
+_sw = root.winfo_screenwidth(); _sh = root.winfo_screenheight()
+_w = min(1100, int(_sw * 0.9))
+_h = int(_sh * 0.85)
+root.geometry(f"{_w}x{_h}")
+root.minsize(800, 500)
 
 mode_var    = tk.StringVar(master=root, value='single')   # 'single' or 'dual'
 file_a_var  = tk.StringVar(master=root)
@@ -243,8 +248,38 @@ _df_b     = None     # long-format DataFrame backing Group B (same as _df_a in s
 _combos = {'A': {}, 'B': {}}  # holds combobox widgets so we can repopulate
 
 
-main = ttk.Frame(root, padding=8)
-main.grid(row=0, column=0, sticky="nsew")
+# Scrollable container so the GUI always fits regardless of screen size.
+root.grid_rowconfigure(0, weight=1)
+root.grid_columnconfigure(0, weight=1)
+
+_outer = ttk.Frame(root)
+_outer.grid(row=0, column=0, sticky="nsew")
+_outer.grid_rowconfigure(0, weight=1)
+_outer.grid_columnconfigure(0, weight=1)
+
+_canvas_outer = tk.Canvas(_outer, highlightthickness=0)
+_canvas_outer.grid(row=0, column=0, sticky="nsew")
+_vsb_outer = ttk.Scrollbar(_outer, orient="vertical",   command=_canvas_outer.yview)
+_hsb_outer = ttk.Scrollbar(_outer, orient="horizontal", command=_canvas_outer.xview)
+_vsb_outer.grid(row=0, column=1, sticky="ns")
+_hsb_outer.grid(row=1, column=0, sticky="ew")
+_canvas_outer.configure(yscrollcommand=_vsb_outer.set, xscrollcommand=_hsb_outer.set)
+
+main = ttk.Frame(_canvas_outer, padding=8)
+_main_window_id = _canvas_outer.create_window((0, 0), window=main, anchor="nw")
+
+def _on_main_resize(_event=None):
+    _canvas_outer.configure(scrollregion=_canvas_outer.bbox("all"))
+def _on_outer_resize(event):
+    # Make the inner frame width track the canvas width so horizontal scroll only kicks in if needed.
+    _canvas_outer.itemconfigure(_main_window_id, width=event.width)
+main.bind("<Configure>", _on_main_resize)
+_canvas_outer.bind("<Configure>", _on_outer_resize)
+
+# Mouse-wheel scrolling on Windows
+def _on_mousewheel(event):
+    _canvas_outer.yview_scroll(int(-event.delta / 120), "units")
+_canvas_outer.bind_all("<MouseWheel>", _on_mousewheel)
 
 
 def _fmt_val(v):
@@ -253,19 +288,63 @@ def _fmt_val(v):
     return str(v)
 
 
+ALL_TOKEN = 'All'   # special value to mean "iterate over every unique value"
+_ALL_COLS = {'SN', 'Detector', 'Energy'}
+
+
 def _populate_dropdowns_for(grp_letter, df):
-    """Fill the comboboxes for one group from a DataFrame's unique values."""
+    """Fill the comboboxes for one group from a DataFrame's unique values.
+    Auto-selects when only one value exists; SN and Detector get an "All" option
+    when more than one value is present.
+    """
     if df is None:
         return
     for col in FILTER_COLS:
         vals = sorted(df[col].dropna().unique(), key=lambda v: (str(type(v)), v))
         opts = [_fmt_val(v) for v in vals]
+        if col in _ALL_COLS and len(opts) > 1:
+            opts = [ALL_TOKEN] + opts
         cb = _combos[grp_letter].get(col)
         if cb is not None:
             cb['values'] = opts
-            cur = cb.get()
-            if not cur and opts:
+            if col not in _ALL_COLS and len(opts) == 1:
                 cb.set(opts[0])
+
+
+def _refilter_options(grp_letter, group_vars, df_source):
+    """Cascading filter: each combobox's options reflect what's possible given the OTHER selections.
+    Bidirectional — picking detector narrows SN list, picking SN narrows detector list, etc.
+    'All' on SN/Detector counts as no constraint for the cascade.
+    """
+    if df_source is None:
+        return
+    for col in FILTER_COLS:
+        sub = df_source
+        for other in FILTER_COLS:
+            if other == col:
+                continue
+            v = group_vars[other].get().strip()
+            if not v or v == ALL_TOKEN:
+                continue
+            if other in ('SSD', 'Depth'):
+                try:
+                    target = float(v)
+                except ValueError:
+                    continue
+                sub = sub[np.isclose(sub[other].astype(float), target)]
+            else:
+                sub = sub[sub[other].astype(str) == v]
+        opts = sorted(sub[col].dropna().unique(), key=lambda v: (str(type(v)), v))
+        opts_str = [_fmt_val(o) for o in opts]
+        if col in _ALL_COLS and len(opts_str) > 1:
+            opts_str = [ALL_TOKEN] + opts_str
+        cb = _combos[grp_letter].get(col)
+        if cb is None:
+            continue
+        cb['values'] = opts_str
+        cur = cb.get().strip()
+        if cur and cur not in opts_str:
+            cb.set('')
 
 
 def _choose_file(var):
@@ -320,12 +399,14 @@ def do_load():
 
 
 def _filter_group(df_source, group_vars):
+    """Apply concrete filter values. 'All' on SN/Detector is treated as no constraint
+    (the plot loop handles iteration over those columns)."""
     if df_source is None:
         return None
     df = df_source.copy()
     for col in FILTER_COLS:
         v = group_vars[col].get().strip()
-        if not v:
+        if not v or v == ALL_TOKEN:
             continue
         if col in ('SSD', 'Depth'):
             try:
@@ -338,25 +419,43 @@ def _filter_group(df_source, group_vars):
     return df
 
 
+def _group_active(group_vars):
+    """Group is 'active' if any filter is non-empty."""
+    return any(v.get().strip() for v in group_vars.values())
+
+
+def _clear_group(grp_letter):
+    group_vars = group_a if grp_letter == 'A' else group_b
+    df_src     = _df_a    if grp_letter == 'A' else _df_b
+    _populate_dropdowns_for(grp_letter, df_src)   # restore full option lists
+    _clear_group_filters(group_vars)              # then force every value back to blank
+
+
+def _clear_all_filters():
+    _clear_group('A')
+    _clear_group('B')
+
+
 def _plot():
     if _df_a is None or _df_b is None:
         messagebox.showinfo("Load first", "Load a file first.")
         return
-    dfA = _filter_group(_df_a, group_a)
-    dfB = _filter_group(_df_b, group_b)
-    if dfA is None or dfA.empty:
+
+    active_a = _group_active(group_a)
+    active_b = _group_active(group_b)
+    if not active_a and not active_b:
+        messagebox.showerror("No selection",
+                             "Set at least one filter on Group A or Group B.")
+        return
+
+    dfA = _filter_group(_df_a, group_a) if active_a else None
+    dfB = _filter_group(_df_b, group_b) if active_b else None
+    if active_a and (dfA is None or dfA.empty):
         messagebox.showerror("Empty A", "Group A has no rows after filtering.")
         return
-    if dfB is None or dfB.empty:
+    if active_b and (dfB is None or dfB.empty):
         messagebox.showerror("Empty B", "Group B has no rows after filtering.")
         return
-
-    x_vals, y_vals, Ma, Mb = _common_axes(dfA, dfB)
-    if x_vals is None:
-        messagebox.showerror("No overlap", "Groups share no common FS_X / FS_Y values.")
-        return
-
-    pct = 100.0 * (Mb - Ma) / Ma   # B vs A
 
     # short labels for legend / titles
     def _label(group_vars):
@@ -373,14 +472,115 @@ def _plot():
     view = view_var.get()
     mode = compare_var.get()
 
-    fig.clear()
+    fig = plt.figure(figsize=(10, 6))
 
+    # ── single-group plotting: just show the data, no diff ──
+    if active_a ^ active_b:
+        group_vars = group_a if active_a else group_b
+        df_only    = dfA if active_a else dfB
+        base_label = label_a if active_a else label_b
+
+        # Determine which All-columns to iterate over for this group
+        en_all  = group_vars['Energy'].get().strip()   == ALL_TOKEN
+        sn_all  = group_vars['SN'].get().strip()       == ALL_TOKEN
+        det_all = group_vars['Detector'].get().strip() == ALL_TOKEN
+
+        # Build list of (label, subset_df) traces
+        traces = []
+        if not en_all and not sn_all and not det_all:
+            traces.append((base_label, df_only))
+        else:
+            keys = []
+            if en_all:  keys.append('Energy')
+            if sn_all:  keys.append('SN')
+            if det_all: keys.append('Detector')
+            combos = df_only[keys].drop_duplicates().sort_values(keys).values
+            for combo in combos:
+                sub = df_only.copy()
+                tag_parts = []
+                for k, v in zip(keys, combo):
+                    sub = sub[sub[k].astype(str) == str(v)]
+                    tag_parts.append(str(v))
+                # Build label: replace 'All' tokens in base_label with concrete values
+                base_parts = []
+                for col in ('Energy', 'SN', 'Detector'):
+                    v_set = group_vars[col].get().strip()
+                    if v_set and v_set != ALL_TOKEN:
+                        base_parts.append(v_set)
+                lbl = ' / '.join(base_parts + tag_parts) if base_parts else ' / '.join(tag_parts)
+                traces.append((lbl, sub))
+            if not traces:
+                messagebox.showerror("No combos", "No (SN, Detector) combinations found.")
+                return
+
+        if view == 'heatmap':
+            if len(traces) > 1:
+                messagebox.showinfo("Heatmap not multi-trace",
+                                    "Heatmap supports a single trace; switch to Diagonal/Row/Col, "
+                                    "or pick specific values instead of 'All'.")
+                return
+            x_vals, y_vals, M = _matrix(traces[0][1])
+            ax = fig.add_subplot(111)
+            im = ax.imshow(M, origin='lower', aspect='auto',
+                           extent=[x_vals[0], x_vals[-1], y_vals[0], y_vals[-1]])
+            fig.colorbar(im, ax=ax, label='Scp')
+            ax.set_title(traces[0][0])
+            ax.set_xlabel('FS_X [cm]'); ax.set_ylabel('FS_Y [cm]')
+        else:
+            ax = fig.add_subplot(111)
+            xlabel_set = None
+            for tlabel, tdf in traces:
+                x_vals, y_vals, M = _matrix(tdf)
+                if view == 'diagonal':
+                    common = sorted(set(x_vals).intersection(y_vals))
+                    if not common:
+                        continue
+                    xs = np.array(common)
+                    ys = np.array([M[list(y_vals).index(v), list(x_vals).index(v)] for v in common])
+                    xlabel_set = 'FS  [cm]  (square fields, X=Y)'
+                elif view == 'row':
+                    try:
+                        y_pick = float(row_y_var.get())
+                    except ValueError:
+                        messagebox.showerror("Bad Y", "Row Y= must be numeric."); return
+                    iy = np.argmin(np.abs(y_vals - y_pick))
+                    if not np.isclose(y_vals[iy], y_pick, atol=0.01):
+                        continue
+                    xs = x_vals; ys = M[iy, :]
+                    xlabel_set = f'FS_X [cm]  (Y = {y_vals[iy]:g})'
+                else:  # col
+                    try:
+                        x_pick = float(col_x_var.get())
+                    except ValueError:
+                        messagebox.showerror("Bad X", "Col X= must be numeric."); return
+                    ix = np.argmin(np.abs(x_vals - x_pick))
+                    if not np.isclose(x_vals[ix], x_pick, atol=0.01):
+                        continue
+                    xs = y_vals; ys = M[:, ix]
+                    xlabel_set = f'FS_Y [cm]  (X = {x_vals[ix]:g})'
+                ax.plot(xs, ys, 'o-', label=tlabel)
+            ax.set_xlabel(xlabel_set or 'FS [cm]')
+            ax.set_ylabel('Scp')
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8, loc='best')
+        fig.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.001)
+        return
+
+    # ── both groups active: comparison view ──
     if view == 'heatmap':
+        # Heatmap diff still needs overlapping axes.
+        x_vals, y_vals, Ma, Mb = _common_axes(dfA, dfB)
+        if x_vals is None:
+            messagebox.showerror("No overlap",
+                                 "Heatmap diff needs overlapping FS_X / FS_Y values.")
+            return
         ax = fig.add_subplot(111)
         if mode == 'diff':
-            data = pct
-            vmax = max(abs(np.nanmin(data)), abs(np.nanmax(data)))
-            im = ax.imshow(data, origin='lower', aspect='auto',
+            pct = 100.0 * (Mb - Ma) / Ma
+            vmax = max(abs(np.nanmin(pct)), abs(np.nanmax(pct)))
+            im = ax.imshow(pct, origin='lower', aspect='auto',
                            cmap='RdBu_r', vmin=-vmax, vmax=vmax,
                            extent=[x_vals[0], x_vals[-1], y_vals[0], y_vals[-1]])
             fig.colorbar(im, ax=ax, label='% diff (B − A) / A')
@@ -391,63 +591,102 @@ def _plot():
             fig.colorbar(im, ax=ax, label='Scp')
             ax.set_title(f'A: {label_a}')
         ax.set_xlabel('FS_X [cm]'); ax.set_ylabel('FS_Y [cm]')
+        fig.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.001)
+        return
 
+    # ── 1-D views (diagonal/row/col): build each group's data independently ──
+    xA, yA, Ma = _matrix(dfA)
+    xB, yB, Mb = _matrix(dfB)
+
+    if view == 'diagonal':
+        diag_a = sorted(set(xA).intersection(yA))
+        diag_b = sorted(set(xB).intersection(yB))
+        if not diag_a and not diag_b:
+            messagebox.showerror("No diagonal", "No FS values shared between X and Y in either group.")
+            return
+        xs_a = np.array(diag_a, dtype=float)
+        ys_a = np.array([Ma[list(yA).index(v), list(xA).index(v)] for v in diag_a])
+        xs_b = np.array(diag_b, dtype=float)
+        ys_b = np.array([Mb[list(yB).index(v), list(xB).index(v)] for v in diag_b])
+        xlabel = 'FS  [cm]  (square fields, X=Y)'
+    elif view == 'row':
+        try:
+            y_pick = float(row_y_var.get())
+        except ValueError:
+            messagebox.showerror("Bad Y", "Row Y= must be numeric."); return
+        def _row_at(yvals, xvals, M, target):
+            if len(yvals) == 0:
+                return None, None
+            iy = int(np.argmin(np.abs(yvals - target)))
+            if not np.isclose(yvals[iy], target, atol=0.01):
+                return None, None
+            return xvals, M[iy, :]
+        xs_a, ys_a = _row_at(yA, xA, Ma, y_pick)
+        xs_b, ys_b = _row_at(yB, xB, Mb, y_pick)
+        if xs_a is None and xs_b is None:
+            messagebox.showerror("Y not found",
+                                 f"Y={y_pick} not in either group's Y values."); return
+        xlabel = f'FS_X [cm]  (Y = {y_pick:g})'
+    else:  # col
+        try:
+            x_pick = float(col_x_var.get())
+        except ValueError:
+            messagebox.showerror("Bad X", "Col X= must be numeric."); return
+        def _col_at(xvals, yvals, M, target):
+            if len(xvals) == 0:
+                return None, None
+            ix = int(np.argmin(np.abs(xvals - target)))
+            if not np.isclose(xvals[ix], target, atol=0.01):
+                return None, None
+            return yvals, M[:, ix]
+        xs_a, ys_a = _col_at(xA, yA, Ma, x_pick)
+        xs_b, ys_b = _col_at(xB, yB, Mb, x_pick)
+        if xs_a is None and xs_b is None:
+            messagebox.showerror("X not found",
+                                 f"X={x_pick} not in either group's X values."); return
+        xlabel = f'FS_Y [cm]  (X = {x_pick:g})'
+
+    # Diff is computed only at FS values shared between groups.
+    diff_xs = diff_ys = None
+    if xs_a is not None and xs_b is not None and len(xs_a) and len(xs_b):
+        common = sorted(set(np.asarray(xs_a, dtype=float)).intersection(
+                        np.asarray(xs_b, dtype=float)))
+        if common:
+            map_a = dict(zip(np.asarray(xs_a, dtype=float), ys_a))
+            map_b = dict(zip(np.asarray(xs_b, dtype=float), ys_b))
+            diff_xs = np.array(common, dtype=float)
+            ya_c = np.array([map_a[v] for v in common])
+            yb_c = np.array([map_b[v] for v in common])
+            with np.errstate(divide='ignore', invalid='ignore'):
+                diff_ys = 100.0 * (yb_c - ya_c) / ya_c
+
+    if mode == 'overlay' or diff_xs is None:
+        ax = fig.add_subplot(111)
+        if xs_a is not None and len(xs_a):
+            ax.plot(xs_a, ys_a, 'o-', label=label_a)
+        if xs_b is not None and len(xs_b):
+            ax.plot(xs_b, ys_b, 's-', label=label_b)
+        ax.set_xlabel(xlabel); ax.set_ylabel('Scp')
+        ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
     else:
-        if view == 'diagonal':
-            common = sorted(set(x_vals).intersection(y_vals))
-            if not common:
-                messagebox.showerror("No diagonal", "No FS values shared between X and Y.")
-                return
-            xs = np.array(common)
-            ya = np.array([Ma[list(y_vals).index(v), list(x_vals).index(v)] for v in common])
-            yb = np.array([Mb[list(y_vals).index(v), list(x_vals).index(v)] for v in common])
-            xlabel = 'FS  [cm]  (square fields, X=Y)'
-        elif view == 'row':
-            try:
-                y_pick = float(row_y_var.get())
-            except ValueError:
-                messagebox.showerror("Bad Y", "Row Y= must be numeric."); return
-            iy = np.argmin(np.abs(y_vals - y_pick))
-            if not np.isclose(y_vals[iy], y_pick, atol=0.01):
-                messagebox.showerror("Y not found",
-                                     f"Y={y_pick} not in common Y values: {list(y_vals)}"); return
-            xs = x_vals
-            ya = Ma[iy, :]; yb = Mb[iy, :]
-            xlabel = f'FS_X [cm]  (Y = {y_vals[iy]:g})'
-        else:  # col
-            try:
-                x_pick = float(col_x_var.get())
-            except ValueError:
-                messagebox.showerror("Bad X", "Col X= must be numeric."); return
-            ix = np.argmin(np.abs(x_vals - x_pick))
-            if not np.isclose(x_vals[ix], x_pick, atol=0.01):
-                messagebox.showerror("X not found",
-                                     f"X={x_pick} not in common X values: {list(x_vals)}"); return
-            xs = y_vals
-            ya = Ma[:, ix]; yb = Mb[:, ix]
-            xlabel = f'FS_Y [cm]  (X = {x_vals[ix]:g})'
-
-        if mode == 'overlay':
-            ax = fig.add_subplot(111)
-            ax.plot(xs, ya, 'o-', label=label_a)
-            ax.plot(xs, yb, 's-', label=label_b)
-            ax.set_xlabel(xlabel); ax.set_ylabel('Scp')
-            ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
-        else:
-            ax1 = fig.add_subplot(2, 1, 1)
-            ax1.plot(xs, ya, 'o-', label=label_a)
-            ax1.plot(xs, yb, 's-', label=label_b)
-            ax1.set_ylabel('Scp')
-            ax1.grid(True, alpha=0.3); ax1.legend(fontsize=8)
-            ax2 = fig.add_subplot(2, 1, 2, sharex=ax1)
-            pct_1d = 100.0 * (yb - ya) / ya
-            ax2.plot(xs, pct_1d, 'o-', color='tab:red')
-            ax2.axhline(0, color='k', lw=0.5)
-            ax2.set_xlabel(xlabel); ax2.set_ylabel('% diff (B − A) / A')
-            ax2.grid(True, alpha=0.3)
+        ax1 = fig.add_subplot(2, 1, 1)
+        if xs_a is not None and len(xs_a):
+            ax1.plot(xs_a, ys_a, 'o-', label=label_a)
+        if xs_b is not None and len(xs_b):
+            ax1.plot(xs_b, ys_b, 's-', label=label_b)
+        ax1.set_ylabel('Scp')
+        ax1.grid(True, alpha=0.3); ax1.legend(fontsize=8)
+        ax2 = fig.add_subplot(2, 1, 2, sharex=ax1)
+        ax2.plot(diff_xs, diff_ys, 'o-', color='tab:red')
+        ax2.axhline(0, color='k', lw=0.5)
+        ax2.set_xlabel(xlabel); ax2.set_ylabel('% diff (B − A) / A')
+        ax2.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    canvas.draw()
+    plt.show(block=False)
+    plt.pause(0.001)
 
 
 # ── layout ───────────────────────────────────────────────────────────────────
@@ -495,10 +734,15 @@ def _make_filter_frame(label, group_vars, grp_letter, row_idx):
     frame = ttk.LabelFrame(main, text=f"Group {label}", padding=6)
     frame.grid(row=row_idx, column=0, columnspan=4, sticky="we", pady=(6, 0))
     cols = FILTER_COLS
+    def _on_change(_evt=None):
+        df_src = _df_a if grp_letter == 'A' else _df_b
+        _refilter_options(grp_letter, group_vars, df_src)
     for i, c in enumerate(cols):
         ttk.Label(frame, text=f"{c}:").grid(row=0, column=2*i, sticky="e", padx=(4, 0))
         cb = ttk.Combobox(frame, textvariable=group_vars[c], width=12, state='normal')
         cb.grid(row=0, column=2*i+1, sticky="w", padx=(0, 4))
+        cb.bind('<<ComboboxSelected>>', _on_change)
+        cb.bind('<FocusOut>', _on_change)
         _combos[grp_letter][c] = cb
 
 
@@ -521,13 +765,11 @@ cmp_frame.grid(row=7, column=0, columnspan=4, sticky="we", pady=(4, 0))
 ttk.Radiobutton(cmp_frame, text="% difference (B vs A)", variable=compare_var, value='diff').pack(side='left', padx=4)
 ttk.Radiobutton(cmp_frame, text="Overlay only",          variable=compare_var, value='overlay').pack(side='left', padx=4)
 ttk.Button(cmp_frame, text="Plot", command=_plot).pack(side='right', padx=4)
+ttk.Button(cmp_frame, text="Clear all", command=_clear_all_filters).pack(side='right', padx=4)
+ttk.Button(cmp_frame, text="Clear B",   command=lambda: _clear_group('B')).pack(side='right', padx=4)
+ttk.Button(cmp_frame, text="Clear A",   command=lambda: _clear_group('A')).pack(side='right', padx=4)
 
-# Plot canvas
-fig = plt.Figure(figsize=(9, 6), dpi=100)
-canvas = FigureCanvasTkAgg(fig, master=main)
-canvas.get_tk_widget().grid(row=8, column=0, columnspan=4, sticky="nsew", pady=(8, 0))
-toolbar = NavigationToolbar2Tk(canvas, main, pack_toolbar=False)
-toolbar.grid(row=9, column=0, columnspan=4, sticky="we")
+# Plots open in their own matplotlib window — see _plot() for figure creation.
 
 main.grid_rowconfigure(8, weight=1)
 main.grid_columnconfigure(1, weight=1)

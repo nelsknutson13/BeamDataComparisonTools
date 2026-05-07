@@ -135,7 +135,12 @@ FILE_MODE = 'flat'
 #                  parsed from each filename (e.g. 6X_100SSD_PDDData.xlsx -> 6X_100SSD).
 #                  Use FILE_FILTER to restrict which files are processed.
 
-BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
+BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data\90 SSD"
+
+# Where outputs (figures, reports, summary csv) get written. Set to None to use
+# BASE_PATH (legacy behavior); set to a short path like r"C:\OFresults" to keep
+# total file paths under the Windows 260-character limit.
+OUTPUT_BASE = None
 
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
 FS_FILTER   = []      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
@@ -191,7 +196,8 @@ _criteria_tag = f"{ANALYSIS}_{_dd}pct_{_dta}mm"
 #           <summary>.pdf          ← all-energy report
 #           Individual Figures/    ← per-energy PNGs
 #           Individual Reports/    ← per-energy PDFs
-COMPARISON_DIR = os.path.join(BASE_PATH, "Results", f"{_s1}_vs_{_s2}")
+_OUT_ROOT      = OUTPUT_BASE if OUTPUT_BASE else BASE_PATH
+COMPARISON_DIR = os.path.join(_OUT_ROOT, "Results", f"{_s1}_vs_{_s2}")
 PDD_DIR        = os.path.join(COMPARISON_DIR, "PDD", _criteria_tag)
 RESULTS_DIR    = os.path.join(PDD_DIR, "Individual Figures")
 REPORTS_DIR    = os.path.join(PDD_DIR, "Individual Reports")
@@ -636,8 +642,37 @@ def run_one_file(xlsx_path, energy_label):
 
 # ── main ─────────────────────────────────────
 
+def _warn_path_length():
+    """On Windows, warn if the expected output path may exceed the 260-char MAX_PATH limit."""
+    if os.name != 'nt':
+        return
+    s1 = SHEET1_NAME.replace(' ', ''); s2 = SHEET2_NAME.replace(' ', '')
+    safe_tag = _criteria_tag.replace('_', '-').upper()
+    sample_name = f"{s1}_{s2}_10FFF_90SSD_{safe_tag}.png"
+    sample_path = os.path.join(RESULTS_DIR, sample_name)
+    n = len(sample_path)
+    if n > 240:
+        bar = '!' * 78
+        print(f"\n{bar}")
+        print(f"  WARNING: predicted output path is {n} chars (Windows limit is 260).")
+        if n > 260:
+            print(f"  This run WILL fail when saving figures.")
+        else:
+            print(f"  This is close to the limit — long energy labels may push it over.")
+        print(f"  Fixes:")
+        print(f"    • Shorten BASE_PATH (or move data out of OneDrive — that prefix alone is ~60 chars)")
+        print(f"    • Set OUTPUT_BASE to a short path like  r\"C:\\BeamResults\"")
+        print(f"    • Enable Windows long paths via registry (admin + reboot required)")
+        print(f"  Sample path ({n} chars):")
+        print(f"    {sample_path}")
+        print(f"{bar}\n")
+
+
 def main():
     from datetime import datetime
+    print(f"  Input  : {BASE_PATH}")
+    print(f"  Output : {_OUT_ROOT}")
+    _warn_path_length()
     os.makedirs(RESULTS_DIR, exist_ok=True)   # also creates COMPARISON_DIR and PDD_DIR
     os.makedirs(REPORTS_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

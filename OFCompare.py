@@ -375,6 +375,27 @@ def _stats_per_cell(stack):
             'Min': ymin, 'Max': ymax, 'N': n}
 
 
+def _print_diff_matrix(label_a, label_b, x_vals, y_vals, Ma, Mb):
+    """Print A, B and % diff matrices to stdout (Y rows × X columns)."""
+    pct = 100.0 * (Mb - Ma) / Ma
+    print(f"\n{'='*78}")
+    print(f"  Difference matrix    B ({label_b})  vs  A ({label_a})")
+    print(f"{'='*78}")
+    fmt_scp  = lambda v: f"{v:.4f}"
+    fmt_diff = lambda v: f"{v:+.2f}"
+    for sname, mat, fmt in (('A (Scp)', Ma, fmt_scp),
+                            ('B (Scp)', Mb, fmt_scp),
+                            ('% diff (B-A)/A', pct, fmt_diff)):
+        df_out = pd.DataFrame(mat, index=y_vals, columns=x_vals)
+        df_out.index.name = 'FS_Y \\ FS_X'
+        print(f"\n-- {sname} --")
+        with pd.option_context('display.max_rows', None,
+                               'display.max_columns', None,
+                               'display.width', 250):
+            print(df_out.to_string(float_format=fmt))
+    print('=' * 78)
+
+
 def _print_stats_2d(traces, group_label=''):
     """Print per-stat 2D matrices (Y rows × X columns) to stdout for the given
     list of expanded traces. Honors the global Interpolate-to-common-grid flag.
@@ -587,10 +608,10 @@ class MultiSelectCombo(ttk.Frame):
             for cv in check_vars.values(): cv.set(False)
         def _ok():
             sel = [v for v in opts if check_vars[v].get()]
-            if len(sel) == len(opts):
-                self._var.set(ALL_TOKEN)
-            elif not sel:
+            if not sel:
                 self._var.set('')
+            elif len(opts) > 1 and len(sel) == len(opts):
+                self._var.set(ALL_TOKEN)
             elif len(sel) == 1:
                 self._var.set(sel[0])
             else:
@@ -799,7 +820,12 @@ def _plot():
     view = view_var.get()
     mode = compare_var.get()
 
-    fig = plt.figure(figsize=(10, 6))
+    # Surface views get their own square-ish figure; diff mode opens a 2nd window for the diff.
+    if view == 'surface':
+        figsize = (9, 7)
+    else:
+        figsize = (10, 6)
+    fig = plt.figure(figsize=figsize)
 
     # ── single-group plotting: just show the data, no diff ──
     if active_a ^ active_b:
@@ -952,7 +978,10 @@ def _plot():
             ax.set_ylabel('Scp')
             ax.grid(True, alpha=0.3)
             ax.legend(fontsize=8, loc='best')
-        fig.tight_layout()
+        if view == 'surface':
+            fig.subplots_adjust(left=0.02, right=0.96, top=0.95, bottom=0.04)
+        else:
+            fig.tight_layout()
         plt.show(block=False)
         plt.pause(0.001)
         return
@@ -977,6 +1006,7 @@ def _plot():
                            extent=[x_vals[0], x_vals[-1], y_vals[0], y_vals[-1]])
             fig.colorbar(im, ax=ax, label='% diff (B − A) / A')
             ax.set_title(f'% diff   {label_b}  vs  {label_a}')
+            _print_diff_matrix(label_a, label_b, x_vals, y_vals, Ma, Mb)
         else:
             im = ax.imshow(Ma, origin='lower', aspect='auto',
                            extent=[x_vals[0], x_vals[-1], y_vals[0], y_vals[-1]])
@@ -996,8 +1026,8 @@ def _plot():
             return
         X, Y = np.meshgrid(x_vals, y_vals)
         if mode == 'diff':
-            # Two-panel figure: both surfaces on top, diff surface on bottom
-            ax_top = fig.add_subplot(2, 1, 1, projection='3d')
+            # Repurpose the original `fig` for the A&B overlay
+            ax_top = fig.add_subplot(111, projection='3d')
             ax_top.plot_surface(X, Y, Ma, color='tab:blue',  alpha=0.55,
                                 edgecolor='none', antialiased=True)
             ax_top.plot_surface(X, Y, Mb, color='tab:orange', alpha=0.55,
@@ -1006,21 +1036,36 @@ def _plot():
             ax_top.scatter(dfB['FS_X'], dfB['FS_Y'], dfB['Scp'], c='tab:orange', s=10, depthshade=True)
             ax_top.set_xlabel('FS_X'); ax_top.set_ylabel('FS_Y'); ax_top.set_zlabel('Scp')
             ax_top.set_title(f'A (blue): {label_a}   |   B (orange): {label_b}')
+            try:
+                fig.canvas.manager.set_window_title('OF Surfaces — A & B')
+            except Exception:
+                pass
 
+            # Separate figure for the % diff surface
             pct = 100.0 * (Mb - Ma) / Ma
             try:
                 zlim = abs(float(diff_lim_var.get()))
             except ValueError:
                 zlim = None
-            ax_bot = fig.add_subplot(2, 1, 2, projection='3d')
-            ax_bot.plot_surface(X, Y, pct, cmap='RdBu_r', alpha=0.85,
-                                edgecolor='none', antialiased=True,
-                                vmin=-zlim if zlim else None,
-                                vmax= zlim if zlim else None)
+            fig2 = plt.figure(figsize=(9, 7))
+            try:
+                fig2.canvas.manager.set_window_title('OF % Difference')
+            except Exception:
+                pass
+            ax_bot = fig2.add_subplot(111, projection='3d')
+            surf = ax_bot.plot_surface(X, Y, pct, cmap='RdBu_r', alpha=1.0,
+                                       edgecolor='none', antialiased=True,
+                                       vmin=-zlim if zlim else None,
+                                       vmax= zlim if zlim else None)
+            ax_bot.plot_surface(X, Y, np.zeros_like(pct), color='black',
+                                alpha=0.05, edgecolor='none')
+            fig2.colorbar(surf, ax=ax_bot, shrink=0.7, pad=0.08, label='% diff')
             if zlim:
                 ax_bot.set_zlim(-zlim, zlim)
             ax_bot.set_xlabel('FS_X'); ax_bot.set_ylabel('FS_Y'); ax_bot.set_zlabel('% diff')
             ax_bot.set_title(f'% diff   {label_b}  vs  {label_a}')
+            fig2.subplots_adjust(left=0.04, right=0.92, top=0.94, bottom=0.06)
+            _print_diff_matrix(label_a, label_b, x_vals, y_vals, Ma, Mb)
         else:  # overlay only — both surfaces on one plot
             ax = fig.add_subplot(111, projection='3d')
             ax.plot_surface(X, Y, Ma, color='tab:blue',  alpha=0.5,
@@ -1031,7 +1076,8 @@ def _plot():
             ax.scatter(dfB['FS_X'], dfB['FS_Y'], dfB['Scp'], c='tab:orange', s=10, depthshade=True)
             ax.set_xlabel('FS_X'); ax.set_ylabel('FS_Y'); ax.set_zlabel('Scp')
             ax.set_title(f'A (blue): {label_a}   |   B (orange): {label_b}')
-        fig.tight_layout()
+        # Skip tight_layout for 3D — use subplots_adjust to push axes to fill the figure
+        fig.subplots_adjust(left=0.02, right=0.96, top=0.96, bottom=0.04, hspace=0.05)
         plt.show(block=False)
         plt.pause(0.001)
         return
@@ -1256,6 +1302,16 @@ def _export_stats():
         df.index.name = f'FS_Y  (X={x_grid[ix]:g})'
         return f"col_X{x_grid[ix]:g}", df
 
+    # Compute diff matrices when both groups are present (uses interpolation flag)
+    diff_block = None
+    if len(out_groups) == 2:
+        x_d, y_d, Ma, Mb = _common_axes_maybe_interp(
+            _filter_group(_df_a, group_a),
+            _filter_group(_df_b, group_b))
+        if x_d is not None:
+            diff_pct = 100.0 * (Mb - Ma) / Ma
+            diff_block = {'x': x_d, 'y': y_d, 'A': Ma, 'B': Mb, 'pct': diff_pct}
+
     try:
         with pd.ExcelWriter(p, engine='openpyxl') as w:
             for letter, x_grid, y_grid, stats, _ in out_groups:
@@ -1265,6 +1321,10 @@ def _export_stats():
                 slice_tag, slice_df = _slice_df(x_grid, y_grid, stats)
                 if slice_df is not None:
                     slice_df.to_excel(w, sheet_name=f"{letter}_{slice_tag}"[:31])
+            if diff_block is not None:
+                _matrix_df(diff_block['x'], diff_block['y'], diff_block['A']  ).to_excel(w, sheet_name='Diff_A')
+                _matrix_df(diff_block['x'], diff_block['y'], diff_block['B']  ).to_excel(w, sheet_name='Diff_B')
+                _matrix_df(diff_block['x'], diff_block['y'], diff_block['pct']).to_excel(w, sheet_name='Diff_pct')
     except Exception as e:
         messagebox.showerror("Export failed", str(e))
         return
@@ -1295,6 +1355,20 @@ def _export_stats():
                                    'display.max_columns', None,
                                    'display.width', 250):
                 lines.append(slice_df.to_string(float_format=_fmt))
+        lines.append("")
+    if diff_block is not None:
+        lines.append("=" * 78)
+        lines.append("  Difference matrices  B vs A")
+        lines.append("=" * 78)
+        for sname, mat, fmt in (('A (Scp)', diff_block['A'], lambda v: f"{v:.4f}"),
+                                ('B (Scp)', diff_block['B'], lambda v: f"{v:.4f}"),
+                                ('% diff (B-A)/A', diff_block['pct'], lambda v: f"{v:+.2f}")):
+            df_out = _matrix_df(diff_block['x'], diff_block['y'], mat)
+            lines.append(f"\n-- {sname} --")
+            with pd.option_context('display.max_rows', None,
+                                   'display.max_columns', None,
+                                   'display.width', 250):
+                lines.append(df_out.to_string(float_format=fmt))
         lines.append("")
     text = "\n".join(lines)
     print("\n" + text)

@@ -30,18 +30,23 @@ from center import center as center_function
 #  CONFIG  — edit these as needed
 # ─────────────────────────────────────────────
 
-FILE_MODE = 'hierarchical'
+FILE_MODE = 'flat'
 # 'hierarchical' : BASE_PATH contains energy subfolders (e.g. 6X/, 10FFF/),
 #                  each holding one *Profile*.xlsx file.
 # 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
 #                  parsed from each filename.
 
-BASE_PATH = r"C:\Users\nknutson\Box\Knutson\Research\Projects underway\Radformation research\RADMC Photon VALIDATION\TrueBeam\ProcessedData"
+BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\90 SSD"
+
+# Where outputs (figures, reports, summary xlsx) get written. Set to None to use
+# BASE_PATH (legacy behavior); set to a short path like r"C:\OFresults" to keep
+# total file paths under the Windows 260-character limit.
+OUTPUT_BASE = None
 
 FILE_FILTER = '*Profile*.xlsx'    # glob used in 'flat' mode only
 
-SHEET1_NAME = "Measurement"             # reference / measured sheet name
-SHEET2_NAME = "MC"         # comparison sheet name
+SHEET1_NAME = "SN 21"             # reference / measured sheet name
+SHEET2_NAME = "TPS SN 21"         # comparison sheet name
 
 # Data selection — 'all' means use all common values found in each file
 FIELD_SIZES = 'all'               # e.g. [5.0, 10.0, 20.0]  or  'all'
@@ -51,8 +56,8 @@ DEPTHS_CM   = 'all'                # e.g. [1.5, 5.0, 10.0]   or  'all'
 DEPTH_ROUND_CM = 0.1               # rounding resolution for depth matching [cm]
 
 ANALYSIS      = 'mppg'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg'
-DD_CRITERIA   = 2.0                # dose difference threshold [%]
-DTA_CRITERIA  = 0.3                # DTA threshold [cm]  (2 mm)
+DD_CRITERIA   = 1.0                # dose difference threshold [%]
+DTA_CRITERIA  = 0.1                # DTA threshold [cm]  (2 mm)
 
 # Normalization
 NORM = 1
@@ -83,7 +88,7 @@ CONV_FWHM_CM = 0.45                 # detector FWHM [cm]; 0 = disabled
 CONV_TARGET  = 'curve2'              # 'none', 'curve1', 'curve2', or 'both'
 
 # MPPG-specific parameters (used only when ANALYSIS == 'mppg')
-MPPG_DDTAIL  = 3.0                 # tail dose-difference criterion [% of Dmax]
+MPPG_DDTAIL  = 1                 # tail dose-difference criterion [% of Dmax]
 MPPG_PEN_CM  = 0.25                # penumbra half-width [cm]  (GUI default: pupper_entry="0.5" / 2)
 MPPG_OVR_CM  = 1.0                 # overlap buffer zone [cm]  (GUI default: pulower_entry="1")
 MPPG_DIAG_FACTOR = 0.80            # diagonal field size factor (GUI default: 0.80)
@@ -118,7 +123,8 @@ _criteria_tag = (
 #           <summary>.pdf          ← all-energy report
 #           Individual Figures/    ← per-energy PNGs
 #           Individual Reports/    ← per-energy PDFs
-COMPARISON_DIR = os.path.join(BASE_PATH, "Results", f"{_s1}_vs_{_s2}")
+_OUT_ROOT      = OUTPUT_BASE if OUTPUT_BASE else BASE_PATH
+COMPARISON_DIR = os.path.join(_OUT_ROOT, "Results", f"{_s1}_vs_{_s2}")
 PROFILE_DIR    = os.path.join(COMPARISON_DIR, "Profile", _criteria_tag)
 RESULTS_DIR    = os.path.join(PROFILE_DIR, "Individual Figures")
 REPORTS_DIR    = os.path.join(PROFILE_DIR, "Individual Reports")
@@ -776,8 +782,37 @@ def run_one_file(xlsx_path, energy_label):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+def _warn_path_length():
+    """On Windows, warn if the expected output path may exceed the 260-char MAX_PATH limit."""
+    if os.name != 'nt':
+        return
+    s1 = SHEET1_NAME.replace(' ', ''); s2 = SHEET2_NAME.replace(' ', '')
+    safe_tag = _criteria_tag.replace('_', '-').upper()
+    sample_name = f"{s1}_{s2}_10FFF_90SSD_{safe_tag}.png"
+    sample_path = os.path.join(RESULTS_DIR, sample_name)
+    n = len(sample_path)
+    if n > 240:
+        bar = '!' * 78
+        print(f"\n{bar}")
+        print(f"  WARNING: predicted output path is {n} chars (Windows limit is 260).")
+        if n > 260:
+            print(f"  This run WILL fail when saving figures.")
+        else:
+            print(f"  This is close to the limit — long energy labels may push it over.")
+        print(f"  Fixes:")
+        print(f"    • Shorten BASE_PATH (or move data out of OneDrive — that prefix alone is ~60 chars)")
+        print(f"    • Set OUTPUT_BASE to a short path like  r\"C:\\BeamResults\"")
+        print(f"    • Enable Windows long paths via registry (admin + reboot required)")
+        print(f"  Sample path ({n} chars):")
+        print(f"    {sample_path}")
+        print(f"{bar}\n")
+
+
 def main():
     from datetime import datetime
+    print(f"  Input  : {BASE_PATH}")
+    print(f"  Output : {_OUT_ROOT}")
+    _warn_path_length()
     os.makedirs(RESULTS_DIR, exist_ok=True)   # also creates COMPARISON_DIR and PROFILE_DIR
     os.makedirs(REPORTS_DIR, exist_ok=True)
     timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")

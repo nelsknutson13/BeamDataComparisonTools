@@ -32,8 +32,150 @@ FILTER_COLS   = ['Energy', 'SSD', 'Depth', 'SN', 'Detector']
 DEST_SHEET_DEFAULT = 'OutputFactors'
 ENERGY_TOKENS = ['6X', '10X', '15X', '6FFF', '8FFF', '10FFF']
 DEFAULT_FILE  = (r"C:\Users\nknutson\OneDrive - Washington University in St. Louis"
-                 r"\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
+                 r"\NGDS QA Consortium\Combined Consortium Data"
                  r"\90 SSD\OF_Data\NGDSOutputFactorData.xlsx")
+
+
+# ── TRS-483 k-factor tables (PLACEHOLDER VALUES — REPLACE WITH OFFICIAL DATA) ──
+# Each detector has a list of (energies_tuple, {S_clin_cm: k_factor}) entries.
+# Energies that share the same correction sit in one tuple — e.g. 6X / 6FFF.
+# corrected_Scp = measured_Scp * k
+# k = 1 silently above the largest tabulated S_clin (no correction needed for big fields).
+# k = 1 with a "no correction available" warning below the smallest tabulated S_clin.
+# TRS-483 tabulates k-factors at these S_clin (cm) values:
+TRS483_S_CLIN = [0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0]
+
+# Detectors in your data set: TN31021, TN60019, CC13 (and TPS M5/M6 which don't
+# get corrected). Per design choice: each detector uses ONE k-factor table that
+# applies to all photon energies (6X, 6FFF, 8FFF, 10X, 10FFF) — consistent
+# with TRS-483's grouping and a defensible simplification given the residual
+# energy dependence is small for these detectors.
+ALL_PHOTON_ENERGIES = ('6X', '6FFF', '8FFF', '10X', '10FFF', '15X')
+
+TRS483_K_FACTORS = {
+    # IBA CC13 — TRS-483 Tables 26/27 (IBA/Wellhöfer CC13/IC10/IC15);
+    # 6 MV and 10 MV tables are identical. Below S_clin = 1.5 cm: no data
+    # → falls back to k=1 with warning.
+    'CC13': [
+        (ALL_PHOTON_ENERGIES,
+         {1.5: 1.030, 2.0: 1.009, 2.5: 1.002, 3.0: 1.001, 4.0: 1.000,
+          6.0: 1.000, 8.0: 1.000}),
+    ],
+
+    # PTW 31021 Semiflex 3D — PTW Dosimetry "Correction factors, classical
+    # linac, 6 MV" (compiled from Looe et al. 2018 and Casar et al. 2020).
+    # Applied to all photon energies per design choice; below 1.2 cm: no data
+    # → falls back to k=1 with warning.
+    'TN31021': [
+        (ALL_PHOTON_ENERGIES,
+         {1.2: 1.047, 1.5: 1.020, 2.0: 1.005, 2.5: 1.000, 3.0: 1.000,
+          4.0: 1.000, 6.0: 1.000, 8.0: 1.000, 10.0: 1.000}),
+    ],
+
+    # PTW 60019 CVD diamond (microDiamond) — TRS-483 Tables 26/27 cont.
+    # 6 MV and 10 MV tables are identical.
+    'TN60019': [
+        (ALL_PHOTON_ENERGIES,
+         {0.4: 0.955, 0.5: 0.962, 0.6: 0.968, 0.8: 0.977, 1.0: 0.984,
+          1.2: 0.989, 1.5: 0.993, 2.0: 0.997, 2.5: 0.999, 3.0: 1.000,
+          4.0: 1.000, 6.0: 1.000, 8.0: 1.000}),
+    ],
+}
+
+
+
+# Track (detector, energy) pairs already warned about, so we don't spam.
+_trs483_warned = set()
+
+
+def _effective_fs(fs_x, fs_y, method='eq_square'):
+    """Compute effective field size from rectangular X/Y dimensions."""
+    fx, fy = float(fs_x), float(fs_y)
+    if fx <= 0 or fy <= 0:
+        return 0.0
+    if method == 'sterling':   # 4*A/P
+        return 2.0 * fx * fy / (fx + fy)
+    return float(np.sqrt(fx * fy))   # equivalent square (default)
+
+
+def _lookup_k_factor(detector, energy, s_clin):
+    """Return TRS-483 k factor for (detector, energy, S_clin), with PCHIP
+    interpolation. Returns 1.0 if no correction is available, and warns once
+    per (detector, energy) pair when that happens.
+    """
+    det_entries = TRS483_K_FACTORS.get(str(detector).strip())
+    if det_entries is None:
+        key = (detector, '__detector__')
+        if key not in _trs483_warned:
+            print(f"[TRS-483] no correction available for detector '{detector}' — using k=1")
+            _trs483_warned.add(key)
+        return 1.0
+    en_str = str(energy).strip()
+    en_table = None
+    for energies, values in det_entries:
+        if en_str in energies:
+            en_table = values
+            break
+    if en_table is None:
+        key = (detector, energy)
+        if key not in _trs483_warned:
+            print(f"[TRS-483] no correction available for {detector}/{energy} — using k=1")
+            _trs483_warned.add(key)
+        return 1.0
+    keys = sorted(en_table.keys())
+    s = float(s_clin)
+    if s >= keys[-1]:
+        return 1.0    # k = 1 above the tabulated range (large fields)
+    if s < keys[0]:
+        warn_key = (detector, energy, 'below_min')
+        if warn_key not in _trs483_warned:
+            print(f"[TRS-483] no correction available for {detector}/{energy} at S_clin={s:.2f}cm "
+                  f"(below tabulated min {keys[0]:g}) — using k=1")
+            _trs483_warned.add(warn_key)
+        return 1.0
+    # PCHIP within range
+    from scipy.interpolate import PchipInterpolator
+    xs = np.array(keys, dtype=float)
+    ys = np.array([en_table[k] for k in keys], dtype=float)
+    try:
+        f = PchipInterpolator(xs, ys, extrapolate=False)
+        v = float(f(s))
+        if np.isnan(v):
+            return 1.0
+        return v
+    except Exception:
+        # Fallback: linear interpolation
+        return float(np.interp(s, xs, ys))
+
+
+def _trs483_tag(grp_letter=None):
+    """Return a short label tag when TRS-483 corrections are active for the given group.
+    grp_letter='A'/'B' checks that group's flag; None checks if either is on."""
+    if grp_letter == 'A':
+        active = trs483_a_var.get()
+    elif grp_letter == 'B':
+        active = trs483_b_var.get()
+    else:
+        active = trs483_a_var.get() or trs483_b_var.get()
+    if not active:
+        return ""
+    return " [TRS-483]"
+
+
+def _apply_trs483(df, method='eq_square'):
+    """Multiply each row's Scp by the TRS-483 k factor for its (Detector,
+    Energy, effective FS). Returns a copy of df with modified Scp."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    s_clin = pd.Series(
+        [_effective_fs(x, y, method) for x, y in zip(out['FS_X'], out['FS_Y'])],
+        index=out.index, dtype=float)
+    k = pd.Series(
+        [_lookup_k_factor(d, e, s) for d, e, s in zip(out['Detector'], out['Energy'], s_clin)],
+        index=out.index, dtype=float)
+    out['Scp'] = out['Scp'] * k
+    return out
 
 
 def _is_numeric(v):
@@ -474,6 +616,10 @@ compare_var = tk.StringVar(master=root, value='diff')
 row_y_var   = tk.StringVar(master=root, value='10.5')
 col_x_var   = tk.StringVar(master=root, value='10.5')
 diff_lim_var = tk.StringVar(master=root, value='6')   # ± y-axis / colorbar limit for % diff plots
+pass_crit_var = tk.StringVar(master=root, value='2')  # ± pass criteria for % diff (cells with |diff| > this fail)
+trs483_a_var  = tk.BooleanVar(master=root, value=False)        # apply TRS-483 corrections to group A
+trs483_b_var  = tk.BooleanVar(master=root, value=False)        # apply TRS-483 corrections to group B
+trs483_method_var = tk.StringVar(master=root, value='eq_square')  # 'eq_square' or 'sterling'
 
 # Stat overlay flags (apply when ≥2 traces exist)
 stat_mean    = tk.BooleanVar(master=root, value=False)
@@ -673,15 +819,27 @@ def _apply_filter(df, col, var_value):
 def _refilter_options(grp_letter, group_vars, df_source):
     """Cascading filter: each combobox's options reflect what's possible given the OTHER selections.
     Multi-select supported via comma-separated values; 'All' counts as no constraint.
+    When a composite-detector recipe is active for the group, the Detector
+    column is left alone (its display text is the recipe name, not a real detector).
     """
     if df_source is None:
         return
+    recipe = _recipes.get(grp_letter, [])
+    recipe_active = bool(recipe)
     for col in FILTER_COLS:
+        if col == 'Detector' and recipe_active:
+            # Don't rebuild Detector options or touch its StringVar — recipe owns it.
+            continue
         sub = df_source
         for other in FILTER_COLS:
             if other == col:
                 continue
+            if other == 'Detector' and recipe_active:
+                # Skip the Detector StringVar (it's a recipe name, not a real value)
+                continue
             sub = _apply_filter(sub, other, group_vars[other].get())
+        if recipe_active:
+            sub = _apply_recipe(sub, recipe)
         opts = sorted(sub[col].dropna().unique(), key=lambda v: (str(type(v)), v))
         opts_str = [_fmt_val(o) for o in opts]
         if col in _ALL_COLS and len(opts_str) > 1:
@@ -756,14 +914,68 @@ def do_load():
     _populate_dropdowns_for('B', _df_b)
 
 
+# ── Composite-detector "recipe" state ────────────────────────────────────────
+# Per-group ordered list of (detector_name, max_fs) rules. max_fs=None = catch-all.
+# When non-empty, the recipe overrides the Detector filter for that group.
+_recipes = {'A': [], 'B': []}
+
+
+def _recipe_name(rules):
+    """Auto-generated display name for a recipe."""
+    parts = []
+    for det, mx in rules:
+        if mx is None:
+            parts.append(f"{det}")
+        else:
+            parts.append(f"{det}<{mx:g}")
+    return ' | '.join(parts) if parts else ''
+
+
+def _apply_recipe(df, rules):
+    """Filter df by recipe: keep rows where the row's Detector matches the rule
+    determined by min(FS_X, FS_Y). Rules are evaluated in order; first matching
+    rule (fs < max_fs, or catch-all) wins.
+    """
+    if df is None or df.empty or not rules:
+        return df
+    fs_min = pd.concat([df['FS_X'].astype(float),
+                        df['FS_Y'].astype(float)], axis=1).min(axis=1)
+    selected = pd.Series([None] * len(df), index=df.index, dtype='object')
+    for det, mx in rules:
+        if mx is None:
+            mask = selected.isna()
+        else:
+            mask = (fs_min < float(mx)) & selected.isna()
+        selected.loc[mask] = det
+    keep = selected.notna() & (df['Detector'].astype(str) == selected.astype(str))
+    return df[keep]
+
+
+def _grp_letter_of(group_vars):
+    """Return 'A' or 'B' for the given group_vars dict (identity comparison)."""
+    return 'A' if group_vars is group_a else 'B'
+
+
 def _filter_group(df_source, group_vars):
     """Apply concrete filter values. 'All' on SN/Detector is treated as no constraint
-    (the plot loop handles iteration over those columns)."""
+    (the plot loop handles iteration over those columns). When a composite
+    detector recipe is active for the group, it overrides the Detector filter.
+    When TRS-483 is enabled, applies the k-factor correction per row.
+    """
     if df_source is None:
         return None
+    grp_letter = _grp_letter_of(group_vars)
+    recipe = _recipes.get(grp_letter, [])
     df = df_source.copy()
     for col in FILTER_COLS:
+        if col == 'Detector' and recipe:
+            continue   # recipe handles Detector
         df = _apply_filter(df, col, group_vars[col].get())
+    if recipe:
+        df = _apply_recipe(df, recipe)
+    apply_trs = (trs483_a_var.get() if grp_letter == 'A' else trs483_b_var.get())
+    if apply_trs:
+        df = _apply_trs483(df, method=trs483_method_var.get())
     return df
 
 
@@ -814,8 +1026,8 @@ def _plot():
                 parts.append(v)
         return ' / '.join(parts) if parts else 'group'
 
-    label_a = _label(group_a)
-    label_b = _label(group_b)
+    label_a = _label(group_a) + _trs483_tag('A')
+    label_b = _label(group_b) + _trs483_tag('B')
 
     view = view_var.get()
     mode = compare_var.get()
@@ -1001,11 +1213,26 @@ def _plot():
                 vmax = abs(float(diff_lim_var.get()))
             except ValueError:
                 vmax = max(abs(np.nanmin(pct)), abs(np.nanmax(pct)))
+            try:
+                crit = abs(float(pass_crit_var.get()))
+            except ValueError:
+                crit = None
             im = ax.imshow(pct, origin='lower', aspect='auto',
                            cmap='RdBu_r', vmin=-vmax, vmax=vmax,
                            extent=[x_vals[0], x_vals[-1], y_vals[0], y_vals[-1]])
             fig.colorbar(im, ax=ax, label='% diff (B − A) / A')
-            ax.set_title(f'% diff   {label_b}  vs  {label_a}')
+            title = f'% diff   {label_b}  vs  {label_a}'
+            if crit is not None:
+                fail = np.abs(pct) > crit
+                total = int(np.sum(~np.isnan(pct)))
+                fail_n = int(np.sum(fail & ~np.isnan(pct)))
+                pass_pct = 100.0 * (total - fail_n) / total if total else 0.0
+                # Mark failing cells with an X
+                ys_fail, xs_fail = np.where(fail & ~np.isnan(pct))
+                if len(xs_fail):
+                    ax.plot(x_vals[xs_fail], y_vals[ys_fail], 'kx', ms=8, mew=1.5)
+                title += f'  |  pass ±{crit:g}%: {pass_pct:.1f}%  ({total - fail_n}/{total})'
+            ax.set_title(title)
             _print_diff_matrix(label_a, label_b, x_vals, y_vals, Ma, Mb)
         else:
             im = ax.imshow(Ma, origin='lower', aspect='auto',
@@ -1063,7 +1290,35 @@ def _plot():
             if zlim:
                 ax_bot.set_zlim(-zlim, zlim)
             ax_bot.set_xlabel('FS_X'); ax_bot.set_ylabel('FS_Y'); ax_bot.set_zlabel('% diff')
-            ax_bot.set_title(f'% diff   {label_b}  vs  {label_a}')
+            title = f'% diff   {label_b}  vs  {label_a}'
+            try:
+                crit = abs(float(pass_crit_var.get()))
+            except ValueError:
+                crit = None
+            if crit is not None:
+                valid = ~np.isnan(pct)
+                fail = (np.abs(pct) > crit) & valid
+                pass_mask = valid & ~fail
+                total = int(valid.sum())
+                fail_n = int(fail.sum())
+                pass_pct = 100.0 * (total - fail_n) / total if total else 0.0
+                # Pass markers (green, smaller) and fail markers (red, larger) on the surface
+                ys_pass, xs_pass = np.where(pass_mask)
+                if len(xs_pass):
+                    ax_bot.scatter(X[ys_pass, xs_pass], Y[ys_pass, xs_pass],
+                                   pct[ys_pass, xs_pass],
+                                   c='green', s=12, edgecolor='black', linewidth=0.3,
+                                   label=f'≤ ±{crit:g}%')
+                ys_fail, xs_fail = np.where(fail)
+                if len(xs_fail):
+                    ax_bot.scatter(X[ys_fail, xs_fail], Y[ys_fail, xs_fail],
+                                   pct[ys_fail, xs_fail],
+                                   c='red', s=20, edgecolor='black', linewidth=0.5,
+                                   label=f'> ±{crit:g}%')
+                if len(xs_pass) or len(xs_fail):
+                    ax_bot.legend(fontsize=8, loc='upper left')
+                title += f'  |  pass ±{crit:g}%: {pass_pct:.1f}%  ({total - fail_n}/{total})'
+            ax_bot.set_title(title)
             fig2.subplots_adjust(left=0.04, right=0.92, top=0.94, bottom=0.06)
             _print_diff_matrix(label_a, label_b, x_vals, y_vals, Ma, Mb)
         else:  # overlay only — both surfaces on one plot
@@ -1177,7 +1432,31 @@ def _plot():
         ax1.set_ylabel('Scp')
         ax1.grid(True, alpha=0.3); ax1.legend(fontsize=8)
         ax2 = fig.add_subplot(2, 1, 2, sharex=ax1)
-        ax2.plot(diff_xs, diff_ys, 'o-', color='tab:red')
+        try:
+            crit = abs(float(pass_crit_var.get()))
+        except ValueError:
+            crit = None
+        # Color points pass (green) / fail (red) based on the criteria
+        if crit is not None and len(diff_ys):
+            arr = np.asarray(diff_ys, dtype=float)
+            pass_mask = np.abs(arr) <= crit
+            ax2.plot(diff_xs, diff_ys, '-', color='gray', lw=1, alpha=0.5)
+            if pass_mask.any():
+                ax2.plot(np.asarray(diff_xs)[pass_mask], arr[pass_mask],
+                         'o', color='tab:green', label=f'≤ {crit:g}%')
+            if (~pass_mask).any():
+                ax2.plot(np.asarray(diff_xs)[~pass_mask], arr[~pass_mask],
+                         'o', color='tab:red',   label=f'> {crit:g}%')
+            ax2.axhline( crit, color='k', lw=0.5, ls='--', alpha=0.6)
+            ax2.axhline(-crit, color='k', lw=0.5, ls='--', alpha=0.6)
+            n_total = int(np.sum(~np.isnan(arr)))
+            n_pass  = int(np.sum(pass_mask & ~np.isnan(arr)))
+            pass_pct = 100.0 * n_pass / n_total if n_total else 0.0
+            ax2.set_title(f'pass ±{crit:g}%: {pass_pct:.1f}%   ({n_pass}/{n_total})',
+                          fontsize=9, loc='right')
+            ax2.legend(fontsize=8, loc='lower right')
+        else:
+            ax2.plot(diff_xs, diff_ys, 'o-', color='tab:red')
         ax2.axhline(0, color='k', lw=0.5)
         ax2.set_xlabel(xlabel); ax2.set_ylabel('% diff (B − A) / A')
         ax2.grid(True, alpha=0.3)
@@ -1196,12 +1475,18 @@ def _expand_traces(df_source, group_vars):
     """Expand the group into one DataFrame per (Energy/SN/Detector) combo when
     those fields are 'All' or multi-selected (comma-separated). Single
     selections collapse to one trace. Returns a list of (label, sub_df).
+    When a composite-detector recipe is active, Detector is *not* iterated
+    over (the recipe is treated as one virtual detector).
     """
     df = _filter_group(df_source, group_vars)
     if df is None or df.empty:
         return []
+    grp_letter = _grp_letter_of(group_vars)
+    recipe_active = bool(_recipes.get(grp_letter, []))
     iter_cols = []
     for col in ('Energy', 'SN', 'Detector'):
+        if col == 'Detector' and recipe_active:
+            continue   # recipe collapses to a single virtual detector
         v = group_vars[col].get().strip()
         if v == ALL_TOKEN or ',' in v:
             iter_cols.append(col)
@@ -1390,6 +1675,391 @@ def _export_stats():
     messagebox.showinfo("Exported", f"Wrote stats matrices to {p}")
 
 
+def _group_label(group_vars):
+    """Short label like 'Energy / SN / Detector' for titles and filenames."""
+    parts = []
+    for col in ('Energy', 'SN', 'Detector'):
+        v = group_vars[col].get().strip()
+        if v:
+            parts.append(v)
+    return ' / '.join(parts) if parts else 'group'
+
+
+def _build_comparison_data(dfA, dfB):
+    """Compute the shared grid + matrices used for both figures and tables.
+    Returns (x_vals, y_vals, Ma, Mb, pct) or all-None if no overlap.
+    """
+    x_vals, y_vals, Ma, Mb = _common_axes_maybe_interp(dfA, dfB)
+    if x_vals is None:
+        return None, None, None, None, None
+    pct = 100.0 * (Mb - Ma) / Ma
+    return x_vals, y_vals, Ma, Mb, pct
+
+
+def _summary_from_pct(pct, crit):
+    """Compute pass-rate summary dict from % diff matrix and criteria."""
+    if crit is None:
+        return {'total': 0, 'fail_n': 0, 'pass_pct': float('nan')}
+    valid = ~np.isnan(pct)
+    fail = (np.abs(pct) > crit) & valid
+    total = int(valid.sum()); fail_n = int(fail.sum())
+    pass_pct = 100.0 * (total - fail_n) / total if total else 0.0
+    return {'total': total, 'fail_n': fail_n, 'pass_pct': pass_pct}
+
+
+def _add_figure_pages(pdf, dfA, dfB, label_a, label_b, zlim, crit,
+                      x_vals, y_vals, Ma, Mb, pct, section_title=None):
+    """Append the 3 figure pages (3D A&B, 3D diff, diagonal) to pdf."""
+    X, Y = np.meshgrid(x_vals, y_vals)
+    title_prefix = f"[{section_title}]  " if section_title else ""
+
+    # ── Page 1: 3D A & B overlay ──
+    fig1 = plt.figure(figsize=(9, 7))
+    ax = fig1.add_subplot(111, projection='3d')
+    ax.plot_surface(X, Y, Ma, color='tab:blue',  alpha=0.55, edgecolor='none', antialiased=True)
+    ax.plot_surface(X, Y, Mb, color='tab:orange', alpha=0.55, edgecolor='none', antialiased=True)
+    ax.scatter(dfA['FS_X'], dfA['FS_Y'], dfA['Scp'], c='tab:blue',  s=10)
+    ax.scatter(dfB['FS_X'], dfB['FS_Y'], dfB['Scp'], c='tab:orange', s=10)
+    ax.set_xlabel('FS_X'); ax.set_ylabel('FS_Y'); ax.set_zlabel('Scp')
+    ax.set_title(f'{title_prefix}A (blue): {label_a}   |   B (orange): {label_b}')
+    fig1.subplots_adjust(left=0.04, right=0.96, top=0.94, bottom=0.06)
+    pdf.savefig(fig1); plt.close(fig1)
+
+    # ── Page 2: 3D % difference ──
+    fig2 = plt.figure(figsize=(9, 7))
+    ax2 = fig2.add_subplot(111, projection='3d')
+    surf = ax2.plot_surface(X, Y, pct, cmap='RdBu_r', alpha=1.0,
+                            edgecolor='none', antialiased=True,
+                            vmin=-zlim if zlim else None,
+                            vmax= zlim if zlim else None)
+    ax2.plot_surface(X, Y, np.zeros_like(pct), color='black', alpha=0.05, edgecolor='none')
+    fig2.colorbar(surf, ax=ax2, shrink=0.7, pad=0.08, label='% diff')
+    if zlim:
+        ax2.set_zlim(-zlim, zlim)
+    title = f'{title_prefix}% diff   {label_b}  vs  {label_a}'
+    if crit is not None:
+        valid = ~np.isnan(pct)
+        fail = (np.abs(pct) > crit) & valid
+        pass_mask = valid & ~fail
+        total = int(valid.sum()); fail_n = int(fail.sum())
+        pass_pct = 100.0 * (total - fail_n) / total if total else 0.0
+        ys_p, xs_p = np.where(pass_mask)
+        if len(xs_p):
+            ax2.scatter(X[ys_p, xs_p], Y[ys_p, xs_p], pct[ys_p, xs_p],
+                        c='green', s=12, edgecolor='black', linewidth=0.3,
+                        label=f'≤ ±{crit:g}%')
+        ys_f, xs_f = np.where(fail)
+        if len(xs_f):
+            ax2.scatter(X[ys_f, xs_f], Y[ys_f, xs_f], pct[ys_f, xs_f],
+                        c='red', s=20, edgecolor='black', linewidth=0.5,
+                        label=f'> ±{crit:g}%')
+        if len(xs_p) or len(xs_f):
+            ax2.legend(fontsize=8, loc='upper left')
+        title += f'  |  pass ±{crit:g}%: {pass_pct:.1f}%  ({total - fail_n}/{total})'
+    ax2.set_xlabel('FS_X'); ax2.set_ylabel('FS_Y'); ax2.set_zlabel('% diff')
+    ax2.set_title(title)
+    fig2.subplots_adjust(left=0.04, right=0.92, top=0.94, bottom=0.06)
+    pdf.savefig(fig2); plt.close(fig2)
+
+    # ── Page 3: Diagonal trace + % diff panel ──
+    common = sorted(set(x_vals.tolist()) & set(y_vals.tolist()))
+    if common:
+        xs = np.array(common, dtype=float)
+        iy = [list(y_vals).index(v) for v in common]
+        ix = [list(x_vals).index(v) for v in common]
+        ya = np.array([Ma[iy[i], ix[i]] for i in range(len(common))])
+        yb = np.array([Mb[iy[i], ix[i]] for i in range(len(common))])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            d1 = 100.0 * (yb - ya) / ya
+        fig3 = plt.figure(figsize=(10, 7))
+        axA = fig3.add_subplot(2, 1, 1)
+        axA.plot(xs, ya, 'o-', label=label_a)
+        axA.plot(xs, yb, 's-', label=label_b)
+        axA.set_ylabel('Scp'); axA.grid(True, alpha=0.3); axA.legend(fontsize=8)
+        axB = fig3.add_subplot(2, 1, 2, sharex=axA)
+        if crit is not None and len(d1):
+            arr = np.asarray(d1, dtype=float)
+            pm = np.abs(arr) <= crit
+            axB.plot(xs, arr, '-', color='gray', lw=1, alpha=0.5)
+            if pm.any():
+                axB.plot(xs[pm], arr[pm], 'o', color='tab:green', label=f'≤ {crit:g}%')
+            if (~pm).any():
+                axB.plot(xs[~pm], arr[~pm], 'o', color='tab:red',  label=f'> {crit:g}%')
+            axB.axhline( crit, color='k', lw=0.5, ls='--', alpha=0.6)
+            axB.axhline(-crit, color='k', lw=0.5, ls='--', alpha=0.6)
+            tn = int(np.sum(~np.isnan(arr))); pn = int(np.sum(pm & ~np.isnan(arr)))
+            pp = 100.0 * pn / tn if tn else 0.0
+            axB.set_title(f'pass ±{crit:g}%: {pp:.1f}%  ({pn}/{tn})', fontsize=9, loc='right')
+            axB.legend(fontsize=8, loc='lower right')
+        else:
+            axB.plot(xs, d1, 'o-', color='tab:red')
+        axB.axhline(0, color='k', lw=0.5)
+        axB.set_xlabel('FS [cm]  (square fields, X=Y)')
+        axB.set_ylabel('% diff (B − A) / A')
+        axB.grid(True, alpha=0.3)
+        if zlim:
+            axB.set_ylim(-zlim, zlim)
+        fig3.suptitle(f'{title_prefix}Diagonal — {label_b} vs {label_a}')
+        fig3.tight_layout()
+        pdf.savefig(fig3); plt.close(fig3)
+
+
+def _add_matrix_text_page(pdf, Ma, Mb, pct, x_vals, y_vals, label_a, label_b,
+                          summary, crit, timestamp, section_title=None):
+    """Append a single-page matrix-text block (Courier monospace, profile-report style)."""
+    def _mat_df(mat):
+        df = pd.DataFrame(mat, index=y_vals, columns=x_vals)
+        df.index.name = 'FS_Y \\ FS_X'
+        return df
+    sections = []
+    if section_title:
+        sections.append(f"=== {section_title} ===")
+    sections.append(f"A: {label_a}")
+    sections.append(f"B: {label_b}")
+    if crit is not None and summary and not np.isnan(summary.get('pass_pct', np.nan)):
+        sections.append(f"Pass criteria: ±{crit:g}%   "
+                        f"(pass {summary['pass_pct']:.1f}%, "
+                        f"{summary['total']-summary['fail_n']}/{summary['total']})")
+    if timestamp:
+        sections.append(f"Generated: {timestamp}")
+    sections.append("")
+    for sname, mat, fmt in (('A (Scp)', Ma, '.4f'),
+                            ('B (Scp)', Mb, '.4f'),
+                            ('% diff (B-A)/A', pct, '+.2f')):
+        sections.append(f"-- {sname} --")
+        with pd.option_context('display.max_rows', None,
+                               'display.max_columns', None,
+                               'display.width', 250):
+            sections.append(_mat_df(mat).to_string(
+                float_format=lambda v, f=fmt: f"{v:{f}}"))
+        sections.append("")
+    text = "\n".join(sections)
+    fig_t = plt.figure(figsize=(11, 14))
+    fig_t.text(0.02, 0.98, text, family='monospace', fontsize=8, va='top')
+    pdf.savefig(fig_t); plt.close(fig_t)
+
+
+def _open_file_native(p):
+    import platform, subprocess
+    try:
+        if platform.system() == 'Windows':
+            os.startfile(p)
+        elif platform.system() == 'Darwin':
+            subprocess.call(['open', p])
+        else:
+            subprocess.call(['xdg-open', p])
+    except Exception as e:
+        messagebox.showinfo("Saved", f"Wrote file to:\n{p}\n\n(Could not auto-open: {e})")
+
+
+def _ask_save_pdf(default_name):
+    """Open save dialog with default dir = <data_file_dir>/Results."""
+    default_dir = ''
+    src = file_a_var.get().strip()
+    if src and os.path.isfile(src):
+        default_dir = os.path.join(os.path.dirname(src), 'Results')
+        try:
+            os.makedirs(default_dir, exist_ok=True)
+        except Exception:
+            default_dir = os.path.dirname(src)
+    return filedialog.asksaveasfilename(defaultextension='.pdf',
+                                        filetypes=[("PDF", "*.pdf")],
+                                        initialdir=default_dir or None,
+                                        initialfile=default_name)
+
+
+def _save_report():
+    """Save a multi-page PDF report for the current A vs B comparison."""
+    from datetime import datetime
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    if _df_a is None or _df_b is None:
+        messagebox.showinfo("Load first", "Load a file first.")
+        return
+    if not _group_active(group_a) or not _group_active(group_b):
+        messagebox.showerror("Both groups required",
+                             "Both Group A and Group B must have filters set.")
+        return
+    dfA = _filter_group(_df_a, group_a)
+    dfB = _filter_group(_df_b, group_b)
+    if dfA is None or dfA.empty or dfB is None or dfB.empty:
+        messagebox.showerror("Empty group", "One of the groups has no rows after filtering.")
+        return
+
+    label_a = _group_label(group_a) + _trs483_tag('A')
+    label_b = _group_label(group_b) + _trs483_tag('B')
+    def safe(s):
+        # Split the " / "-joined label into parts, strip each, join with underscores
+        parts = [''.join(c for c in p.strip() if c.isalnum() or c in '-')
+                 for p in s.split('/')]
+        return '_'.join(p for p in parts if p)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    p = _ask_save_pdf(f"OF_compare_{safe(label_a)}_vs_{safe(label_b)}_{timestamp}.pdf")
+    if not p:
+        return
+
+    try:    zlim = abs(float(diff_lim_var.get()))
+    except ValueError: zlim = None
+    try:    crit = abs(float(pass_crit_var.get()))
+    except ValueError: crit = None
+
+    x_vals, y_vals, Ma, Mb, pct = _build_comparison_data(dfA, dfB)
+    if x_vals is None:
+        messagebox.showerror("No overlap",
+                             "Groups share no common FS_X / FS_Y values.")
+        return
+    summary = _summary_from_pct(pct, crit)
+    with PdfPages(p) as pdf:
+        _add_figure_pages(pdf, dfA, dfB, label_a, label_b, zlim, crit,
+                          x_vals, y_vals, Ma, Mb, pct)
+        _add_matrix_text_page(pdf, Ma, Mb, pct, x_vals, y_vals,
+                              label_a, label_b, summary, crit, timestamp)
+
+    print(f"\nReport saved: {p}")
+    _open_file_native(p)
+
+
+def _save_all_energy_report():
+    """Loop through every Energy present in both groups (other filters preserved)
+    and bundle one PDF with a summary front page + per-energy section."""
+    from datetime import datetime
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    if _df_a is None or _df_b is None:
+        messagebox.showinfo("Load first", "Load a file first.")
+        return
+    if not _group_active(group_a) or not _group_active(group_b):
+        messagebox.showerror("Both groups required",
+                             "Both Group A and Group B must have filters set.")
+        return
+
+    # Save current Energy selections; we'll override in the loop and restore at end
+    saved_energy_a = group_a['Energy'].get()
+    saved_energy_b = group_b['Energy'].get()
+    try:
+        # Determine common energies with non-Energy filters preserved
+        group_a['Energy'].set('')
+        group_b['Energy'].set('')
+        dfA_all = _filter_group(_df_a, group_a)
+        dfB_all = _filter_group(_df_b, group_b)
+        if dfA_all is None or dfA_all.empty or dfB_all is None or dfB_all.empty:
+            messagebox.showerror("Empty group",
+                                 "One of the groups has no rows after non-Energy filters.")
+            return
+        common_energies = sorted(set(dfA_all['Energy'].dropna().astype(str).unique())
+                                 & set(dfB_all['Energy'].dropna().astype(str).unique()),
+                                 key=lambda e: (
+                                     ['6X','6FFF','8FFF','10X','10FFF','15X'].index(e)
+                                     if e in ['6X','6FFF','8FFF','10X','10FFF','15X'] else 99,
+                                     e))
+        if not common_energies:
+            messagebox.showerror("No common energies",
+                                 "The two groups share no energies in common.")
+            return
+
+        label_a_base = _group_label(group_a) or 'A'
+        label_b_base = _group_label(group_b) or 'B'
+        def safe(s):
+            parts = [''.join(c for c in p.strip() if c.isalnum() or c in '-')
+                     for p in s.split('/')]
+            return '_'.join(p for p in parts if p)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        p = _ask_save_pdf(
+            f"OF_compare_{safe(label_a_base)}_vs_{safe(label_b_base)}_AllEnergy_{timestamp}.pdf")
+        if not p:
+            return
+
+        try:    zlim = abs(float(diff_lim_var.get()))
+        except ValueError: zlim = None
+        try:    crit = abs(float(pass_crit_var.get()))
+        except ValueError: crit = None
+
+        # Pass 1: pre-compute matrices and summaries for every energy
+        per_energy = []   # (energy, dfA, dfB, la, lb, x, y, Ma, Mb, pct, summary)
+        for energy in common_energies:
+            group_a['Energy'].set(energy)
+            group_b['Energy'].set(energy)
+            dfA = _filter_group(_df_a, group_a)
+            dfB = _filter_group(_df_b, group_b)
+            if dfA is None or dfA.empty or dfB is None or dfB.empty:
+                per_energy.append((energy, None, None, '', '', None, None, None, None, None, None))
+                continue
+            la = _group_label(group_a) + _trs483_tag('A')
+            lb = _group_label(group_b) + _trs483_tag('B')
+            x_v, y_v, Ma, Mb, pct = _build_comparison_data(dfA, dfB)
+            if x_v is None:
+                per_energy.append((energy, dfA, dfB, la, lb, None, None, None, None, None, None))
+                continue
+            summary = _summary_from_pct(pct, crit)
+            per_energy.append((energy, dfA, dfB, la, lb, x_v, y_v, Ma, Mb, pct, summary))
+
+        with PdfPages(p) as pdf:
+            # ── 1) Summary front page ──
+            sum_lines = ["Multi-energy OF Comparison Summary",
+                         f"A: {label_a_base}",
+                         f"B: {label_b_base}",
+                         f"Generated: {timestamp}"]
+            if crit is not None:
+                sum_lines.append(f"Pass criteria: ±{crit:g}%")
+            if trs483_a_var.get() or trs483_b_var.get():
+                applied_to = []
+                if trs483_a_var.get(): applied_to.append('A')
+                if trs483_b_var.get(): applied_to.append('B')
+                sum_lines.append(
+                    f"TRS-483 corrections applied to: {', '.join(applied_to)}"
+                    f"   (effective FS: {trs483_method_var.get()})")
+            sum_lines.append("")
+            sum_lines.append(f"{'Energy':<8}  {'Pass %':>8}  {'Pass/Total':>14}")
+            sum_lines.append('-' * 36)
+            tot_total = tot_pass = 0
+            for entry in per_energy:
+                energy, _, _, _, _, _, _, _, _, _, s = entry
+                if s is None or s.get('total', 0) == 0:
+                    sum_lines.append(f"{energy:<8}  {'n/a':>8}")
+                    continue
+                tot_total += s['total']
+                tot_pass  += s['total'] - s['fail_n']
+                sum_lines.append(
+                    f"{energy:<8}  {s['pass_pct']:>7.1f}%  "
+                    f"{s['total']-s['fail_n']:>6d}/{s['total']:<6d}")
+            if tot_total > 0:
+                overall = 100.0 * tot_pass / tot_total
+                sum_lines.append('-' * 36)
+                sum_lines.append(f"{'Overall':<8}  {overall:>7.1f}%  {tot_pass:>6d}/{tot_total:<6d}")
+            sum_text = "\n".join(sum_lines)
+            print("\n" + sum_text)
+            sfig = plt.figure(figsize=(11, 9))
+            sfig.text(0.05, 0.95, sum_text, family='monospace', fontsize=10, va='top')
+            pdf.savefig(sfig); plt.close(sfig)
+
+            # ── 2) Difference / matrix tables for ALL energies (one page per energy) ──
+            for entry in per_energy:
+                energy, dfA, dfB, la, lb, x_v, y_v, Ma, Mb, pct, summary = entry
+                if x_v is None:
+                    continue
+                _add_matrix_text_page(pdf, Ma, Mb, pct, x_v, y_v, la, lb,
+                                      summary, crit, timestamp,
+                                      section_title=energy)
+
+            # ── 3) Per-energy figure sections (3 pages each) ──
+            for entry in per_energy:
+                energy, dfA, dfB, la, lb, x_v, y_v, Ma, Mb, pct, summary = entry
+                if x_v is None:
+                    continue
+                _add_figure_pages(pdf, dfA, dfB, la, lb, zlim, crit,
+                                  x_v, y_v, Ma, Mb, pct, section_title=energy)
+                print(f"  Wrote pages for {energy}: "
+                      + (f"{summary['pass_pct']:.1f}% pass"
+                         if summary and crit is not None else "ok"))
+
+        print(f"\nMulti-energy report saved: {p}")
+        _open_file_native(p)
+    finally:
+        # Restore the user's original Energy selections
+        group_a['Energy'].set(saved_energy_a)
+        group_b['Energy'].set(saved_energy_b)
+
+
 # ── layout ───────────────────────────────────────────────────────────────────
 
 # Mode toggle
@@ -1431,6 +2101,136 @@ def _update_mode_visibility():
 _update_mode_visibility()
 
 
+def _open_recipe_dialog(grp_letter):
+    """Open the composite-detector recipe builder for a group."""
+    df_src = _df_a if grp_letter == 'A' else _df_b
+    if df_src is None:
+        messagebox.showinfo("Load first", "Load a file first.")
+        return
+    group_vars = group_a if grp_letter == 'A' else group_b
+
+    # Available detectors = those present in the data after non-Detector filters.
+    # Compute by hand (without touching StringVars) to avoid firing the cascade trace.
+    df_avail = df_src.copy()
+    for col in FILTER_COLS:
+        if col == 'Detector':
+            continue
+        df_avail = _apply_filter(df_avail, col, group_vars[col].get())
+    available = sorted(df_avail['Detector'].dropna().astype(str).unique()) if df_avail is not None else []
+
+    dlg = tk.Toplevel(root)
+    dlg.title(f"Group {grp_letter} — Composite Detector Recipe")
+    dlg.transient(root)
+    dlg.grab_set()
+    info = ("Each rule says: use this detector when min(FS_X, FS_Y) < Max FS.\n"
+            "Leave Max FS blank on the last rule to mean 'and everything else'.\n"
+            "Rules are evaluated top to bottom; first match wins.")
+    ttk.Label(dlg, text=info, padding=8, justify='left').pack(anchor='w')
+    rules_frame = ttk.Frame(dlg, padding=(8, 0, 8, 0))
+    rules_frame.pack(fill='both', expand=True)
+
+    rule_widgets = []   # list of [det_var, max_var, row_frame, op_lbl, hint]
+
+    def _refresh_all_labels():
+        """Update each row's operator label / hint based on its and previous rows' Max FS.
+        Rows with a Max value show "for FS <" with the entry visible.
+        Rows with blank Max are catch-alls: show "for FS ≥ <prev_max>" and a hint.
+        """
+        prev_max = None
+        for _, max_var, _, op_lbl, hint in rule_widgets:
+            mv = max_var.get().strip()
+            if mv == '':
+                if prev_max is not None:
+                    op_lbl.configure(text=f"for FS ≥ {prev_max:g} cm")
+                    hint.configure(text="(catches all remaining)")
+                else:
+                    op_lbl.configure(text="for FS ≥")
+                    hint.configure(text="(catches everything — no upper rule above)")
+            else:
+                op_lbl.configure(text="for FS <")
+                hint.configure(text="")
+                try:
+                    prev_max = float(mv)
+                except ValueError:
+                    prev_max = None
+
+    def _add_rule_row(det='', mx=None):
+        row_frame = ttk.Frame(rules_frame)
+        row_frame.pack(fill='x', pady=2)
+        ttk.Label(row_frame, text=f"[{len(rule_widgets) + 1}]", width=4).pack(side='left')
+        ttk.Label(row_frame, text="Detector:").pack(side='left', padx=2)
+        det_var = tk.StringVar(master=dlg, value=str(det) if det else '')
+        cb = ttk.Combobox(row_frame, textvariable=det_var, values=available, width=14, state='normal')
+        cb.pack(side='left', padx=2)
+        op_lbl = ttk.Label(row_frame, text="for FS <")
+        op_lbl.pack(side='left', padx=(8, 2))
+        max_var = tk.StringVar(master=dlg, value=f"{mx:g}" if mx is not None else "")
+        max_entry = ttk.Entry(row_frame, textvariable=max_var, width=8)
+        max_entry.pack(side='left', padx=2)
+        cm_lbl = ttk.Label(row_frame, text="cm")
+        cm_lbl.pack(side='left')
+        hint = ttk.Label(row_frame, text="", foreground='gray', font=('TkDefaultFont', 8, 'italic'))
+        hint.pack(side='left', padx=(8, 0))
+        entry = [det_var, max_var, row_frame, op_lbl, hint]
+        def _remove():
+            row_frame.destroy()
+            rule_widgets.remove(entry)
+            _refresh_all_labels()
+        ttk.Button(row_frame, text="Remove", command=_remove).pack(side='right', padx=(8, 0))
+        rule_widgets.append(entry)
+        max_var.trace_add('write', lambda *_a: _refresh_all_labels())
+        _refresh_all_labels()
+
+    # Pre-populate from existing recipe if any, else default to a "less-than"
+    # + "catch-all" pair so the structure is obvious.
+    existing = list(_recipes.get(grp_letter) or [])
+    if existing:
+        for det, mx in existing:
+            _add_rule_row(det, mx)
+    else:
+        _add_rule_row(det='', mx=4.0)   # rule 1: < 4 cm
+        _add_rule_row(det='', mx=None)  # rule 2: everything else
+
+    btns = ttk.Frame(dlg, padding=8)
+    btns.pack(fill='x')
+    ttk.Button(btns, text="Add rule", command=lambda: _add_rule_row()).pack(side='left', padx=4)
+
+    def _clear():
+        _recipes[grp_letter] = []
+        # Restore Detector to blank (no constraint); user can re-pick later
+        group_vars['Detector'].set('')
+        # Repopulate the Detector combo's options now that recipe is gone
+        df_src2 = _df_a if grp_letter == 'A' else _df_b
+        _populate_dropdowns_for(grp_letter, df_src2)
+        dlg.destroy()
+
+    def _ok():
+        new_rules = []
+        for det_var, max_var, _row_frame, _op_lbl, _hint in rule_widgets:
+            d = det_var.get().strip()
+            if not d:
+                continue
+            mx_str = max_var.get().strip()
+            try:
+                mx = None if not mx_str else float(mx_str)
+            except ValueError:
+                messagebox.showerror("Bad Max FS",
+                                     f"Max FS must be numeric or blank: '{mx_str}'", parent=dlg)
+                return
+            new_rules.append((d, mx))
+        if not new_rules:
+            _clear()
+            return
+        _recipes[grp_letter] = new_rules
+        # Show the auto-generated name in the Detector combo as the read-only summary
+        group_vars['Detector'].set(_recipe_name(new_rules))
+        dlg.destroy()
+
+    ttk.Button(btns, text="Clear recipe", command=_clear).pack(side='left', padx=8)
+    ttk.Button(btns, text="OK",     command=_ok           ).pack(side='right', padx=4)
+    ttk.Button(btns, text="Cancel", command=dlg.destroy   ).pack(side='right', padx=4)
+
+
 def _make_filter_frame(label, group_vars, grp_letter, row_idx):
     frame = ttk.LabelFrame(main, text=f"Group {label}", padding=6)
     frame.grid(row=row_idx, column=0, columnspan=4, sticky="we", pady=(6, 0))
@@ -1445,6 +2245,10 @@ def _make_filter_frame(label, group_vars, grp_letter, row_idx):
         # Refilter cascade when the StringVar changes (popup OK closes, sets var)
         group_vars[c].trace_add('write', lambda *_a: _on_change())
         _combos[grp_letter][c] = cb
+    # Mix button after the last filter
+    ttk.Button(frame, text="Mix…",
+               command=lambda gl=grp_letter: _open_recipe_dialog(gl)
+              ).grid(row=0, column=2*len(cols), sticky="w", padx=(8, 4))
 
 
 _make_filter_frame('A', group_a, 'A', 4)
@@ -1481,14 +2285,33 @@ ttk.Combobox(stats_frame, textvariable=interp_method_var, values=['pchip', 'line
              width=8, state='readonly').pack(side='left', padx=2)
 ttk.Button(stats_frame, text="Export stats…", command=lambda: _export_stats()).pack(side='right', padx=4)
 
+# Corrections (TRS-483)
+corr_frame = ttk.LabelFrame(main, text="Corrections", padding=4)
+corr_frame.grid(row=8, column=0, columnspan=4, sticky="we", pady=(4, 0))
+ttk.Label(corr_frame, text="Apply TRS-483 to:").pack(side='left', padx=4)
+ttk.Checkbutton(corr_frame, text="Group A", variable=trs483_a_var).pack(side='left', padx=2)
+ttk.Checkbutton(corr_frame, text="Group B", variable=trs483_b_var).pack(side='left', padx=2)
+ttk.Label(corr_frame, text="Effective FS:").pack(side='left', padx=(12, 2))
+ttk.Combobox(corr_frame, textvariable=trs483_method_var,
+             values=['eq_square', 'sterling'],
+             width=10, state='readonly').pack(side='left', padx=2)
+ttk.Label(corr_frame,
+          text="(eq_square = √(FSx·FSy);  sterling = 4·A/P)",
+          foreground='gray', font=('TkDefaultFont', 8, 'italic')
+         ).pack(side='left', padx=(8, 0))
+
 # Compare
 cmp_frame = ttk.LabelFrame(main, text="Compare", padding=4)
-cmp_frame.grid(row=8, column=0, columnspan=4, sticky="we", pady=(4, 0))
+cmp_frame.grid(row=9, column=0, columnspan=4, sticky="we", pady=(4, 0))
 ttk.Radiobutton(cmp_frame, text="% difference (B vs A)", variable=compare_var, value='diff').pack(side='left', padx=4)
 ttk.Radiobutton(cmp_frame, text="Overlay only",          variable=compare_var, value='overlay').pack(side='left', padx=4)
 ttk.Label(cmp_frame, text="Diff range ±%:").pack(side='left', padx=(12, 2))
 ttk.Entry(cmp_frame, textvariable=diff_lim_var, width=5).pack(side='left')
+ttk.Label(cmp_frame, text="Pass criteria ±%:").pack(side='left', padx=(12, 2))
+ttk.Entry(cmp_frame, textvariable=pass_crit_var, width=5).pack(side='left')
 ttk.Button(cmp_frame, text="Plot", command=_plot).pack(side='right', padx=4)
+ttk.Button(cmp_frame, text="Save Report…",        command=_save_report           ).pack(side='right', padx=4)
+ttk.Button(cmp_frame, text="Save All-Energy…",   command=_save_all_energy_report).pack(side='right', padx=4)
 ttk.Button(cmp_frame, text="Clear all", command=_clear_all_filters).pack(side='right', padx=4)
 ttk.Button(cmp_frame, text="Clear B",   command=lambda: _clear_group('B')).pack(side='right', padx=4)
 ttk.Button(cmp_frame, text="Clear A",   command=lambda: _clear_group('A')).pack(side='right', padx=4)

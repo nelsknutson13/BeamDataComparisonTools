@@ -26,8 +26,17 @@ import statsmodels.formula.api as smf
 # ---------- Config ----------
 DEFAULT_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\OutputRoundRobinData.xlsx"
 EXPECTED_ENERGIES = ["6X", "10X", "15X", "6FFF", "8FFF", "10FFF"]
-SYSTEM_ORDER = ["IROC", "RDS", "Consortium Audit", "Institution Reported (Consortium Form)", "Consortium Audit (Form-Corrected)"]
+SYSTEM_ORDER = ["Institution", "IROC", "RDS", "Consortium Audit", "Institution Reported (Consortium Form)", "Consortium Audit (Form-Corrected)"]
 ORDER = {name: i for i, name in enumerate(SYSTEM_ORDER)}
+# Marker per system (used in both boxplots)
+MARKER_MAP = {
+    "Institution": "P",
+    "IROC": "D",
+    "RDS": "o",
+    "Institution Reported (Consortium Form)": "s",
+    "Consortium Audit": "X",
+    "Consortium Audit (Form-Corrected)": "^",
+}
 OUTLIER_MIN_N = 15   # only show 1.5*IQR fliers when N >= this
 
 MARKER_COLOR = "black"   # or "#444", "0.3", etc.
@@ -69,6 +78,73 @@ def to_long(df: pd.DataFrame):
     return long, energies
 
 
+def renormalize_to_reference(long: pd.DataFrame, reference_system: str):
+    """Re-reference Ratio values so `reference_system` sits at 1.0 within each
+    Institution-anchored session. Returns (new_long, n_dropped).
+
+    Sessions: within each (SN, Energy) sorted by date, every 'Institution' row
+    starts a new session; subsequent non-institution rows attach to the most
+    recent preceding Institution row. Each session is divided by its own
+    reference value (no cross-session averaging). If the reference system
+    appears multiple times in a session, those are averaged (with a warning).
+
+    'Institution' is already the 1.0 baseline → no-op.
+    """
+    ref = (reference_system or "Institution").strip()
+    if ref == "Institution":
+        return long, 0
+
+    data = long.copy()
+    data["System"] = data["System"].astype(str).str.strip()
+    data["_date"] = pd.to_datetime(data["Date"], errors="coerce")
+
+    kept = []
+    dropped = orphan = 0
+    multi_ref_warned = False
+
+    for (sn, en), grp in data.groupby(["SN", "Energy"], dropna=False):
+        grp = grp.sort_values("_date", kind="mergesort")
+        # Assign session ids: each Institution row increments the counter.
+        sids, sid = [], 0
+        for sysname in grp["System"]:
+            if sysname == "Institution":
+                sid += 1
+            sids.append(sid)
+        grp = grp.assign(_session=sids)
+
+        # Rows before the first Institution (session 0) are orphans.
+        orphan += int((grp["_session"] == 0).sum())
+        grp = grp[grp["_session"] > 0]
+
+        for _sess, sgrp in grp.groupby("_session"):
+            ref_vals = sgrp.loc[sgrp["System"] == ref, "Ratio"].dropna()
+            if ref_vals.empty:
+                dropped += len(sgrp)
+                continue
+            if len(ref_vals) > 1 and not multi_ref_warned:
+                print(f"[renormalize] reference '{ref}' has multiple measurements in a "
+                      f"session (e.g. SN {sn}, {en}) — averaging them for the divisor.")
+                multi_ref_warned = True
+            ref_val = float(ref_vals.mean())
+            if ref_val == 0 or not np.isfinite(ref_val):
+                dropped += len(sgrp)
+                continue
+            s = sgrp.copy()
+            s["Ratio"] = s["Ratio"] / ref_val
+            kept.append(s)
+
+    if orphan:
+        print(f"[renormalize] dropped {orphan} orphan row(s) appearing before any "
+              f"Institution measurement.")
+    if dropped:
+        print(f"[renormalize] dropped {dropped} row(s) in sessions with no '{ref}' measurement.")
+
+    if not kept:
+        return data.iloc[0:0].drop(columns=["_date", "_session"], errors="ignore"), dropped + orphan
+    out = pd.concat(kept, ignore_index=True).drop(columns=["_date", "_session"], errors="ignore")
+    return out, dropped + orphan
+
+
 def _draw_tukey_fliers_threshold(ax, series, positions, min_n, color, markersize=10, zorder=6):
     """
     Draw Tukey (1.5*IQR) fliers ONLY for boxes with N >= min_n.
@@ -102,14 +178,16 @@ def _draw_tukey_fliers_threshold(ax, series, positions, min_n, color, markersize
         )
 
 
-def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False):
+def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution"):
 
 
     data = long.copy()
     data["System"] = data["System"].astype(str).str.strip()
 
-    # Keep only systems in your fixed order and only those present
-    systems_present = [s for s in SYSTEM_ORDER if s in set(data["System"].dropna())]
+    # Keep only systems in your fixed order and only those present; exclude the
+    # reference system (it's the degenerate 1.0 baseline, shown as the dashed line).
+    present_set = set(data["System"].dropna())
+    systems_present = [s for s in SYSTEM_ORDER if s in present_set and s != ref_label]
     if not systems_present:
         raise ValueError("No recognized systems found to plot.")
 
@@ -139,14 +217,8 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
     # Baseline at 1.0
     ax.axhline(1.0, linestyle="--", color="black", linewidth=1.0)
 
-    # Overlay sample points with same marker map as grouped plot
-    marker_map = {
-        "IROC": "D",
-        "RDS": "o",
-        "Institution Reported (Consortium Form)": "s",
-        "Consortium Audit": "X",
-        "Consortium Audit (Form-Corrected)": "^",
-    }
+    # Overlay sample points with shared marker map
+    marker_map = MARKER_MAP
     for sys in systems_present:
         sub = data.loc[data["System"] == sys, ["Ratio", "Date", "SN", "Energy"]].dropna(subset=["Ratio"])
         vals = sub["Ratio"].values
@@ -180,7 +252,8 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
     # Labels (no title)
     ax.set_xticks(positions)
     ax.set_xticklabels(systems_present, rotation=0)
-    ax.set_ylabel("Output [cGy/MU]")
+    ax.set_ylabel("Output [cGy/MU]" if ref_label == "Institution"
+                  else f"Output (relative to {ref_label})")
 
     # Legend to match grouped plot
     handles = [
@@ -190,7 +263,7 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
                label=sys)
         for sys in systems_present
     ]
-    handles.append(Line2D([0], [0], linestyle="--", color="black", label="Institution reported (1.0 cGy/MU)"))
+    handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
     handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
                           color=MARKER_COLOR, label=r"Outlier (1.5$\times$ IQR, only if N $\geq$ %d)" % OUTLIER_MIN_N))
     ax.legend(handles=handles, loc="best", frameon=True)
@@ -203,19 +276,21 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
 def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                      show_dates: bool = False,
                      show_sn_labels: bool = False,
-                     show_energy_labels: bool = False):
+                     show_energy_labels: bool = False,
+                     ref_label: str = "Institution"):
 
 
     data = long.copy()
     data["System"] = data["System"].astype(str).str.strip()
     data = data[data["System"].isin(ORDER.keys())]  # keep only your ordered systems
 
-    # Fixed system order; include only those present
+    # Fixed system order; include only those present, excluding the reference
+    # system (degenerate 1.0 baseline, shown as the dashed line).
     present = set(data["System"].astype(str).str.strip().unique())
-    systems = sorted(present, key=lambda s: ORDER.get(s, 999))
+    systems = [s for s in sorted(present, key=lambda s: ORDER.get(s, 999)) if s != ref_label]
 
     if not systems:
-        raise ValueError("No systems to plot (none of IROC / Consortium Form / Consortium Audit present).")
+        raise ValueError("No systems to plot after excluding the reference system.")
 
     # Choose grouping axis
     if group_col == "Energy":
@@ -260,9 +335,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
     # Baseline at 1.0 (and use black so legend matches)
     ax.axhline(1.0, linestyle="--", color="black", linewidth=1.0)
 
-    # Overlay sample points with distinct markers per system (basic markers)
-    marker_map = {"IROC": "D", "RDS": "o", "Institution Reported (Consortium Form)": "s",
-                  "Consortium Audit": "X", "Consortium Audit (Form-Corrected)": "^"}
+    # Overlay sample points with shared marker map
+    marker_map = MARKER_MAP
 
     for g in groups:
         for sys in systems:
@@ -306,7 +380,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
     # Labels (no title)
     ax.set_xticks(xticks)
     ax.set_xticklabels(xtlabs)
-    ax.set_ylabel("Output [cGy/MU]")
+    ax.set_ylabel("Output [cGy/MU]" if ref_label == "Institution"
+                  else f"Output (relative to {ref_label})")
 
     # Legend: markers for each system + dashed baseline
     handles = [Line2D([], [], linestyle="None",
@@ -314,7 +389,7 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                       markerfacecolor="none", markeredgecolor=MARKER_COLOR, color=MARKER_COLOR,
                       label=sys) for sys in systems]
 
-    handles.append(Line2D([0], [0], linestyle="--", color="black", label="Institution reported (1.0 cGy/MU)"))
+    handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
     handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
                           color=MARKER_COLOR, label=r"Outlier (1.5$\times$ IQR, only if N $\geq$ %d)" % OUTLIER_MIN_N))
 
@@ -427,9 +502,18 @@ def make_plots(df: pd.DataFrame,
                system_filter=None,
                show_dates: bool = False,
                show_sn_labels: bool = False,
-               show_energy_labels: bool = False):
+               show_energy_labels: bool = False,
+               normalize_to: str = "Institution"):
 
     long, energies = to_long(df)
+
+    # Re-reference per Institution-anchored session BEFORE filtering, so the
+    # session anchors (Institution rows) are still present even if the user
+    # later filters out a system.
+    long, _ = renormalize_to_reference(long, normalize_to)
+    if long.empty:
+        raise ValueError(f"No data left after normalizing to '{normalize_to}'.")
+    ref_label = (normalize_to or "Institution").strip()
 
     if not (show_system or show_sn or show_energy):
         raise ValueError("No plots selected. Please enable at least one plot type.")
@@ -457,18 +541,20 @@ def make_plots(df: pd.DataFrame,
 
     # Plots
     if show_system:
-        _system_boxplot(long_filt, show_dates=show_dates, show_sn_labels=show_sn_labels, show_energy_labels=show_energy_labels)
-    
+        _system_boxplot(long_filt, show_dates=show_dates, show_sn_labels=show_sn_labels,
+                        show_energy_labels=show_energy_labels, ref_label=ref_label)
+
     if show_sn:
         _grouped_boxplot(
             long_filt,
             group_col="SN",
             energies_order=energies,
             show_dates=show_dates,
-            show_energy_labels=show_energy_labels
+            show_energy_labels=show_energy_labels,
+            ref_label=ref_label
         )
 
-    
+
     if show_energy:
         _grouped_boxplot(
             long_filt,
@@ -476,7 +562,8 @@ def make_plots(df: pd.DataFrame,
             energies_order=energies,
             show_dates=show_dates,
             show_sn_labels=show_sn_labels,
-            show_energy_labels=show_energy_labels
+            show_energy_labels=show_energy_labels,
+            ref_label=ref_label
         )
 
 
@@ -487,7 +574,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Output Round Robin — Boxplots")
-        self.geometry("720x520")  # taller to fit 3 listboxes
+        self.geometry("720x570")  # taller to fit 3 listboxes + normalize dropdown
         pad = {"padx": 8, "pady": 6}
 
         ttk.Label(self, text="Data file (XLSX/CSV):").grid(row=0, column=0, sticky="w", **pad)
@@ -551,8 +638,16 @@ class App(tk.Tk):
         self.sn_values = []
         self.energy_values = []
 
+        # ---- Normalize-to selection ----
+        ttk.Label(self, text="Normalize to:").grid(row=13, column=0, sticky="w", **pad)
+        self.normalize_var = tk.StringVar(value="Institution")
+        self.normalize_combo = ttk.Combobox(self, textvariable=self.normalize_var,
+                                             state="readonly", width=40)
+        self.normalize_combo["values"] = ["Institution"]
+        self.normalize_combo.grid(row=13, column=1, sticky="w", **pad)
+
         # Plot button
-        ttk.Button(self, text="Plot", command=self.plot).grid(row=13, column=0, columnspan=3, **pad)
+        ttk.Button(self, text="Plot", command=self.plot).grid(row=14, column=0, columnspan=3, **pad)
 
         # populate lists from default file if possible
         self.populate_lists_from_file()
@@ -591,6 +686,15 @@ class App(tk.Tk):
             self.system_listbox.insert(tk.END, s)
         if systems:
             self.system_listbox.selection_set(0, tk.END)
+
+        # ---- Normalize-to dropdown options (Institution first, then others) ----
+        norm_opts = (["Institution"] if "Institution" in sys_set else []) + \
+                    [s for s in systems if s != "Institution"]
+        if not norm_opts:
+            norm_opts = ["Institution"]
+        self.normalize_combo["values"] = norm_opts
+        if self.normalize_var.get() not in norm_opts:
+            self.normalize_var.set(norm_opts[0])
 
         # ---- SN list ----
         self.sn_listbox.delete(0, tk.END)
@@ -666,7 +770,8 @@ class App(tk.Tk):
                system_filter=system_filter,
                show_dates=self.show_dates.get(),
                show_sn_labels=self.show_sn_labels.get(),
-               show_energy_labels=self.show_energy_labels.get())
+               show_energy_labels=self.show_energy_labels.get(),
+               normalize_to=self.normalize_var.get())
         except Exception as e:
             messagebox.showerror("Plot error", str(e))
 

@@ -155,19 +155,37 @@ def export_sn(root, sn, status_cb):
         vals = sorted(df[col].dropna().unique(), key=lambda v: (str(type(v)), v))
         return ', '.join(str(v) for v in vals)
 
+    def _is_pdd(df):
+        return df['Axis'].astype(str).str.upper() == 'Z' if 'Axis' in df.columns else pd.Series(False, index=df.index)
+
+    def _count_pdds(df):
+        """Unique PDD scans = unique FS among Z-axis rows."""
+        z = df[_is_pdd(df)]
+        return z['FS'].nunique() if 'FS' in z.columns else 0
+
+    def _count_profiles(df):
+        """Unique profile scans = unique (FS, Axis, Depth) among non-Z rows."""
+        p = df[~_is_pdd(df)]
+        cols = [c for c in ('FS', 'Axis', 'Depth') if c in p.columns]
+        return len(p[cols].drop_duplicates()) if cols else 0
+
+    def _profile_depths_str(df):
+        """Depths from profile (non-Z) rows only — PDD depth=0 isn't meaningful."""
+        p = df[~_is_pdd(df)]
+        return _uniq_str(p, 'Depth')
+
     summary_rows = []
     for (energy, ssd) in ordered:
         merged = merged_by_combo[(energy, ssd)]
-        ck = combo_kinds.get((energy, ssd), {'PDD': 0, 'Profile': 0})
         summary_rows.append({
             'Tab':          f"{energy}_{ssd}SSD"[:31],
             'Energy':       energy,
             'SSD':          ssd,
-            'PDD rows':     ck.get('PDD', 0),
-            'Profile rows': ck.get('Profile', 0),
+            'PDDs':         _count_pdds(merged),
+            'Profiles':     _count_profiles(merged),
             'Field Sizes':  _uniq_str(merged, 'FS'),
             'Axes':         _uniq_str(merged, 'Axis'),
-            'Depths':       _uniq_str(merged, 'Depth'),
+            'Profile Depths': _profile_depths_str(merged),
             'Detector(s)':  _uniq_str(merged, 'Detector'),
         })
     if of_all is not None:
@@ -175,11 +193,11 @@ def export_sn(root, sn, status_cb):
             'Tab':          'OutputFactors',
             'Energy':       _uniq_str(of_all, 'Energy'),
             'SSD':          _uniq_str(of_all, 'SSD'),
-            'PDD rows':     '',
-            'Profile rows': '',
+            'PDDs':         '',
+            'Profiles':     '',
             'Field Sizes':  f"X: {_uniq_str(of_all, 'FS_X')}",
             'Axes':         '',
-            'Depths':       _uniq_str(of_all, 'Depth'),
+            'Profile Depths': _uniq_str(of_all, 'Depth'),
             'Detector(s)':  _uniq_str(of_all, 'Detector'),
         })
     df_summary = pd.DataFrame(summary_rows)

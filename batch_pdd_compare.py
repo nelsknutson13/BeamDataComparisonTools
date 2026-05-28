@@ -135,7 +135,7 @@ FILE_MODE = 'flat'
 #                  parsed from each filename (e.g. 6X_100SSD_PDDData.xlsx -> 6X_100SSD).
 #                  Use FILE_FILTER to restrict which files are processed.
 
-BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data\90 SSD"
+BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\100 SSD"
 
 # Where outputs (figures, reports, summary csv) get written. Set to None to use
 # BASE_PATH (legacy behavior); set to a short path like r"C:\OFresults" to keep
@@ -145,10 +145,10 @@ OUTPUT_BASE = None
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
 FS_FILTER   = []      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
 
-SHEET1_NAME = "SN 1003"   # reference / measured sheet name
-SHEET2_NAME = "TPS SN 1003"            # comparison sheet name
+SHEET1_NAME = "SN 21"   # reference / measured sheet name; set 'none' to skip
+SHEET2_NAME = "none"            # comparison sheet name; set 'none' to skip
 
-ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', 'gam', or 'plot'
+ANALYSIS      = 'none'        # 'comp', 'dif', 'dist', 'gam', 'plot', or 'none' (plot only, no comparison)
 DD_CRITERIA   = 2           # dose difference threshold [%]
 DTA_CRITERIA  = 0.2           # DTA threshold [cm]  (2 mm)
 NORM          = 1             # 1 = each dmax, 2 = fixed depth per energy, 3 = dmax of curve 1, 4 = dmax of curve 2
@@ -178,8 +178,20 @@ SAVE_FIGURES  = True           # set False to skip individual PNG figure generat
 SAVE_REPORT   = True           # generate multi-page PDF report (summary + per-energy figures)
 REPORT_DPI    = 150            # DPI for PDF report pages (lower = smaller file, faster to open)
 
-_s1 = SHEET1_NAME.replace(' ', '')
-_s2 = SHEET2_NAME.replace(' ', '')
+def _sheet_active(name):
+    """A sheet is skipped if its name is blank or none/na."""
+    return str(name).strip().lower() not in ('', 'none', 'na', 'n/a')
+
+USE1 = _sheet_active(SHEET1_NAME)
+USE2 = _sheet_active(SHEET2_NAME)
+PLOT_ONLY = (ANALYSIS == 'none') or (not USE1) or (not USE2)
+
+if ANALYSIS in ('comp', 'dif', 'dist', 'gam') and not (USE1 and USE2):
+    raise SystemExit(f"ANALYSIS='{ANALYSIS}' needs two sheets, but one of "
+                     f"SHEET1_NAME/SHEET2_NAME is set to none.")
+
+_s1 = SHEET1_NAME.replace(' ', '') if USE1 else 'none'
+_s2 = SHEET2_NAME.replace(' ', '') if USE2 else 'none'
 
 # Build a criteria tag from analysis type and thresholds so runs with different
 # criteria land in separate folders automatically (e.g. comp_1pct_1mm).
@@ -277,15 +289,18 @@ def run_one_file(xlsx_path, energy_label):
     print(f"  {energy_label}  —  {os.path.basename(xlsx_path)}")
     print(f"{'='*60}")
 
-    df1 = pd.read_excel(xlsx_path, sheet_name=SHEET1_NAME, header=0)
-    df2 = pd.read_excel(xlsx_path, sheet_name=SHEET2_NAME, header=0)
-    df1 = df1.sort_values(by=['FS', 'Axis', 'Pos'])
-    df2 = df2.sort_values(by=['FS', 'Axis', 'Pos'])
+    df1 = None
+    df2 = None
+    if USE1:
+        df1 = pd.read_excel(xlsx_path, sheet_name=SHEET1_NAME, header=0).sort_values(by=['FS', 'Axis', 'Pos'])
+    if USE2:
+        df2 = pd.read_excel(xlsx_path, sheet_name=SHEET2_NAME, header=0).sort_values(by=['FS', 'Axis', 'Pos'])
 
-    # Energy from dataframe for region boundary lookup; falls back to energy_label if not found.
+    # Energy from whichever sheet is present (for region boundary lookup); falls back to label.
     _energy_token = None
-    if 'Energy' in df1.columns:
-        _vals = df1['Energy'].dropna().unique()
+    _ref_df = df1 if df1 is not None else df2
+    if _ref_df is not None and 'Energy' in _ref_df.columns:
+        _vals = _ref_df['Energy'].dropna().unique()
         if len(_vals) > 0:
             _energy_token = str(_vals[0])
     if _energy_token is None:
@@ -294,15 +309,18 @@ def run_one_file(xlsx_path, energy_label):
 
     # Detector is resolved per-FS inside the loop (each scan may use a different detector)
 
-    # FS values common to both sheets (Z-axis rows only)
-    fs1 = set(df1.loc[df1['Axis'] == 'Z', 'FS'].unique())
-    fs2 = set(df2.loc[df2['Axis'] == 'Z', 'FS'].unique())
-    fsl = sorted(fs1 & fs2)
+    # Field sizes: intersection when comparing two sheets, union of active sheets in plot mode.
+    fs1 = set(df1.loc[df1['Axis'] == 'Z', 'FS'].unique()) if df1 is not None else set()
+    fs2 = set(df2.loc[df2['Axis'] == 'Z', 'FS'].unique()) if df2 is not None else set()
+    if PLOT_ONLY:
+        fsl = sorted(fs1 | fs2)
+    else:
+        fsl = sorted(fs1 & fs2)
     if FS_FILTER:
         fsl = [fs for fs in fsl if fs in FS_FILTER]
 
     if not fsl:
-        print("  No common field sizes found — skipping.")
+        print("  No field sizes found — skipping.")
         return []
 
     # ── figure setup ─────────────────────────
@@ -324,7 +342,7 @@ def run_one_file(xlsx_path, energy_label):
                 gridspec_kw={'height_ratios': [1.5, 1]})
             plt.rcParams.update({'font.size': 18})
             ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
-        else:  # 'plot'
+        else:  # 'plot' or 'none'
             fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
             plt.rcParams.update({'font.size': 16})
     else:
@@ -339,8 +357,10 @@ def run_one_file(xlsx_path, energy_label):
         fig = None
         ax0 = ax1 = ax2 = _NullAx()
 
-    ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
-    ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
+    if USE1:
+        ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
+    if USE2:
+        ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
     ax0.legend()
     ax0.set_ylabel('Percentage Depth Dose [%]')
     ax0.set_xlabel('Depth [cm]')
@@ -350,114 +370,146 @@ def run_one_file(xlsx_path, energy_label):
     total_fails_cumulative  = 0
     gvtot = []
 
+    def _norm_at_depth(y, d, depth):
+        return float(interp.pchip(y, d)(depth))
+
+    def _extract_curve(df, sheet_name):
+        """Pull (y, d, detector) for this FS's Z-axis scan; (None,None,None) if unusable."""
+        mask = (df['FS'] == fs_val) & (df['Axis'] == 'Z')
+        y = df.loc[mask, 'Pos'].reset_index(drop=True)
+        d = df.loc[mask, 'Dose'].reset_index(drop=True)
+        if len(y) < 2:
+            return None, None, None
+        dup = y[y.duplicated(keep=False)]
+        if not dup.empty:
+            print(f"  FS {fs_val}: WARNING — {sheet_name} has duplicate Pos values "
+                  f"{sorted(dup.unique().tolist())} — skipping.")
+            return None, None, None
+        srt = y.argsort()
+        y, d = y.iloc[srt].reset_index(drop=True), d.iloc[srt].reset_index(drop=True)
+        det = None
+        if 'Detector' in df.columns:
+            vals = df.loc[mask, 'Detector'].dropna().unique()
+            if len(vals) > 0:
+                det = str(vals[0]).strip()
+        return y, d, det
+
     for fs_val in fsl:
-        # ── extract data ───────────────────
-        mask1 = (df1['FS'] == fs_val) & (df1['Axis'] == 'Z')
-        mask2 = (df2['FS'] == fs_val) & (df2['Axis'] == 'Z')
-        y1 = df1.loc[mask1, 'Pos'].reset_index(drop=True)
-        d1 = df1.loc[mask1, 'Dose'].reset_index(drop=True)
-        y2 = df2.loc[mask2, 'Pos'].reset_index(drop=True)
-        d2 = df2.loc[mask2, 'Dose'].reset_index(drop=True)
+        # ── extract each active curve ───────────────────
+        y1 = d1 = y2 = d2 = None
+        det1 = det2 = None
+        if df1 is not None and fs_val in fs1:
+            y1, d1, det1 = _extract_curve(df1, SHEET1_NAME)
+        if df2 is not None and fs_val in fs2:
+            y2, d2, det2 = _extract_curve(df2, SHEET2_NAME)
 
-        if len(y1) < 2 or len(y2) < 2:
-            print(f"  FS {fs_val}: not enough points — skipping.")
+        # Comparison modes require both curves; plot modes accept either.
+        if not PLOT_ONLY and (y1 is None or y2 is None):
+            print(f"  FS {fs_val}: missing a curve — skipping.")
             continue
-
-        # ── check for duplicate depth positions ──────────────────────────
-        dup1 = y1[y1.duplicated(keep=False)]
-        dup2 = y2[y2.duplicated(keep=False)]
-        if not dup1.empty:
-            print(f"  FS {fs_val}: WARNING — {SHEET1_NAME} has duplicate Pos values "
-                  f"{sorted(dup1.unique().tolist())} — skipping this FS.")
+        if y1 is None and y2 is None:
+            print(f"  FS {fs_val}: no usable curve — skipping.")
             continue
-        if not dup2.empty:
-            print(f"  FS {fs_val}: WARNING — {SHEET2_NAME} has duplicate Pos values "
-                  f"{sorted(dup2.unique().tolist())} — skipping this FS.")
-            continue
-        # Ensure strictly increasing order
-        y1 = y1.reset_index(drop=True); d1 = d1.reset_index(drop=True)
-        y2 = y2.reset_index(drop=True); d2 = d2.reset_index(drop=True)
-        sort1 = y1.argsort(); y1, d1 = y1.iloc[sort1].reset_index(drop=True), d1.iloc[sort1].reset_index(drop=True)
-        sort2 = y2.argsort(); y2, d2 = y2.iloc[sort2].reset_index(drop=True), d2.iloc[sort2].reset_index(drop=True)
 
         # ── depth shifts ───────────────────
         if AUTO_EPOM_SHIFT:
-            # Resolve detector per-curve from data column; fall back to config value
-            def _curve_detector(df, mask, config_det):
-                if 'Detector' in df.columns:
-                    vals = df.loc[mask, 'Detector'].dropna().unique()
-                    if len(vals) > 0:
-                        return str(vals[0]).strip()
-                return config_det
-            _det1 = _curve_detector(df1, mask1, EPOM_DETECTOR1)
-            _det2 = _curve_detector(df2, mask2, EPOM_DETECTOR2)
-            s1, s2 = compute_epom_shifts(y1, d1, _det1, y2, d2, _det2,
-                                         modality=EPOM_MODALITY, unit="cm")
-            print(f"  FS {fs_val}: EPOM  {SHEET1_NAME}({_det1}): {s1:+.3f} cm  |  {SHEET2_NAME}({_det2}): {s2:+.3f} cm")
+            _d1 = det1 or EPOM_DETECTOR1
+            _d2 = det2 or EPOM_DETECTOR2
+            s1 = s2 = 0.0
+            if y1 is not None and y2 is not None:
+                s1, s2 = compute_epom_shifts(y1, d1, _d1, y2, d2, _d2,
+                                             modality=EPOM_MODALITY, unit="cm")
+            elif y1 is not None:
+                s1, _ = compute_epom_shifts(y1, d1, _d1, y1, d1, _d1,
+                                            modality=EPOM_MODALITY, unit="cm")
+            elif y2 is not None:
+                s2, _ = compute_epom_shifts(y2, d2, _d2, y2, d2, _d2,
+                                            modality=EPOM_MODALITY, unit="cm")
         else:
             s1, s2 = DEPTH_SHIFT1, DEPTH_SHIFT2
-        y1 = y1 + s1
-        y2 = y2 + s2
+        if y1 is not None: y1 = y1 + s1
+        if y2 is not None: y2 = y2 + s2
 
         # ── cutoff: always applied at CUTOFF_DEPTH ──
-        m1 = y1 >= CUTOFF_DEPTH
-        m2 = y2 >= CUTOFF_DEPTH
-        y1, d1 = y1[m1].reset_index(drop=True), d1[m1].reset_index(drop=True)
-        y2, d2 = y2[m2].reset_index(drop=True), d2[m2].reset_index(drop=True)
-        if len(y1) < 2 or len(y2) < 2:
+        if y1 is not None:
+            m1 = y1 >= CUTOFF_DEPTH
+            y1, d1 = y1[m1].reset_index(drop=True), d1[m1].reset_index(drop=True)
+            if len(y1) < 2:
+                y1 = d1 = None
+        if y2 is not None:
+            m2 = y2 >= CUTOFF_DEPTH
+            y2, d2 = y2[m2].reset_index(drop=True), d2[m2].reset_index(drop=True)
+            if len(y2) < 2:
+                y2 = d2 = None
+        if not PLOT_ONLY and (y1 is None or y2 is None):
+            print(f"  FS {fs_val}: cutoff removed too many points — skipping.")
+            continue
+        if y1 is None and y2 is None:
             print(f"  FS {fs_val}: cutoff removed too many points — skipping.")
             continue
 
         # ── normalization ──────────────────
-        def _norm_at_depth(y, d, depth):
-            return float(interp.pchip(y, d)(depth))
-
-        if NORM == 1:
-            d1 = d1 / d1.max() * 100
-            d2 = d2 / d2.max() * 100
-        elif NORM == 2:
-            fixed_depth = NORM_DEPTH.get(energy_label, None)
-            if fixed_depth is None:
-                print(f"  WARNING: no fixed depth for '{energy_label}', falling back to max norm.")
-                d1 = d1 / d1.max() * 100
-                d2 = d2 / d2.max() * 100
-            else:
-                d1 = d1 / _norm_at_depth(y1, d1, fixed_depth) * 100
-                d2 = d2 / _norm_at_depth(y2, d2, fixed_depth) * 100
+        # NORM 3/4 reference the other curve's dmax; fall back to each-own when absent.
+        ref_depth = None
+        eff_norm = NORM
+        if NORM == 2:
+            ref_depth = NORM_DEPTH.get(energy_label, None)
+            if ref_depth is None:
+                print(f"  WARNING: no fixed depth for '{energy_label}', using each-dmax.")
+                eff_norm = 1
         elif NORM == 3:
-            dmax_depth = float(y1.iloc[d1.values.argmax()])
-            print(f"  Norm 3 (Dmax curve 1)  FS={fs_val}  dmax depth = {dmax_depth:.3f} cm")
-            d1 = d1 / _norm_at_depth(y1, d1, dmax_depth) * 100
-            d2 = d2 / _norm_at_depth(y2, d2, dmax_depth) * 100
+            if y1 is not None:
+                ref_depth = float(y1.iloc[d1.values.argmax()])
+            else:
+                eff_norm = 1
         elif NORM == 4:
-            dmax_depth = float(y2.iloc[d2.values.argmax()])
-            print(f"  Norm 4 (Dmax curve 2)  FS={fs_val}  dmax depth = {dmax_depth:.3f} cm")
-            d1 = d1 / _norm_at_depth(y1, d1, dmax_depth) * 100
-            d2 = d2 / _norm_at_depth(y2, d2, dmax_depth) * 100
+            if y2 is not None:
+                ref_depth = float(y2.iloc[d2.values.argmax()])
+            else:
+                eff_norm = 1
+
+        def _normalize(y, d):
+            if y is None:
+                return None
+            if eff_norm == 1:
+                return d / d.max() * 100
+            return d / _norm_at_depth(y, d, ref_depth) * 100
+
+        d1 = _normalize(y1, d1)
+        d2 = _normalize(y2, d2)
 
         # ── detector convolution ──────────────────
-        if CONV_TARGET in ('curve1', 'both'):
+        if CONV_TARGET in ('curve1', 'both') and y1 is not None:
             d1 = apply_detector_convolution(y1, d1, CONV_FWHM_CM)
-        if CONV_TARGET in ('curve2', 'both'):
+        if CONV_TARGET in ('curve2', 'both') and y2 is not None:
             d2 = apply_detector_convolution(y2, d2, CONV_FWHM_CM)
 
         # ── profile scaling (after normalization) ─────
-        if SCALE_TARGET in (1, 3):
+        if SCALE_TARGET in (1, 3) and y1 is not None:
             d1 = d1 * SCALE_FACTOR
-        if SCALE_TARGET in (2, 3):
+        if SCALE_TARGET in (2, 3) and y2 is not None:
             d2 = d2 * SCALE_FACTOR
 
         # ── plot curves ───────────────────
-        ax0.plot(y1, d1, '+r', ms=MARKER_SIZE)
-        ax0.plot(y2, d2, '.k', ms=MARKER_SIZE)
+        if y1 is not None:
+            ax0.plot(y1, d1, '+r', ms=MARKER_SIZE)
+        if y2 is not None:
+            ax0.plot(y2, d2, '.k', ms=MARKER_SIZE)
 
-        # ── analysis metrics & subplot plots ──
-        xlim = (max(float(y1.min()), float(y2.min())),
-                min(float(y1.max()), float(y2.max())))
+        # ── x-limits from available curve(s) ──
+        if y1 is not None and y2 is not None:
+            xlim = (max(float(y1.min()), float(y2.min())),
+                    min(float(y1.max()), float(y2.max())))
+        elif y1 is not None:
+            xlim = (float(y1.min()), float(y1.max()))
+        else:
+            xlim = (float(y2.min()), float(y2.max()))
         ax0.set_xlim(*xlim)
 
-        if ANALYSIS == 'plot':
-            ax0.set_ylim(0, max(1.05 * np.max(d1), 1.05 * np.max(d2)))
+        if PLOT_ONLY:
+            _maxes = [1.05 * float(np.max(d)) for d in (d1, d2) if d is not None]
+            if _maxes:
+                ax0.set_ylim(0, max(_maxes))
 
         elif ANALYSIS == 'comp':
             dtax, dtav = dtafunc(y1, d1, y2, d2, DTA_CRITERIA)
@@ -605,14 +657,19 @@ def run_one_file(xlsx_path, energy_label):
 
     stem     = os.path.splitext(os.path.basename(xlsx_path))[0]
     safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
+    # Title reflects which sheets are present.
+    if USE1 and USE2:
+        _sheet_label = f'{SHEET1_NAME} vs {SHEET2_NAME}'
+    elif USE1:
+        _sheet_label = SHEET1_NAME
+    else:
+        _sheet_label = SHEET2_NAME
     if SAVE_FIGURES or SAVE_REPORT:
-        fig.suptitle(f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}', fontsize=14)
+        fig.suptitle(f'{energy_label} — {_sheet_label}  {title_tag}', fontsize=14)
         fig.tight_layout(rect=[0, 0, 1, 0.95])
         fig.subplots_adjust(hspace=0.45)
     if SAVE_FIGURES:
-        s1 = SHEET1_NAME.replace(' ', '')
-        s2 = SHEET2_NAME.replace(' ', '')
-        out_png = os.path.join(RESULTS_DIR, f"{s1}_{s2}_{energy_label}_{safe_tag}.png")
+        out_png = os.path.join(RESULTS_DIR, f"{_s1}_{_s2}_{energy_label}_{safe_tag}.png")
         fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
         # Bypass stdout capture so the path line doesn't land in the per-energy PDF page.
         sys.__stdout__.write(f"  Figure saved: {out_png}\n")
@@ -961,6 +1018,45 @@ def main():
                 subprocess.call(['open', pdf_path])
             else:
                 subprocess.call(['xdg-open', pdf_path])
+
+    elif SAVE_REPORT and all_figs:
+        # Plot-only / single-sheet mode: figures-only report (no stats front page).
+        from reportlab.lib.pagesizes import letter as rl_letter
+        from reportlab.pdfgen import canvas as rl_canvas
+        from reportlab.lib.utils import ImageReader
+
+        pdf_path = os.path.join(PDD_DIR, f"{s1}_{s2}_pdd_plots_{timestamp}.pdf")
+        rl_w, rl_h = rl_letter
+        c = rl_canvas.Canvas(pdf_path, pagesize=rl_letter)
+        for energy_label, energy_text, fig in all_figs:
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=REPORT_DPI, bbox_inches='tight')
+            buf.seek(0)
+            img = ImageReader(buf)
+            iw, ih = img.getSize()
+            fig_w = rl_w - 72
+            fig_h = fig_w * (ih / float(iw))
+            top = rl_h - 36
+            if top - fig_h < 18:
+                fig_h = max(top - 18, 10)
+                fig_w = fig_h * (iw / float(ih))
+            c.drawImage(img, 36, top - fig_h, width=fig_w, height=fig_h)
+            c.showPage()
+            # individual per-energy PDF
+            energy_pdf = os.path.join(REPORTS_DIR, f"{s1}_{s2}_{energy_label}.pdf")
+            ec = rl_canvas.Canvas(energy_pdf, pagesize=rl_letter)
+            ec.drawImage(img, 36, top - fig_h, width=fig_w, height=fig_h)
+            ec.save()
+            plt.close(fig)
+        c.save()
+        print(f"PDF (plots only) saved: {pdf_path}")
+        if platform.system() == 'Windows':
+            os.startfile(pdf_path)
+        elif platform.system() == 'Darwin':
+            subprocess.call(['open', pdf_path])
+        else:
+            subprocess.call(['xdg-open', pdf_path])
+
     else:
         print("\nNo results to save.")
 

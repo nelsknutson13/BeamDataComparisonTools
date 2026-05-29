@@ -45,8 +45,8 @@ OUTPUT_BASE = None
 
 FILE_FILTER = '*Profile*.xlsx'    # glob used in 'flat' mode only
 
-SHEET1_NAME = "SN 21"             # reference / measured sheet name
-SHEET2_NAME = "TPS SN 21"         # comparison sheet name
+SHEET1_NAME = "SN 21"             # reference / measured sheet name; set 'none' to skip
+SHEET2_NAME = "none"         # comparison sheet name; set 'none' to skip
 
 # Data selection — 'all' means use all common values found in each file
 FIELD_SIZES = 'all'               # e.g. [5.0, 10.0, 20.0]  or  'all'
@@ -55,7 +55,7 @@ DEPTHS_CM   = 'all'                # e.g. [1.5, 5.0, 10.0]   or  'all'
 
 DEPTH_ROUND_CM = 0.1               # rounding resolution for depth matching [cm]
 
-ANALYSIS      = 'mppg'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg'
+ANALYSIS      = 'none'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg', or 'none' (plot only)
 DD_CRITERIA   = 1.0                # dose difference threshold [%]
 DTA_CRITERIA  = 0.1                # DTA threshold [cm]  (2 mm)
 
@@ -100,8 +100,20 @@ MARKER_SIZE  = 4                   # plot marker size
 DPI          = 600                 # figure output resolution
 SAVE_FIGURES = True                # set False to skip figure generation (faster, stats only)
 
-_s1 = SHEET1_NAME.replace(' ', '')
-_s2 = SHEET2_NAME.replace(' ', '')
+def _sheet_active(name):
+    """A sheet is skipped if its name is blank or none/na."""
+    return str(name).strip().lower() not in ('', 'none', 'na', 'n/a')
+
+USE1 = _sheet_active(SHEET1_NAME)
+USE2 = _sheet_active(SHEET2_NAME)
+PLOT_ONLY = (ANALYSIS == 'none') or (not USE1) or (not USE2)
+
+if ANALYSIS in ('comp', 'dif', 'dist', 'gam', 'mppg') and not (USE1 and USE2):
+    raise SystemExit(f"ANALYSIS='{ANALYSIS}' needs two sheets, but one of "
+                     f"SHEET1_NAME/SHEET2_NAME is set to none.")
+
+_s1 = SHEET1_NAME.replace(' ', '') if USE1 else 'none'
+_s2 = SHEET2_NAME.replace(' ', '') if USE2 else 'none'
 
 # Build a criteria tag from analysis type and thresholds so runs with different
 # criteria land in separate folders automatically (e.g. mppg_2pct_2mm).
@@ -233,27 +245,35 @@ def run_one_file(xlsx_path, energy_label):
     ssd_cm, pdd_energy = parse_ssd_energy(xlsx_path, default_ssd=100.0, default_energy=energy_label)
     print(f"  SSD parsed from path: {ssd_cm:.1f} cm  |  PDD energy key: {pdd_energy}")
 
-    df1 = pd.read_excel(xlsx_path, sheet_name=SHEET1_NAME, header=0)
-    df2 = pd.read_excel(xlsx_path, sheet_name=SHEET2_NAME, header=0)
+    df1 = None
+    df2 = None
+    if USE1:
+        df1 = pd.read_excel(xlsx_path, sheet_name=SHEET1_NAME, header=0)
+        df1["Depth"] = ((df1["Depth"] / DEPTH_ROUND_CM).round() * DEPTH_ROUND_CM).round(3)
+        df1 = df1.sort_values(by=['FS', 'Depth', 'Axis', 'Pos'])
+    if USE2:
+        df2 = pd.read_excel(xlsx_path, sheet_name=SHEET2_NAME, header=0)
+        df2["Depth"] = ((df2["Depth"] / DEPTH_ROUND_CM).round() * DEPTH_ROUND_CM).round(3)
+        df2 = df2.sort_values(by=['FS', 'Depth', 'Axis', 'Pos'])
 
-    # Standardize depth rounding to avoid floating-point mismatches
-    for df in (df1, df2):
-        df["Depth"] = ((df["Depth"] / DEPTH_ROUND_CM).round() * DEPTH_ROUND_CM).round(3)
+    # ── determine FS / Axis / Depth — intersection when comparing, union when plot-only ─
+    def _vals(df, col):
+        if df is None:
+            return set()
+        return set(df.loc[df['Axis'] != 'Z', col].dropna().unique())
 
-    df1 = df1.sort_values(by=['FS', 'Depth', 'Axis', 'Pos'])
-    df2 = df2.sort_values(by=['FS', 'Depth', 'Axis', 'Pos'])
-
-    # ── determine common FS / Axis / Depth (always exclude Z-axis PDDs) ───────
     def _common(col):
-        s1 = set(df1.loc[df1['Axis'] != 'Z', col].dropna().unique())
-        s2 = set(df2.loc[df2['Axis'] != 'Z', col].dropna().unique())
+        s1, s2 = _vals(df1, col), _vals(df2, col)
+        if PLOT_ONLY:
+            return sorted(s1 | s2, key=float)
         return sorted(s1 & s2, key=float)
 
     fsl_all  = _common('FS')
     dl_all   = _common('Depth')
+    _axes_s1 = set(df1.loc[df1['Axis'] != 'Z', 'Axis'].dropna().unique()) if df1 is not None else set()
+    _axes_s2 = set(df2.loc[df2['Axis'] != 'Z', 'Axis'].dropna().unique()) if df2 is not None else set()
     axes_all = sorted(
-        set(df1.loc[df1['Axis'] != 'Z', 'Axis'].dropna().unique()) &
-        set(df2.loc[df2['Axis'] != 'Z', 'Axis'].dropna().unique()),
+        (_axes_s1 | _axes_s2) if PLOT_ONLY else (_axes_s1 & _axes_s2),
         key=lambda x: (x in ('XY', 'YX'), x)   # XY/YX processed last
     )
 
@@ -308,11 +328,13 @@ def run_one_file(xlsx_path, energy_label):
                 gridspec_kw={'height_ratios': [1.5, 1]}
             )
             ax1.set_ylabel('Dose Difference [%]' if ANALYSIS == 'dif' else 'DTA [mm]')
-        else:   # 'plot'
+        else:   # 'plot' or 'none'
             plt.rcParams.update({'font.size': 16})
             fig, ax0 = plt.subplots(1, 1, figsize=(15, 8))
-        ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
-        ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
+        if USE1:
+            ax0.plot([], '+r', ms=10, label=SHEET1_NAME)
+        if USE2:
+            ax0.plot([], '.k', ms=10, label=SHEET2_NAME)
         ax0.legend()
     else:
         class _NullAx:
@@ -353,61 +375,49 @@ def run_one_file(xlsx_path, energy_label):
                 continue
 
             for depth in dl:
-                mask1 = (
-                    (df1['FS']    == fs_val) &
-                    (df1['Axis']  == axis)   &
-                    (df1['Depth'] == depth)
-                )
-                mask2 = (
-                    (df2['FS']    == fs_val) &
-                    (df2['Axis']  == axis)   &
-                    (df2['Depth'] == depth)
-                )
+                # ── extract each active curve ──────────────────────────────────
+                def _extract(df, sheet_name):
+                    """Return (y, d) for this combo, or (None, None) if unusable."""
+                    if df is None:
+                        return None, None
+                    m = (df['FS'] == fs_val) & (df['Axis'] == axis) & (df['Depth'] == depth)
+                    y = df.loc[m, 'Pos'].reset_index(drop=True)
+                    d = df.loc[m, 'Dose'].reset_index(drop=True)
+                    if len(y) == 0:
+                        return None, None
+                    if len(y) < 3:
+                        msg = f"{energy_label}  FS {fs_val} depth {depth} [{axis}]: only {len(y)} point(s) in {sheet_name}"
+                        print(f"    WARNING — {msg} — skipping.")
+                        skipped.append(msg)
+                        return None, None
+                    srt = y.argsort()
+                    y, d = y.iloc[srt].reset_index(drop=True), d.iloc[srt].reset_index(drop=True)
+                    dup = y[y.duplicated(keep=False)]
+                    if not dup.empty:
+                        msg = (f"{energy_label}  FS {fs_val} depth {depth} [{axis}]: "
+                               f"{sheet_name} duplicate Pos {sorted(dup.unique().tolist())}")
+                        print(f"    WARNING — {msg} — skipping.")
+                        skipped.append(msg)
+                        return None, None
+                    return y, d
 
-                y1 = df1.loc[mask1, 'Pos'].reset_index(drop=True)
-                d1 = df1.loc[mask1, 'Dose'].reset_index(drop=True)
-                y2 = df2.loc[mask2, 'Pos'].reset_index(drop=True)
-                d2 = df2.loc[mask2, 'Dose'].reset_index(drop=True)
+                y1, d1 = _extract(df1, SHEET1_NAME)
+                y2, d2 = _extract(df2, SHEET2_NAME)
 
-                if len(y1) == 0 or len(y2) == 0:
-                    continue   # no data for this combo — silent skip
-                if len(y1) < 3 or len(y2) < 3:
-                    msg = f"{energy_label}  FS {fs_val} depth {depth} [{axis}]: only {min(len(y1),len(y2))} point(s)"
-                    print(f"    WARNING — {msg} — skipping.")
-                    skipped.append(msg)
+                # Comparison modes require both curves; plot modes accept either.
+                if not PLOT_ONLY and (y1 is None or y2 is None):
                     continue
-
-                # Sort by position (should already be sorted, but enforce it)
-                s1 = y1.argsort()
-                y1, d1 = y1.iloc[s1].reset_index(drop=True), d1.iloc[s1].reset_index(drop=True)
-                s2 = y2.argsort()
-                y2, d2 = y2.iloc[s2].reset_index(drop=True), d2.iloc[s2].reset_index(drop=True)
-
-                # Check for duplicate positions (would crash pchip interpolation)
-                dup1 = y1[y1.duplicated(keep=False)]
-                dup2 = y2[y2.duplicated(keep=False)]
-                if not dup1.empty:
-                    msg = (f"{energy_label}  FS {fs_val} depth {depth} [{axis}]: "
-                           f"{SHEET1_NAME} duplicate Pos {sorted(dup1.unique().tolist())}")
-                    print(f"    WARNING — {msg} — skipping.")
-                    skipped.append(msg)
-                    continue
-                if not dup2.empty:
-                    msg = (f"{energy_label}  FS {fs_val} depth {depth} [{axis}]: "
-                           f"{SHEET2_NAME} duplicate Pos {sorted(dup2.unique().tolist())}")
-                    print(f"    WARNING — {msg} — skipping.")
-                    skipped.append(msg)
+                if y1 is None and y2 is None:
                     continue
 
                 # ── centering ─────────────────────────────────────────────────
-                # center() requires a pandas Series with a clean integer index (already done above)
-                if CENTER in (1, 3):
+                if CENTER in (1, 3) and y1 is not None:
                     try:
                         shift1 = center_function(y1, d1, CENTER_THRESHOLD)
                         y1 = y1 + shift1
                     except Exception as e:
                         print(f"    FS {fs_val} depth {depth}: center() curve1 failed ({e})")
-                if CENTER in (2, 3):
+                if CENTER in (2, 3) and y2 is not None:
                     try:
                         shift2 = center_function(y2, d2, CENTER_THRESHOLD)
                         y2 = y2 + shift2
@@ -415,43 +425,54 @@ def run_one_file(xlsx_path, energy_label):
                         print(f"    FS {fs_val} depth {depth}: center() curve2 failed ({e})")
 
                 # ── detector convolution ───────────────────────────────────────
-                if CONV_TARGET in ('curve1', 'both'):
+                if CONV_TARGET in ('curve1', 'both') and y1 is not None:
                     d1 = pd.Series(apply_detector_convolution(y1, d1, CONV_FWHM_CM))
-                if CONV_TARGET in ('curve2', 'both'):
+                if CONV_TARGET in ('curve2', 'both') and y2 is not None:
                     d2 = pd.Series(apply_detector_convolution(y2, d2, CONV_FWHM_CM))
 
                 # ── normalization ──────────────────────────────────────────────
                 # d1_analysis/d2_analysis are always PDD-free so 1% = 1% of CAX
                 d1_analysis = d1; d2_analysis = d2
                 if NORM == 1:
-                    if CAX_WINDOW_MM == 0:
-                        cax1 = float(d1.iloc[np.abs(np.asarray(y1)).argmin()])
-                        cax2 = float(d2.iloc[np.abs(np.asarray(y2)).argmin()])
-                    else:
-                        cax1 = float(d1[np.abs(np.asarray(y1)) <= CAX_WINDOW_MM / 10.0].mean())
-                        cax2 = float(d2[np.abs(np.asarray(y2)) <= CAX_WINDOW_MM / 10.0].mean())
-                    if cax1 > 0:
-                        d1_analysis = d1 / cax1
-                    if cax2 > 0:
-                        d2_analysis = d2 / cax2
+                    if y1 is not None:
+                        if CAX_WINDOW_MM == 0:
+                            cax1 = float(d1.iloc[np.abs(np.asarray(y1)).argmin()])
+                        else:
+                            cax1 = float(d1[np.abs(np.asarray(y1)) <= CAX_WINDOW_MM / 10.0].mean())
+                        if cax1 > 0:
+                            d1_analysis = d1 / cax1
+                    if y2 is not None:
+                        if CAX_WINDOW_MM == 0:
+                            cax2 = float(d2.iloc[np.abs(np.asarray(y2)).argmin()])
+                        else:
+                            cax2 = float(d2[np.abs(np.asarray(y2)) <= CAX_WINDOW_MM / 10.0].mean())
+                        if cax2 > 0:
+                            d2_analysis = d2 / cax2
                 elif NORM == 2:
-                    d1_analysis = d1 / d1.max(); d2_analysis = d2 / d2.max()
+                    if y1 is not None: d1_analysis = d1 / d1.max()
+                    if y2 is not None: d2_analysis = d2 / d2.max()
                 # profile scaling (after norm, independent of normalization)
-                if SCALE_TARGET in (1, 3):
+                if SCALE_TARGET in (1, 3) and y1 is not None:
                     d1_analysis = d1_analysis * SCALE_FACTOR
-                if SCALE_TARGET in (2, 3):
+                if SCALE_TARGET in (2, 3) and y2 is not None:
                     d2_analysis = d2_analysis * SCALE_FACTOR
                 # apply PDD scaling for plotting only
                 if PLOT_PDD_SCALE:
                     pdd_factor, _ = pdd_lookup_nearest(pdd_energy, depth)
-                    d1 = d1_analysis * pdd_factor
-                    d2 = d2_analysis * pdd_factor
+                    if y1 is not None: d1 = d1_analysis * pdd_factor
+                    if y2 is not None: d2 = d2_analysis * pdd_factor
                 else:
-                    d1 = d1_analysis; d2 = d2_analysis
+                    if y1 is not None: d1 = d1_analysis
+                    if y2 is not None: d2 = d2_analysis
 
                 # ── plot the curves ────────────────────────────────────────────
-                ax0.plot(y1, d1, '+r', ms=MARKER_SIZE)
-                ax0.plot(y2, d2, '.k', ms=MARKER_SIZE)
+                if y1 is not None:
+                    ax0.plot(y1, d1, '+r', ms=MARKER_SIZE)
+                if y2 is not None:
+                    ax0.plot(y2, d2, '.k', ms=MARKER_SIZE)
+
+                if PLOT_ONLY:
+                    continue
 
                 if ANALYSIS == 'plot':
                     continue
@@ -758,18 +779,23 @@ def run_one_file(xlsx_path, energy_label):
         title_tag = 'Plots Only'
 
     safe_tag = title_tag.replace(' ', '_').replace('/', '-').replace('%', 'pct')
+    # Sheet label reflects which sheets are active.
+    if USE1 and USE2:
+        _sheet_label = f'{SHEET1_NAME} vs {SHEET2_NAME}'
+    elif USE1:
+        _sheet_label = SHEET1_NAME
+    else:
+        _sheet_label = SHEET2_NAME
     if SAVE_FIGURES or SAVE_REPORT:
         axes_label = '+'.join(axes)
         fig.suptitle(
-            f'{energy_label} — {SHEET1_NAME} vs {SHEET2_NAME}  {title_tag}  [{axes_label}]',
+            f'{energy_label} — {_sheet_label}  {title_tag}  [{axes_label}]',
             fontsize=14
         )
         fig.tight_layout(rect=[0, 0, 1, 0.95])
         fig.subplots_adjust(hspace=0.45)
     if SAVE_FIGURES:
-        s1 = SHEET1_NAME.replace(' ', '')
-        s2 = SHEET2_NAME.replace(' ', '')
-        out_png = os.path.join(RESULTS_DIR, f"{s1}_{s2}_{energy_label}_{safe_tag}.png")
+        out_png = os.path.join(RESULTS_DIR, f"{_s1}_{_s2}_{energy_label}_{safe_tag}.png")
         fig.savefig(out_png, dpi=DPI, bbox_inches='tight')
         print(f"  Figure saved: {out_png}")
 
@@ -863,7 +889,45 @@ def main():
 
     # ── save summary CSV ──────────────────────────────────────────────────────
     if not all_results:
-        print("\nNo results to save.")
+        if SAVE_REPORT and all_figs:
+            # Plot-only / single-sheet mode: figures-only report (no stats front page).
+            from reportlab.lib.pagesizes import letter as rl_letter
+            from reportlab.pdfgen import canvas as rl_canvas
+            from reportlab.lib.utils import ImageReader
+
+            pdf_path = os.path.join(PROFILE_DIR, f"{s1}_{s2}_profile_plots_{timestamp}.pdf")
+            rl_w, rl_h = rl_letter
+            c = rl_canvas.Canvas(pdf_path, pagesize=rl_letter)
+            for energy_label, fig in all_figs:
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', dpi=REPORT_DPI, bbox_inches='tight')
+                buf.seek(0)
+                img = ImageReader(buf)
+                iw, ih = img.getSize()
+                fig_w = rl_w - 72
+                fig_h = fig_w * (ih / float(iw))
+                top = rl_h - 36
+                if top - fig_h < 18:
+                    fig_h = max(top - 18, 10)
+                    fig_w = fig_h * (iw / float(ih))
+                c.drawImage(img, 36, top - fig_h, width=fig_w, height=fig_h)
+                c.showPage()
+                # individual per-energy PDF
+                energy_pdf = os.path.join(REPORTS_DIR, f"{s1}_{s2}_{energy_label}.pdf")
+                ec = rl_canvas.Canvas(energy_pdf, pagesize=rl_letter)
+                ec.drawImage(img, 36, top - fig_h, width=fig_w, height=fig_h)
+                ec.save()
+                plt.close(fig)
+            c.save()
+            print(f"PDF (plots only) saved: {pdf_path}")
+            if platform.system() == 'Windows':
+                os.startfile(pdf_path)
+            elif platform.system() == 'Darwin':
+                subprocess.call(['open', pdf_path])
+            else:
+                subprocess.call(['xdg-open', pdf_path])
+        else:
+            print("\nNo results to save.")
         return
 
     # Normalise columns — fill missing metric columns with NaN

@@ -1100,6 +1100,8 @@ def _plot():
             tdf = traces[0][1]
             x_vals, y_vals, M = _matrix(tdf)
             ax = fig.add_subplot(111, projection='3d')
+            ax.view_init(elev=25, azim=-135)   # put (0,0) at front
+
             X, Y = np.meshgrid(x_vals, y_vals)
             ax.plot_surface(X, Y, M, cmap='viridis', alpha=0.85,
                             edgecolor='none', antialiased=True)
@@ -1255,6 +1257,8 @@ def _plot():
         if mode == 'diff':
             # Repurpose the original `fig` for the A&B overlay
             ax_top = fig.add_subplot(111, projection='3d')
+            ax_top.view_init(elev=25, azim=-135)   # put (0,0) at front
+
             ax_top.plot_surface(X, Y, Ma, color='tab:blue',  alpha=0.55,
                                 edgecolor='none', antialiased=True)
             ax_top.plot_surface(X, Y, Mb, color='tab:orange', alpha=0.55,
@@ -1280,6 +1284,8 @@ def _plot():
             except Exception:
                 pass
             ax_bot = fig2.add_subplot(111, projection='3d')
+            ax_bot.view_init(elev=25, azim=-135)   # put (0,0) at front
+
             surf = ax_bot.plot_surface(X, Y, pct, cmap='RdBu_r', alpha=1.0,
                                        edgecolor='none', antialiased=True,
                                        vmin=-zlim if zlim else None,
@@ -1323,6 +1329,8 @@ def _plot():
             _print_diff_matrix(label_a, label_b, x_vals, y_vals, Ma, Mb)
         else:  # overlay only — both surfaces on one plot
             ax = fig.add_subplot(111, projection='3d')
+            ax.view_init(elev=25, azim=-135)   # put (0,0) at front
+
             ax.plot_surface(X, Y, Ma, color='tab:blue',  alpha=0.5,
                             edgecolor='none', antialiased=True)
             ax.plot_surface(X, Y, Mb, color='tab:orange', alpha=0.5,
@@ -1716,6 +1724,8 @@ def _add_figure_pages(pdf, dfA, dfB, label_a, label_b, zlim, crit,
     # ── Page 1: 3D A & B overlay ──
     fig1 = plt.figure(figsize=(9, 7))
     ax = fig1.add_subplot(111, projection='3d')
+    ax.view_init(elev=25, azim=-135)   # put (0,0) at front
+
     ax.plot_surface(X, Y, Ma, color='tab:blue',  alpha=0.55, edgecolor='none', antialiased=True)
     ax.plot_surface(X, Y, Mb, color='tab:orange', alpha=0.55, edgecolor='none', antialiased=True)
     ax.scatter(dfA['FS_X'], dfA['FS_Y'], dfA['Scp'], c='tab:blue',  s=10)
@@ -1728,6 +1738,8 @@ def _add_figure_pages(pdf, dfA, dfB, label_a, label_b, zlim, crit,
     # ── Page 2: 3D % difference ──
     fig2 = plt.figure(figsize=(9, 7))
     ax2 = fig2.add_subplot(111, projection='3d')
+    ax2.view_init(elev=25, azim=-135)   # put (0,0) at front
+
     surf = ax2.plot_surface(X, Y, pct, cmap='RdBu_r', alpha=1.0,
                             edgecolor='none', antialiased=True,
                             vmin=-zlim if zlim else None,

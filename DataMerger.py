@@ -21,12 +21,12 @@ Workflow:
 
 import os
 import tkinter as tk
-from tkinter import filedialog, ttk, messagebox
+from tkinter import filedialog, ttk, messagebox, simpledialog
 
 import pandas as pd
 
 
-DEFAULT_DEST = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
+DEFAULT_DEST = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data"
 
 DEPTH_SHEET_CANDIDATES   = ['Depth Scans']
 PROFILE_SHEET_CANDIDATES = ['Profile Scans', 'Profiles']
@@ -37,15 +37,66 @@ UNCHECKED = '☐'   # ☐
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _read_first_matching_sheet(xlsx_path, candidates):
+def _classify_table(df):
+    """Classify a single flat table: 'profile' if it has an Axis column, else 'depth'."""
+    return 'profile' if 'Axis' in df.columns else 'depth'
+
+
+def _load_source_dfs(source_path, status_cb=None):
+    """Return {'depth': df|None, 'profile': df|None} from an xlsx or csv source.
+
+    An xlsx normally holds a depth sheet and/or a profile sheet (named in
+    DEPTH/PROFILE_SHEET_CANDIDATES). A csv is a single flat table, classified
+    as profile when it has an 'Axis' column and depth otherwise.
+
+    If an xlsx has none of the expected tab names, we don't fail — we warn and
+    read whatever data-like sheets are present, classifying each by its columns.
+    """
+    def _warn(msg):
+        if status_cb:
+            status_cb(msg)
+
+    result = {'depth': None, 'profile': None}
+    ext = os.path.splitext(source_path)[1].lower()
+
+    if ext == '.csv':
+        try:
+            df = pd.read_csv(source_path)
+        except Exception as e:
+            raise RuntimeError(f"Cannot open source file: {e}")
+        result[_classify_table(df)] = df
+        return result
+
     try:
-        xl = pd.ExcelFile(xlsx_path)
+        xl = pd.ExcelFile(source_path)
     except Exception as e:
         raise RuntimeError(f"Cannot open source file: {e}")
-    for name in candidates:
-        if name in xl.sheet_names:
-            return pd.read_excel(xlsx_path, sheet_name=name)
-    return None
+
+    for kind, candidates in (('depth', DEPTH_SHEET_CANDIDATES),
+                             ('profile', PROFILE_SHEET_CANDIDATES)):
+        for name in candidates:
+            if name in xl.sheet_names:
+                result[kind] = pd.read_excel(xl, sheet_name=name)
+                break
+
+    # Fallback: none of the expected tabs were found — warn and classify by columns.
+    if result['depth'] is None and result['profile'] is None:
+        _warn("  WARNING: none of the expected tabs "
+              f"{DEPTH_SHEET_CANDIDATES + PROFILE_SHEET_CANDIDATES} were found; "
+              "reading sheets by their columns instead.")
+        for name in xl.sheet_names:
+            df = pd.read_excel(xl, sheet_name=name)
+            if 'Energy' not in df.columns or 'SSD' not in df.columns:
+                _warn(f"    Skipping tab '{name}' — no Energy/SSD columns.")
+                continue
+            kind = _classify_table(df)
+            if result[kind] is None:
+                result[kind] = df
+                _warn(f"    Using tab '{name}' as {kind} data.")
+            else:
+                _warn(f"    Skipping tab '{name}' — already have {kind} data.")
+
+    return result
 
 
 def _format_ssd(ssd):
@@ -108,13 +159,61 @@ def _check_scan_status(dest_path, sheet_name, key_dict, dest_cache):
     return 'EXISTS' if _scan_mask(df, key_dict).any() else 'NEW SCAN'
 
 
+def _ws_to_df(ws):
+    """Build a DataFrame from an openpyxl worksheet (first row = header).
+
+    Lets us reuse the workbook we already loaded for writing instead of
+    parsing the destination file a second time with pd.read_excel.
+    """
+    rows = ws.iter_rows(values_only=True)
+    try:
+        header = next(rows)
+    except StopIteration:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=list(header))
+    return df.dropna(how='all').reset_index(drop=True)
+
+
 # ── Read: scan source, classify each scan against destination ────────────────
 
-def read_scans(source_path, dest_folder, machine_name, status_cb):
+def _coerce_ssd(value):
+    """SSD entered as text → number when possible (so it matches stored values)."""
+    try:
+        f = float(value)
+        return int(f) if f.is_integer() else f
+    except (TypeError, ValueError):
+        return value
+
+
+def _fill_missing_keys(df, kind, prompt_cb, prompted, status_cb):
+    """Ensure df has Energy and SSD. Missing/blank ones are requested via
+    prompt_cb and applied to every row. `prompted` caches answers so each
+    field is asked once across all source tables. Returns df, or None if the
+    user cancels a required prompt.
+    """
+    for field in ('Energy', 'SSD'):
+        missing = field not in df.columns or df[field].isna().all()
+        if not missing:
+            continue
+        if field not in prompted:
+            value = prompt_cb(field, kind) if prompt_cb else None
+            if value is None or str(value).strip() == '':
+                status_cb(f"  WARNING: no '{field}' given for {kind} data — skipping.")
+                return None
+            prompted[field] = _coerce_ssd(value) if field == 'SSD' else str(value).strip()
+        df = df.copy()
+        df[field] = prompted[field]
+        status_cb(f"  Applied {field}={prompted[field]} to all {kind} scans.")
+    return df
+
+
+def read_scans(source_path, dest_folder, machine_name, status_cb, prompt_cb=None):
     """Return (scans, source_dfs).
 
     scans: list of dicts with keys {kind, keys, key_cols, dest_file, dest_path, status}
     source_dfs: dict {'depth': df, 'profile': df} for downstream filtering
+    prompt_cb: optional (field, kind) -> str|None, used to ask the user for an
+        Energy/SSD value when the source doesn't specify one.
     """
     if not os.path.isfile(source_path):
         raise RuntimeError("Source file not found.")
@@ -124,23 +223,25 @@ def read_scans(source_path, dest_folder, machine_name, status_cb):
     if not machine_name:
         raise RuntimeError("Machine name is required.")
 
-    df_depth   = _read_first_matching_sheet(source_path, DEPTH_SHEET_CANDIDATES)
-    df_profile = _read_first_matching_sheet(source_path, PROFILE_SHEET_CANDIDATES)
+    source_dfs = _load_source_dfs(source_path, status_cb)
+    df_depth   = source_dfs['depth']
+    df_profile = source_dfs['profile']
 
     if df_depth is None and df_profile is None:
-        raise RuntimeError("Source has no recognised data sheets "
-                           f"({DEPTH_SHEET_CANDIDATES + PROFILE_SHEET_CANDIDATES}).")
-
-    source_dfs = {'depth': df_depth, 'profile': df_profile}
+        raise RuntimeError("Source has no recognised data. Expected an xlsx with "
+                           f"{DEPTH_SHEET_CANDIDATES + PROFILE_SHEET_CANDIDATES} "
+                           "sheet(s), or a csv with the same columns.")
     scans = []
     dest_cache = {}
+    prompted = {}
 
     for kind, df in (('depth', df_depth), ('profile', df_profile)):
         if df is None or df.empty:
             continue
-        if 'Energy' not in df.columns or 'SSD' not in df.columns:
-            status_cb(f"  WARNING: {kind} sheet missing 'Energy' or 'SSD' — skipping.")
+        df = _fill_missing_keys(df, kind, prompt_cb, prompted, status_cb)
+        if df is None:
             continue
+        source_dfs[kind] = df   # keep filled-in columns for the write step
         key_cols = _scan_key_columns(kind, df)
         if 'Energy' not in key_cols or 'SSD' not in key_cols:
             continue
@@ -185,21 +286,22 @@ def write_scans(scans, source_dfs, machine_name, conflict_action, status_cb):
         by_dest.setdefault(s['dest_path'], []).append(s)
 
     from openpyxl import load_workbook
-    from openpyxl.utils.dataframe import dataframe_to_rows
 
     written = replaced = appended = skipped = created = 0
     for dest_path, scan_list in by_dest.items():
-        # Load only the existing target sheet (if file + sheet both exist)
+        # Load the destination workbook once (used both to read the existing
+        # machine sheet and to write back) — avoids parsing the file twice.
+        wb = None
         old_df = None
         file_was_new = not os.path.exists(dest_path)
         if not file_was_new:
             try:
-                xl = pd.ExcelFile(dest_path)
-                if machine_name in xl.sheet_names:
-                    old_df = pd.read_excel(xl, sheet_name=machine_name)
+                wb = load_workbook(dest_path)
             except Exception as e:
                 status_cb(f"  ERROR reading {os.path.basename(dest_path)}: {e}")
                 continue
+            if machine_name in wb.sheetnames:
+                old_df = _ws_to_df(wb[machine_name])
 
         # If skipping EXISTS scans, drop them from the work list now
         if conflict_action == 'skip' and old_df is not None:
@@ -247,11 +349,11 @@ def write_scans(scans, source_dfs, machine_name, conflict_action, status_cb):
                     final_df.to_excel(w, sheet_name=machine_name, index=False)
                 created += 1
             else:
-                wb = load_workbook(dest_path)
                 if machine_name in wb.sheetnames:
                     del wb[machine_name]
                 ws = wb.create_sheet(machine_name)
-                for row in dataframe_to_rows(final_df, index=False, header=True):
+                ws.append(list(final_df.columns))
+                for row in final_df.itertuples(index=False, name=None):
                     ws.append(row)
                 wb.save(dest_path)
         except Exception as e:
@@ -292,7 +394,10 @@ def _log(msg):
 
 
 def choose_source():
-    p = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xls"), ("All", "*.*")])
+    p = filedialog.askopenfilename(filetypes=[("Excel or CSV", "*.xlsx *.xls *.csv"),
+                                              ("Excel", "*.xlsx *.xls"),
+                                              ("CSV", "*.csv"),
+                                              ("All", "*.*")])
     if p:
         source_var.set(p)
 
@@ -324,9 +429,16 @@ def do_read():
     tree.delete(*tree.get_children())
     _scans = []
     _source_dfs = {}
+    def _prompt_value(field, kind):
+        return simpledialog.askstring(
+            f"{field} required",
+            f"The {kind} data has no '{field}'.\n"
+            f"Enter the {field} to apply to all {kind} scans:",
+            parent=root)
+
     try:
         scans, source_dfs = read_scans(source_var.get(), dest_var.get(),
-                                       machine_var.get(), _log)
+                                       machine_var.get(), _log, _prompt_value)
     except Exception as e:
         _log(f"\n[ERROR] {e}")
         messagebox.showerror("Error", str(e))

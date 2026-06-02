@@ -36,7 +36,7 @@ FILE_MODE = 'flat'
 # 'flat'         : BASE_PATH is a single folder of xlsx files; energy label is
 #                  parsed from each filename.
 
-BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\90 SSD"
+BASE_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\Combined Consortium Data\100 SSD"
 
 # Where outputs (figures, reports, summary xlsx) get written. Set to None to use
 # BASE_PATH (legacy behavior); set to a short path like r"C:\OFresults" to keep
@@ -46,7 +46,7 @@ OUTPUT_BASE = None
 FILE_FILTER = '*Profile*.xlsx'    # glob used in 'flat' mode only
 
 SHEET1_NAME = "SN 21"             # reference / measured sheet name; set 'none' to skip
-SHEET2_NAME = "none"         # comparison sheet name; set 'none' to skip
+SHEET2_NAME = "TPS SN 21"         # comparison sheet name; set 'none' to skip
 
 # Data selection — 'all' means use all common values found in each file
 FIELD_SIZES = 'all'               # e.g. [5.0, 10.0, 20.0]  or  'all'
@@ -55,9 +55,9 @@ DEPTHS_CM   = 'all'                # e.g. [1.5, 5.0, 10.0]   or  'all'
 
 DEPTH_ROUND_CM = 0.1               # rounding resolution for depth matching [cm]
 
-ANALYSIS      = 'none'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg', or 'none' (plot only)
-DD_CRITERIA   = 1.0                # dose difference threshold [%]
-DTA_CRITERIA  = 0.1                # DTA threshold [cm]  (2 mm)
+ANALYSIS      = 'mppg'             # 'comp', 'dif', 'dist', 'plot', 'gam', 'mppg', or 'none' (plot only)
+DD_CRITERIA   = 2.0                # dose difference threshold [%]
+DTA_CRITERIA  = 0.2                # DTA threshold [cm]  (2 mm)
 
 # Normalization
 NORM = 1
@@ -88,7 +88,7 @@ CONV_FWHM_CM = 0.45                 # detector FWHM [cm]; 0 = disabled
 CONV_TARGET  = 'curve2'              # 'none', 'curve1', 'curve2', or 'both'
 
 # MPPG-specific parameters (used only when ANALYSIS == 'mppg')
-MPPG_DDTAIL  = 1                 # tail dose-difference criterion [% of Dmax]
+MPPG_DDTAIL  = 2                 # tail dose-difference criterion [% of Dmax]
 MPPG_PEN_CM  = 0.25                # penumbra half-width [cm]  (GUI default: pupper_entry="0.5" / 2)
 MPPG_OVR_CM  = 1.0                 # overlap buffer zone [cm]  (GUI default: pulower_entry="1")
 MPPG_DIAG_FACTOR = 0.80            # diagonal field size factor (GUI default: 0.80)

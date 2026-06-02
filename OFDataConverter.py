@@ -33,7 +33,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 
 
 DEFAULT_DEST = (r"C:\Users\nknutson\OneDrive - Washington University in St. Louis"
-                r"\NGDS QA Consortium\Combined Consortium Data\Processed Combined Data"
+                r"\NGDS QA Consortium\Combined Consortium Data"
                 r"\90 SSD\OF_Data\NGDSOutputFactorData.xlsx")
 DEST_SHEET   = 'OutputFactors'
 
@@ -46,51 +46,92 @@ NORMALIZED_TOL = 1e-3   # how close to 1.0 the ref cell must be to skip renormal
 
 # ── Wide → long conversion ───────────────────────────────────────────────────
 
-def _is_numeric(v):
+def _to_float(v):
+    """Try to coerce to float, tolerating comma decimals ('0,762') and stray whitespace.
+    Returns None on failure.
+    """
+    if v is None:
+        return None
     try:
         f = float(v)
     except (TypeError, ValueError):
-        return False
-    return f == f   # excludes NaN (NaN != NaN)
+        if isinstance(v, str):
+            s = v.strip().replace(',', '.')
+            try:
+                f = float(s)
+            except ValueError:
+                return None
+        else:
+            return None
+    return f if f == f else None   # excludes NaN
+
+
+def _is_numeric(v):
+    return _to_float(v) is not None
 
 
 def wide_to_long(df_raw):
     """Convert a wide 2D (Y rows × X columns) sheet into a long DataFrame
     with FS_X, FS_Y, Scp columns. Auto-detects header row/column.
+    Tolerates label cells in the top-left corner and comma decimal separators.
     """
     arr = df_raw.values
     n_rows, n_cols = arr.shape
 
-    # Find the X header row: first row where columns 1..N are mostly numeric.
+    # Find the X header row + the column where numeric X values start.
+    # Some pastes have label cells like "6X" / "X" in the top-left corner,
+    # so we scan for the first row whose tail (col 1..N) is mostly numeric
+    # and remember where the numeric run starts.
     x_header_row = None
+    x_start_col  = 1
     for r in range(min(n_rows, 6)):
         if n_cols < 2:
             continue
-        numeric_count = sum(_is_numeric(v) for v in arr[r, 1:])
-        if numeric_count >= max(3, int(0.6 * (n_cols - 1))):
-            x_header_row = r
+        for start in range(1, n_cols):
+            tail = arr[r, start:]
+            if len(tail) < 3:
+                continue
+            numeric_count = sum(_is_numeric(v) for v in tail)
+            if numeric_count >= max(3, int(0.6 * len(tail))):
+                x_header_row = r
+                x_start_col  = start
+                break
+        if x_header_row is not None:
             break
     if x_header_row is None:
         raise RuntimeError("Could not find a numeric X-axis header row.")
 
     x_vals, x_cols = [], []
-    for c in range(1, n_cols):
-        v = arr[x_header_row, c]
-        if _is_numeric(v):
-            x_vals.append(float(v))
+    for c in range(x_start_col, n_cols):
+        v = _to_float(arr[x_header_row, c])
+        if v is not None:
+            x_vals.append(v)
             x_cols.append(c)
     if not x_vals:
         raise RuntimeError("No numeric X values found.")
 
+    # Find the Y column: first column at/before x_start_col with mostly numeric values
+    # in rows after x_header_row.
+    y_col = None
+    for c in range(min(x_start_col, n_cols)):
+        col_vals = arr[x_header_row + 1:, c]
+        if len(col_vals) == 0:
+            continue
+        if sum(_is_numeric(v) for v in col_vals) >= max(3, int(0.6 * len(col_vals))):
+            y_col = c
+            break
+    if y_col is None:
+        y_col = 0   # fall back to leftmost column
+
     rows = []
     for r in range(x_header_row + 1, n_rows):
-        y = arr[r, 0]
-        if not _is_numeric(y):
+        y = _to_float(arr[r, y_col])
+        if y is None:
             continue
         for c, x in zip(x_cols, x_vals):
-            v = arr[r, c]
-            if _is_numeric(v):
-                rows.append({'FS_X': x, 'FS_Y': float(y), 'Scp': float(v)})
+            v = _to_float(arr[r, c])
+            if v is not None:
+                rows.append({'FS_X': x, 'FS_Y': y, 'Scp': v})
     if not rows:
         raise RuntimeError("No data rows below the X header.")
     return pd.DataFrame(rows)

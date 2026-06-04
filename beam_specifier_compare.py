@@ -71,9 +71,37 @@ def metric_dmax_depth(df, fs, depth_cm):
     return float(fine[int(np.argmax(vals))])
 
 
+def metric_tmr_20_10(df, fs, depth_cm):
+    """TMR(20,10) beam quality index, derived from PDD data.
+
+    PDD20,10 = D(20 cm) / D(10 cm) on the Z axis (the dmax normalization
+    cancels in the ratio), converted via the Followill et al. (1998) fit:
+        TMR20,10 = 1.2661 * PDD20,10 - 0.0595
+    Conventionally a 10x10 field at SSD 100 cm; the GUI field size is used as
+    given so it can be checked at other sizes. `depth_cm` is ignored — the
+    depths are fixed at 10 and 20 cm.
+    """
+    y, d = _z_axis_sorted(df, fs)
+    if y is None:
+        return float('nan')
+    # Both reference depths must be inside the scan — don't extrapolate.
+    if float(y.min()) > 10.0 or float(y.max()) < 20.0:
+        return float('nan')
+    try:
+        pchip = interp.pchip(y, d)
+        d10 = float(pchip(10.0))
+        d20 = float(pchip(20.0))
+    except Exception:
+        return float('nan')
+    if d10 <= 0:
+        return float('nan')
+    return 1.2661 * (d20 / d10) - 0.0595
+
+
 METRICS = {
     "PDD at depth": {"fn": metric_pdd_at_depth, "file_keyword": "PDD", "unit": "%"},
     "Depth of dmax": {"fn": metric_dmax_depth,  "file_keyword": "PDD", "unit": "cm"},
+    "TMR 20/10":     {"fn": metric_tmr_20_10,   "file_keyword": "PDD", "unit": ""},
 }
 
 
@@ -442,8 +470,10 @@ def run_compare():
         ax.set_ylabel(f"{metric_name} [{unit}]" if unit else metric_name)
         ax.grid(axis='y', linestyle=':', alpha=0.4)
         # Pad y-range a bit around the data so the box isn't hugging the edges.
+        # Floor scales with the value magnitude (not an absolute 0.05) so small
+        # dimensionless metrics like TMR 20/10 (~0.7) aren't dwarfed by the pad.
         vmin, vmax = min(vals), max(vals)
-        pad = max((vmax - vmin) * 0.3, 0.05)
+        pad = max((vmax - vmin) * 0.3, abs(vmax) * 0.01)
         ax.set_ylim(vmin - pad, vmax + pad)
 
     # Hide any unused axes (when n isn't a multiple of ncols)

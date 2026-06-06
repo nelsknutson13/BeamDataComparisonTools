@@ -41,6 +41,8 @@ OUTLIER_MIN_N = 15   # only show 1.5*IQR fliers when N >= this
 
 MARKER_COLOR = "black"   # or "#444", "0.3", etc.
 
+DEFAULT_TOL = 0.05   # default acceptance tolerance (±5%), drawn as dashed lines around the 1.0 baseline
+
 # ---------- Data helpers ----------
 def read_table(path: str) -> pd.DataFrame:
     ext = os.path.splitext(path)[1].lower()
@@ -178,7 +180,18 @@ def _draw_tukey_fliers_threshold(ax, series, positions, min_n, color, markersize
         )
 
 
-def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution"):
+def _draw_tolerance(ax, tol: float = DEFAULT_TOL):
+    """Dashed lines at 1±tol marking the acceptance tolerance band."""
+    for y in (1.0 - tol, 1.0 + tol):
+        ax.axhline(y, linestyle="--", color="0.5", linewidth=0.9, zorder=1)
+
+
+def _tolerance_handle(tol: float = DEFAULT_TOL):
+    return Line2D([0], [0], linestyle="--", color="0.5",
+                  label=f"Tolerance ±{tol * 100:g}%")
+
+
+def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution", show_tolerance: bool = True, tol: float = DEFAULT_TOL):
 
 
     data = long.copy()
@@ -216,6 +229,8 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
 
     # Baseline at 1.0
     ax.axhline(1.0, linestyle="--", color="black", linewidth=1.0)
+    if show_tolerance:
+        _draw_tolerance(ax, tol)
 
     # Overlay sample points with shared marker map
     marker_map = MARKER_MAP
@@ -266,6 +281,8 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
     handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
                           color=MARKER_COLOR, label=r"Outlier (1.5$\times$ IQR, only if N $\geq$ %d)" % OUTLIER_MIN_N))
+    if show_tolerance:
+        handles.append(_tolerance_handle(tol))
     ax.legend(handles=handles, loc="best", frameon=True)
 
     plt.tight_layout()
@@ -277,7 +294,9 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                      show_dates: bool = False,
                      show_sn_labels: bool = False,
                      show_energy_labels: bool = False,
-                     ref_label: str = "Institution"):
+                     ref_label: str = "Institution",
+                     show_tolerance: bool = True,
+                     tol: float = DEFAULT_TOL):
 
 
     data = long.copy()
@@ -334,6 +353,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
 
     # Baseline at 1.0 (and use black so legend matches)
     ax.axhline(1.0, linestyle="--", color="black", linewidth=1.0)
+    if show_tolerance:
+        _draw_tolerance(ax, tol)
 
     # Overlay sample points with shared marker map
     marker_map = MARKER_MAP
@@ -392,6 +413,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
     handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
                           color=MARKER_COLOR, label=r"Outlier (1.5$\times$ IQR, only if N $\geq$ %d)" % OUTLIER_MIN_N))
+    if show_tolerance:
+        handles.append(_tolerance_handle(tol))
 
     ax.legend(handles=handles, loc="best", frameon=True)
 
@@ -462,7 +485,36 @@ def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True):
 
     if verbose:
         print("\n=== Analysis B: Mixed Effects on Delta = Ratio - 1.00 ===")
-        print(res.summary())
+        # statsmodels rounds to 3 decimals, so tiny variances print as 0.000.
+        # On the variance-component rows only (they contain 'Var'), show
+        # '<0.001' instead — and replace '0.000 ' (incl. one trailing space) so
+        # the column stays the same width. Coefficient rows are left untouched.
+        summary_lines = res.summary().as_text().split("\n")
+        for i, ln in enumerate(summary_lines):
+            if "Var" in ln and "0.000 " in ln:
+                summary_lines[i] = ln.replace("0.000 ", "<0.001", 1)
+        print("\n".join(summary_lines))
+
+        # The summary table rounds variances to 3 decimals, so small (but
+        # nonzero) random-effect variances print as 0.000. Re-report them at
+        # full precision and as standard deviations in % (sqrt of variance,
+        # ×100 since Delta is in fraction units) — far easier to interpret.
+        def _fmt_var(label, var):
+            var = float(var)
+            sd_pct = np.sqrt(var) * 100 if var > 0 else 0.0
+            print(f"  {label:<22} var={var:.3e}   SD={sd_pct:.4f}%")
+
+        print("\nVariance components (full precision):")
+        _fmt_var("Residual (Scale)", res.scale)
+        try:
+            _fmt_var("Group (SN)", res.cov_re.iloc[0, 0])
+        except Exception as e:
+            print(f"  Group (SN) var unavailable: {e}")
+        try:
+            for name, v in zip(vc.keys(), np.atleast_1d(res.vcomp)):
+                _fmt_var(name, v)
+        except Exception as e:
+            print(f"  Variance components unavailable: {e}")
 
         # system-specific deltas & 95% CI
         params = res.params
@@ -503,7 +555,9 @@ def make_plots(df: pd.DataFrame,
                show_dates: bool = False,
                show_sn_labels: bool = False,
                show_energy_labels: bool = False,
-               normalize_to: str = "Institution"):
+               normalize_to: str = "Institution",
+               show_tolerance: bool = True,
+               tolerance: float = DEFAULT_TOL):
 
     long, energies = to_long(df)
 
@@ -542,7 +596,8 @@ def make_plots(df: pd.DataFrame,
     # Plots
     if show_system:
         _system_boxplot(long_filt, show_dates=show_dates, show_sn_labels=show_sn_labels,
-                        show_energy_labels=show_energy_labels, ref_label=ref_label)
+                        show_energy_labels=show_energy_labels, ref_label=ref_label,
+                        show_tolerance=show_tolerance, tol=tolerance)
 
     if show_sn:
         _grouped_boxplot(
@@ -551,7 +606,9 @@ def make_plots(df: pd.DataFrame,
             energies_order=energies,
             show_dates=show_dates,
             show_energy_labels=show_energy_labels,
-            ref_label=ref_label
+            ref_label=ref_label,
+            show_tolerance=show_tolerance,
+            tol=tolerance
         )
 
 
@@ -563,7 +620,9 @@ def make_plots(df: pd.DataFrame,
             show_dates=show_dates,
             show_sn_labels=show_sn_labels,
             show_energy_labels=show_energy_labels,
-            ref_label=ref_label
+            ref_label=ref_label,
+            show_tolerance=show_tolerance,
+            tol=tolerance
         )
 
 
@@ -574,7 +633,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Output Round Robin — Boxplots")
-        self.geometry("720x570")  # taller to fit 3 listboxes + normalize dropdown
+        self.geometry("720x600")  # taller to fit 3 listboxes + normalize dropdown + tolerance toggle
         pad = {"padx": 8, "pady": 6}
 
         ttk.Label(self, text="Data file (XLSX/CSV):").grid(row=0, column=0, sticky="w", **pad)
@@ -589,6 +648,8 @@ class App(tk.Tk):
         self.show_dates = tk.BooleanVar(value=False)
         self.show_sn_labels = tk.BooleanVar(value=False)
         self.show_energy_labels = tk.BooleanVar(value=False)
+        self.show_tolerance = tk.BooleanVar(value=True)
+        self.tol_var = tk.StringVar(value="5")
 
         ttk.Checkbutton(
             self, text="System boxplot (all data)",
@@ -611,27 +672,30 @@ class App(tk.Tk):
         ).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(self, text="Show SN labels (System + Energy plots)", variable=self.show_sn_labels).grid(row=5, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(self, text="Show Energy labels (System plot only)", variable=self.show_energy_labels).grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(self, text="Show tolerance  ±", variable=self.show_tolerance).grid(row=7, column=0, sticky="e", **pad)
+        ttk.Entry(self, textvariable=self.tol_var, width=6).grid(row=7, column=1, sticky="w", **pad)
+        ttk.Label(self, text="%").grid(row=7, column=1, sticky="w", padx=(60, 0))
 
         # ---- System selection ----
         ttk.Label(self, text="Select System(s) for global filter:").grid(
-            row=7, column=0, columnspan=3, sticky="w", **pad
+            row=8, column=0, columnspan=3, sticky="w", **pad
         )
         self.system_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
-        self.system_listbox.grid(row=8, column=0, columnspan=3, sticky="nsew", **pad)
+        self.system_listbox.grid(row=9, column=0, columnspan=3, sticky="nsew", **pad)
 
         # ---- SN selection ----
         ttk.Label(self, text="Select SN(s) for SN-grouped plot:").grid(
-            row=9, column=0, columnspan=3, sticky="w", **pad
+            row=10, column=0, columnspan=3, sticky="w", **pad
         )
         self.sn_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
-        self.sn_listbox.grid(row=10, column=0, columnspan=3, sticky="nsew", **pad)
+        self.sn_listbox.grid(row=11, column=0, columnspan=3, sticky="nsew", **pad)
 
         # ---- Energy selection ----
         ttk.Label(self, text="Select Energy(ies) for Energy-grouped plot:").grid(
-            row=11, column=0, columnspan=3, sticky="w", **pad
+            row=12, column=0, columnspan=3, sticky="w", **pad
         )
         self.energy_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
-        self.energy_listbox.grid(row=12, column=0, columnspan=3, sticky="nsew", **pad)
+        self.energy_listbox.grid(row=13, column=0, columnspan=3, sticky="nsew", **pad)
 
         # backing lists for listbox indices
         self.system_values = []
@@ -639,15 +703,15 @@ class App(tk.Tk):
         self.energy_values = []
 
         # ---- Normalize-to selection ----
-        ttk.Label(self, text="Normalize to:").grid(row=13, column=0, sticky="w", **pad)
+        ttk.Label(self, text="Normalize to:").grid(row=14, column=0, sticky="w", **pad)
         self.normalize_var = tk.StringVar(value="Institution")
         self.normalize_combo = ttk.Combobox(self, textvariable=self.normalize_var,
                                              state="readonly", width=40)
         self.normalize_combo["values"] = ["Institution"]
-        self.normalize_combo.grid(row=13, column=1, sticky="w", **pad)
+        self.normalize_combo.grid(row=14, column=1, sticky="w", **pad)
 
         # Plot button
-        ttk.Button(self, text="Plot", command=self.plot).grid(row=14, column=0, columnspan=3, **pad)
+        ttk.Button(self, text="Plot", command=self.plot).grid(row=15, column=0, columnspan=3, **pad)
 
         # populate lists from default file if possible
         self.populate_lists_from_file()
@@ -761,6 +825,15 @@ class App(tk.Tk):
                 if idxs:
                     energy_filter = [self.energy_values[i] for i in idxs]
 
+            # ---- Tolerance (% -> fraction) ----
+            tolerance = DEFAULT_TOL
+            if self.show_tolerance.get():
+                try:
+                    tolerance = float(self.tol_var.get()) / 100.0
+                except ValueError:
+                    messagebox.showerror("Error", "Tolerance must be a number (percent).")
+                    return
+
             make_plots(df,
                show_system=self.do_system.get(),
                show_sn=self.do_sn.get(),
@@ -771,7 +844,9 @@ class App(tk.Tk):
                show_dates=self.show_dates.get(),
                show_sn_labels=self.show_sn_labels.get(),
                show_energy_labels=self.show_energy_labels.get(),
-               normalize_to=self.normalize_var.get())
+               normalize_to=self.normalize_var.get(),
+               show_tolerance=self.show_tolerance.get(),
+               tolerance=tolerance)
         except Exception as e:
             messagebox.showerror("Plot error", str(e))
 

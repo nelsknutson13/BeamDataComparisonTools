@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MultipleLocator
 import statsmodels.formula.api as smf
 
 # ---------- Config ----------
@@ -42,6 +43,11 @@ OUTLIER_MIN_N = 15   # only show 1.5*IQR fliers when N >= this
 MARKER_COLOR = "black"   # or "#444", "0.3", etc.
 
 DEFAULT_TOL = 0.05   # default acceptance tolerance (±5%), drawn as dashed lines around the 1.0 baseline
+
+# Default y-axis range and tick spacing, all in PERCENT around the 1.0 baseline.
+DEFAULT_YRANGE_PCT = 7.0    # y-limits = 1 ± 7%
+DEFAULT_MAJOR_PCT  = 1.0    # major tick every 1%
+DEFAULT_MINOR_PCT  = 0.5    # minor tick every 0.5%
 
 # ---------- Data helpers ----------
 def read_table(path: str) -> pd.DataFrame:
@@ -191,7 +197,22 @@ def _tolerance_handle(tol: float = DEFAULT_TOL):
                   label=f"Tolerance ±{tol * 100:g}%")
 
 
-def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution", show_tolerance: bool = True, tol: float = DEFAULT_TOL):
+def _apply_yaxis(ax, range_pct=DEFAULT_YRANGE_PCT,
+                 major_pct=DEFAULT_MAJOR_PCT, minor_pct=DEFAULT_MINOR_PCT):
+    """Set y-limits to 1±range_pct and major/minor tick spacing — all in percent
+    of the 1.0 baseline. A non-positive range or spacing skips that piece."""
+    if range_pct and range_pct > 0:
+        r = range_pct / 100.0
+        ax.set_ylim(1.0 - r, 1.0 + r)
+    if major_pct and major_pct > 0:
+        ax.yaxis.set_major_locator(MultipleLocator(major_pct / 100.0))
+    if minor_pct and minor_pct > 0:
+        ax.yaxis.set_minor_locator(MultipleLocator(minor_pct / 100.0))
+
+
+def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution", show_tolerance: bool = True, tol: float = DEFAULT_TOL,
+                    y_range: float = DEFAULT_YRANGE_PCT, major_tick: float = DEFAULT_MAJOR_PCT, minor_tick: float = DEFAULT_MINOR_PCT,
+                    show_points: bool = True):
 
 
     data = long.copy()
@@ -234,7 +255,7 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
 
     # Overlay sample points with shared marker map
     marker_map = MARKER_MAP
-    for sys in systems_present:
+    for sys in (systems_present if show_points else []):
         sub = data.loc[data["System"] == sys, ["Ratio", "Date", "SN", "Energy"]].dropna(subset=["Ratio"])
         vals = sub["Ratio"].values
         dates = sub["Date"].values
@@ -269,6 +290,7 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
     ax.set_xticklabels(systems_present, rotation=0)
     ax.set_ylabel("Output [cGy/MU]" if ref_label == "Institution"
                   else f"Output (relative to {ref_label})")
+    _apply_yaxis(ax, y_range, major_tick, minor_tick)
 
     # Legend to match grouped plot
     handles = [
@@ -280,7 +302,7 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
     ]
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
     handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
-                          color=MARKER_COLOR, label=r"Outlier (1.5$\times$ IQR, only if N $\geq$ %d)" % OUTLIER_MIN_N))
+                          color=MARKER_COLOR, label="Outlier"))
     if show_tolerance:
         handles.append(_tolerance_handle(tol))
     ax.legend(handles=handles, loc="best", frameon=True)
@@ -296,7 +318,11 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                      show_energy_labels: bool = False,
                      ref_label: str = "Institution",
                      show_tolerance: bool = True,
-                     tol: float = DEFAULT_TOL):
+                     tol: float = DEFAULT_TOL,
+                     y_range: float = DEFAULT_YRANGE_PCT,
+                     major_tick: float = DEFAULT_MAJOR_PCT,
+                     minor_tick: float = DEFAULT_MINOR_PCT,
+                     show_points: bool = True):
 
 
     data = long.copy()
@@ -359,7 +385,7 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
     # Overlay sample points with shared marker map
     marker_map = MARKER_MAP
 
-    for g in groups:
+    for g in (groups if show_points else []):
         for sys in systems:
             sub = data[(data[group_col] == g) & (data["System"] == sys)][["Ratio", "Date", "SN", "Energy"]].dropna(subset=["Ratio"])
 
@@ -403,6 +429,7 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
     ax.set_xticklabels(xtlabs)
     ax.set_ylabel("Output [cGy/MU]" if ref_label == "Institution"
                   else f"Output (relative to {ref_label})")
+    _apply_yaxis(ax, y_range, major_tick, minor_tick)
 
     # Legend: markers for each system + dashed baseline
     handles = [Line2D([], [], linestyle="None",
@@ -412,7 +439,7 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
 
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
     handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
-                          color=MARKER_COLOR, label=r"Outlier (1.5$\times$ IQR, only if N $\geq$ %d)" % OUTLIER_MIN_N))
+                          color=MARKER_COLOR, label="Outlier"))
     if show_tolerance:
         handles.append(_tolerance_handle(tol))
 
@@ -557,7 +584,11 @@ def make_plots(df: pd.DataFrame,
                show_energy_labels: bool = False,
                normalize_to: str = "Institution",
                show_tolerance: bool = True,
-               tolerance: float = DEFAULT_TOL):
+               tolerance: float = DEFAULT_TOL,
+               y_range: float = DEFAULT_YRANGE_PCT,
+               major_tick: float = DEFAULT_MAJOR_PCT,
+               minor_tick: float = DEFAULT_MINOR_PCT,
+               show_points: bool = True):
 
     long, energies = to_long(df)
 
@@ -597,7 +628,9 @@ def make_plots(df: pd.DataFrame,
     if show_system:
         _system_boxplot(long_filt, show_dates=show_dates, show_sn_labels=show_sn_labels,
                         show_energy_labels=show_energy_labels, ref_label=ref_label,
-                        show_tolerance=show_tolerance, tol=tolerance)
+                        show_tolerance=show_tolerance, tol=tolerance,
+                        y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
+                        show_points=show_points)
 
     if show_sn:
         _grouped_boxplot(
@@ -608,7 +641,9 @@ def make_plots(df: pd.DataFrame,
             show_energy_labels=show_energy_labels,
             ref_label=ref_label,
             show_tolerance=show_tolerance,
-            tol=tolerance
+            tol=tolerance,
+            y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
+            show_points=show_points
         )
 
 
@@ -622,7 +657,9 @@ def make_plots(df: pd.DataFrame,
             show_energy_labels=show_energy_labels,
             ref_label=ref_label,
             show_tolerance=show_tolerance,
-            tol=tolerance
+            tol=tolerance,
+            y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
+            show_points=show_points
         )
 
 
@@ -633,7 +670,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Output Round Robin — Boxplots")
-        self.geometry("720x600")  # taller to fit 3 listboxes + normalize dropdown + tolerance toggle
+        self.geometry("720x650")  # taller to fit 3 listboxes + normalize dropdown + tolerance + axis controls
         pad = {"padx": 8, "pady": 6}
 
         ttk.Label(self, text="Data file (XLSX/CSV):").grid(row=0, column=0, sticky="w", **pad)
@@ -650,6 +687,10 @@ class App(tk.Tk):
         self.show_energy_labels = tk.BooleanVar(value=False)
         self.show_tolerance = tk.BooleanVar(value=True)
         self.tol_var = tk.StringVar(value="5")
+        self.y_range_var = tk.StringVar(value="7")
+        self.major_tick_var = tk.StringVar(value="2")
+        self.minor_tick_var = tk.StringVar(value="1")
+        self.show_points = tk.BooleanVar(value=True)
 
         ttk.Checkbutton(
             self, text="System boxplot (all data)",
@@ -675,6 +716,7 @@ class App(tk.Tk):
         ttk.Checkbutton(self, text="Show tolerance  ±", variable=self.show_tolerance).grid(row=7, column=0, sticky="e", **pad)
         ttk.Entry(self, textvariable=self.tol_var, width=6).grid(row=7, column=1, sticky="w", **pad)
         ttk.Label(self, text="%").grid(row=7, column=1, sticky="w", padx=(60, 0))
+        ttk.Checkbutton(self, text="Show all points (off = outliers only)", variable=self.show_points).grid(row=7, column=2, sticky="w", **pad)
 
         # ---- System selection ----
         ttk.Label(self, text="Select System(s) for global filter:").grid(
@@ -710,8 +752,18 @@ class App(tk.Tk):
         self.normalize_combo["values"] = ["Institution"]
         self.normalize_combo.grid(row=14, column=1, sticky="w", **pad)
 
+        # ---- Y-axis range / tick spacing (all in percent) ----
+        axis_frame = ttk.Frame(self)
+        axis_frame.grid(row=15, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(axis_frame, text="Y-axis ±(%):").pack(side="left")
+        ttk.Entry(axis_frame, textvariable=self.y_range_var, width=5).pack(side="left", padx=(2, 12))
+        ttk.Label(axis_frame, text="Major tick (%):").pack(side="left")
+        ttk.Entry(axis_frame, textvariable=self.major_tick_var, width=5).pack(side="left", padx=(2, 12))
+        ttk.Label(axis_frame, text="Minor tick (%):").pack(side="left")
+        ttk.Entry(axis_frame, textvariable=self.minor_tick_var, width=5).pack(side="left", padx=(2, 0))
+
         # Plot button
-        ttk.Button(self, text="Plot", command=self.plot).grid(row=15, column=0, columnspan=3, **pad)
+        ttk.Button(self, text="Plot", command=self.plot).grid(row=16, column=0, columnspan=3, **pad)
 
         # populate lists from default file if possible
         self.populate_lists_from_file()
@@ -834,6 +886,15 @@ class App(tk.Tk):
                     messagebox.showerror("Error", "Tolerance must be a number (percent).")
                     return
 
+            # ---- Y-axis range / tick spacing (percent) ----
+            try:
+                y_range    = float(self.y_range_var.get())
+                major_tick = float(self.major_tick_var.get())
+                minor_tick = float(self.minor_tick_var.get())
+            except ValueError:
+                messagebox.showerror("Error", "Y-axis range and tick spacing must be numbers (percent).")
+                return
+
             make_plots(df,
                show_system=self.do_system.get(),
                show_sn=self.do_sn.get(),
@@ -846,7 +907,11 @@ class App(tk.Tk):
                show_energy_labels=self.show_energy_labels.get(),
                normalize_to=self.normalize_var.get(),
                show_tolerance=self.show_tolerance.get(),
-               tolerance=tolerance)
+               tolerance=tolerance,
+               y_range=y_range,
+               major_tick=major_tick,
+               minor_tick=minor_tick,
+               show_points=self.show_points.get())
         except Exception as e:
             messagebox.showerror("Plot error", str(e))
 

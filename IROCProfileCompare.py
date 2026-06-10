@@ -3,6 +3,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, ttk
+from collections import defaultdict
 from scipy import interpolate as interp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -50,6 +51,10 @@ sheet1_combo.grid(row=0, column=1, padx=5)
 ttk.Label(sheet_frame, text="Select Sheet 2:").grid(row=1, column=0, sticky="w")
 sheet2_combo = ttk.Combobox(sheet_frame, width=30)
 sheet2_combo.grid(row=1, column=1, padx=5)
+
+# Refresh listboxes whenever either sheet selection changes
+sheet1_combo.bind('<<ComboboxSelected>>', lambda _e: populate_common_combinations())
+sheet2_combo.bind('<<ComboboxSelected>>', lambda _e: populate_common_combinations())
 
 # Data Selection Frame
 data_selection_frame = ttk.LabelFrame(root, text="Data Selection", padding="10")
@@ -112,6 +117,29 @@ auto_align_var = tk.IntVar()
 auto_align_check = tk.Checkbutton(processing_frame, text="Auto-align Sheet 2 to Sheet 1", variable=auto_align_var)
 auto_align_check.grid(row=2, column=0, sticky="w", padx=5, pady=2)
 
+ttk.Label(processing_frame, text="Marker Size:").grid(row=3, column=0, sticky="w")
+marker_size_entry = ttk.Entry(processing_frame, width=10)
+marker_size_entry.grid(row=3, column=1, padx=5)
+marker_size_entry.insert(0, "3")
+
+ttk.Label(processing_frame, text="Scale profile:").grid(row=4, column=0, sticky="w")
+scale_profile_combo = ttk.Combobox(processing_frame, values=[0, 1, 2, 3], width=5)
+scale_profile_combo.grid(row=4, column=1, padx=5, sticky="w")
+scale_profile_combo.set(0)
+ttk.Label(processing_frame,
+          text="0: None, 1: Scale sheet 1, 2: Scale sheet 2, 3: Scale both"
+          ).grid(row=4, column=2, columnspan=2, sticky="w", padx=5)
+
+ttk.Label(processing_frame, text="Scale factor:").grid(row=5, column=0, sticky="w")
+scale_factor_entry = ttk.Entry(processing_frame, width=10)
+scale_factor_entry.grid(row=5, column=1, padx=5, sticky="w")
+scale_factor_entry.insert(0, "1.00")
+
+ttk.Label(processing_frame, text="Pass Threshold [%]:").grid(row=6, column=0, sticky="w")
+threshold_entry = ttk.Entry(processing_frame, width=10)
+threshold_entry.grid(row=6, column=1, padx=5, sticky="w")
+threshold_entry.insert(0, "95")
+
 
 
 
@@ -154,6 +182,18 @@ def populate_common_combinations():
         print(f"Error populating common combinations: {e}")
 
 
+
+
+def _norm_prof(s):
+    """Normalize profile-type strings so 'AP'/'AntPost'/'anterior-posterior' all map to the same key."""
+    s = str(s).strip().lower()
+    if s in ("supinf", "sup-inf", "si", "sup_inf", "sup–inf"):
+        return "SupInf"
+    if s in ("rightleft", "right-left", "rl", "lr", "left-right", "left_right"):
+        return "RightLeft"
+    if s in ("antpost", "anterior-posterior", "ap", "ant_post", "ant-post"):
+        return "AntPost"
+    return s
 
 
 def compute_optimal_shift(Pos1, Dose1, Pos2, Dose2):
@@ -213,6 +253,27 @@ def run_comparison():
     dd = float(gamma_dd_entry.get()) / 100
     dta = float(gamma_dta_entry.get()) / 10
     analysis = analysis_var.get()
+    try:
+        ms = float(marker_size_entry.get())
+    except ValueError:
+        ms = 3.0
+
+    try:
+        scale_profile = int(scale_profile_combo.get())
+    except ValueError:
+        scale_profile = 0
+    try:
+        scale_factor = float(scale_factor_entry.get())
+    except ValueError:
+        scale_factor = 1.0
+    try:
+        pass_threshold = float(threshold_entry.get())
+    except ValueError:
+        pass_threshold = 95.0
+
+    # Accumulator for the end-of-run pass-rate summary
+    # Each entry: (phantom, site, normalized_profile, passed_pts, total_pts)
+    summary_rows = []
 
     fn = file_entry.get()
     sn1 = sheet1_combo.get()
@@ -247,6 +308,12 @@ def run_comparison():
                 y1 = sub_df1['Dose'].values
                 x2 = sub_df2['Pos'].values
                 y2 = sub_df2['Dose'].values
+
+                # Apply user dose scaling (independent of shift / alignment)
+                if scale_profile in (1, 3):
+                    y1 = y1 * scale_factor
+                if scale_profile in (2, 3):
+                    y2 = y2 * scale_factor
                 # Apply user-provided shift (convert to float, default to 0 if blank or invalid)
                 try:
                     shift1 = float(shift1_entry.get())
@@ -279,8 +346,8 @@ def run_comparison():
     
     
                 # Plot profiles
-                ax0.plot(x1, y1, '+r', label=f'{sn1}')
-                ax0.plot(x2, y2, '.k', label=f'{sn2}')
+                ax0.plot(x1, y1, '+r', ms=ms, label=f'{sn1}')
+                ax0.plot(x2, y2, '.k', ms=ms, label=f'{sn2}')
                 ax0.set_title(f'{phantom} | {site} | {profile} | {analysis}')
                 ax0.set_ylabel('Dose [Gy]')
                 ax0.set_xlabel('Position [cm]')
@@ -295,10 +362,13 @@ def run_comparison():
     
                 elif analysis == "Dose Difference":
                     difx, difv = dosedif(x1, y1, x2, y2, 3)  # norm=3
-                
+
                     pass_mask = np.abs(difv) <= dd          # dd is fraction (e.g., 0.01)
-                    ax1.plot(difx[pass_mask], difv[pass_mask] * 100, '.g', )
-                    ax1.plot(difx[~pass_mask], difv[~pass_mask] * 100, '.r')
+                    summary_rows.append(
+                        (phantom, site, _norm_prof(profile), int(pass_mask.sum()), int(len(pass_mask)))
+                    )
+                    ax1.plot(difx[pass_mask], difv[pass_mask] * 100, '.g', ms=ms)
+                    ax1.plot(difx[~pass_mask], difv[~pass_mask] * 100, '.r', ms=ms)
                 
                     ax1.set_ylabel('Dose Difference [% of Max]')
                     ax1.set_xlabel(f"Position [cm]  (Tol = ±{dd*100:.1f}%)")
@@ -310,10 +380,13 @@ def run_comparison():
                 
                 elif analysis == "DTA":
                     dtax, dtav = dtafunc(x1, y1, x2, y2,dta)
-                
+
                     pass_mask = dtav <= dta                 # dta is in cm
-                    ax1.plot(dtax[pass_mask], dtav[pass_mask], '.g' )
-                    ax1.plot(dtax[~pass_mask], dtav[~pass_mask], '.r')
+                    summary_rows.append(
+                        (phantom, site, _norm_prof(profile), int(pass_mask.sum()), int(len(pass_mask)))
+                    )
+                    ax1.plot(dtax[pass_mask], dtav[pass_mask], '.g', ms=ms)
+                    ax1.plot(dtax[~pass_mask], dtav[~pass_mask], '.r', ms=ms)
                 
                     
                     ax1.set_xlabel(f"Position [cm]  (Tol = {dta:.2f} cm)")
@@ -342,17 +415,20 @@ def run_comparison():
                     total_pts = len(difx_aligned)
                     num_fails = int(fail_mask.sum())
                     pass_rate = 100 * (1 - num_fails / total_pts) if total_pts else 0
+                    summary_rows.append(
+                        (phantom, site, _norm_prof(profile), total_pts - num_fails, total_pts)
+                    )
                 
                     # Plots (unchanged style)
-                    ax1.plot(dtax, dtav * 10, '.g')  # DTA in mm
+                    ax1.plot(dtax, dtav * 10, '.g', ms=ms)  # DTA in mm
                     ax1.set_ylabel('DTA [mm]')
                     ax1.set_xlim(shared_xlim)
                     ax1.grid(False)
-                
-                    ax2.plot(difx, difv * 100, '.g')  # Dose diff in %
+
+                    ax2.plot(difx, difv * 100, '.g', ms=ms)  # Dose diff in %
                     # mark composite failures in red at the aligned x’s
-                    ax1.plot(difx_aligned[fail_mask], (dtav_on_difx[fail_mask] * 10), '.r')
-                    ax2.plot(difx_aligned[fail_mask], (difv_aligned[fail_mask] * 100), '.r')
+                    ax1.plot(difx_aligned[fail_mask], (dtav_on_difx[fail_mask] * 10), '.r', ms=ms)
+                    ax2.plot(difx_aligned[fail_mask], (difv_aligned[fail_mask] * 100), '.r', ms=ms)
                 
                     ax2.set_ylabel('Dose Difference [%]')
                     ax2.set_xlabel(f'Points outside of {dd*100:.1f}% & {dta*10:.1f}mm '
@@ -378,8 +454,8 @@ def run_comparison():
                     gx2 = gx[gv <= 1]
                     gv1 = gv[gv > 1]
                     gv2 = gv[gv <= 1]
-                    ax1.plot(gx1, gv1, '.r')
-                    ax1.plot(gx2, gv2, '.g')
+                    ax1.plot(gx1, gv1, '.r', ms=ms)
+                    ax1.plot(gx2, gv2, '.g', ms=ms)
                     # Format axis label dynamically
                     dd_label = f"{dd * 100:.1f}%"
                     dta_label = f"{dta * 10:.1f}mm"
@@ -387,8 +463,11 @@ def run_comparison():
                  
                     ax1.set_ylabel(gamma_label)
                     num_total = len(gv)
-                    num_failed = np.sum(gv > 1)
+                    num_failed = int(np.sum(gv > 1))
                     pass_rate = 100 * (1 - num_failed / num_total)
+                    summary_rows.append(
+                        (phantom, site, _norm_prof(profile), num_total - num_failed, num_total)
+                    )
                     ax1.set_xlabel(f'Points with Γ > 1 : {num_failed}/{num_total} Pass Rate : {pass_rate:.1f}%')
                     print(f"{phantom} | {site} | {profile} → Points with Γ > 1: {num_failed}/{num_total}   Pass Rate: {pass_rate:.1f}%")
     
@@ -410,6 +489,70 @@ def run_comparison():
                     plt.show(block=False)
                     plt.pause(0.1)  # Allow rendering
 
+    # ===== Post-run summary (Phantom x Site pass rates) =====
+    if not summary_rows:
+        return
+
+    # Per-(phantom,site,profile) accumulation (in case duplicates)
+    triple_pass = defaultdict(int)
+    triple_total = defaultdict(int)
+    for p, s, prof, ps, tot in summary_rows:
+        triple_pass[(p, s, prof)]  += ps
+        triple_total[(p, s, prof)] += tot
+
+    # Aggregate up to (phantom, site)
+    overall_pass = defaultdict(int); overall_total = defaultdict(int)
+    for (p, s, _prof), tot in triple_total.items():
+        overall_total[(p, s)] += tot
+        overall_pass[(p, s)]  += triple_pass[(p, s, _prof)]
+
+    rows = []
+    for (p, s) in sorted(overall_total):
+        o_ps, o_tt = overall_pass[(p, s)], overall_total[(p, s)]
+        c_ps = triple_pass.get((p, s, "SupInf"), 0) + triple_pass.get((p, s, "RightLeft"), 0)
+        c_tt = triple_total.get((p, s, "SupInf"), 0) + triple_total.get((p, s, "RightLeft"), 0)
+        g_ps = triple_pass.get((p, s, "SupInf"), 0) + triple_pass.get((p, s, "AntPost"), 0)
+        g_tt = triple_total.get((p, s, "SupInf"), 0) + triple_total.get((p, s, "AntPost"), 0)
+        rows.append({
+            "Phantom": p, "Site": s,
+            "Overall_pass": o_ps, "Overall_total": o_tt,
+            "Overall_%":  round(100 * o_ps / o_tt, 1) if o_tt else None,
+            "Coronal_pass": c_ps, "Coronal_total": c_tt,
+            "Coronal_%":  round(100 * c_ps / c_tt, 1) if c_tt else None,
+            "Sagittal_pass": g_ps, "Sagittal_total": g_tt,
+            "Sagittal_%": round(100 * g_ps / g_tt, 1) if g_tt else None,
+        })
+    df_sum = pd.DataFrame(rows)
+    # Sort by Phantom then numeric site index
+    df_sum["Site_no"] = df_sum["Site"].astype(str).str.extract(r'(\d+)').astype(float)
+    df_sum = df_sum.sort_values(["Phantom", "Site_no"], kind="mergesort").drop(columns="Site_no")
+
+    # Flag any pass rate below user threshold
+    for col in ("Overall_%", "Coronal_%", "Sagittal_%"):
+        df_sum[col + "_flag"] = df_sum[col] < pass_threshold
+
+    # Per-Phantom weighted rollup
+    grp = (df_sum.groupby("Phantom", as_index=False)
+                 .agg(Overall_pass=("Overall_pass", "sum"),
+                      Overall_total=("Overall_total", "sum"),
+                      Coronal_pass=("Coronal_pass", "sum"),
+                      Coronal_total=("Coronal_total", "sum"),
+                      Sagittal_pass=("Sagittal_pass", "sum"),
+                      Sagittal_total=("Sagittal_total", "sum")))
+    for col in ("Overall", "Coronal", "Sagittal"):
+        denom = grp[col + "_total"].replace(0, pd.NA)
+        grp[col + "_%"] = (100.0 * grp[col + "_pass"] / denom).round(1)
+
+    print("\n" + "=" * 80)
+    print(f"Pass-rate summary  (analysis = {analysis}, threshold = {pass_threshold:.1f}%)")
+    print("=" * 80)
+    print("\nPer (Phantom, Site):")
+    print(df_sum.to_string(index=False))
+    print("\nPer-Phantom (weighted by points):")
+    print(grp[["Phantom",
+               "Overall_pass", "Overall_total", "Overall_%",
+               "Coronal_pass", "Coronal_total", "Coronal_%",
+               "Sagittal_pass", "Sagittal_total", "Sagittal_%"]].to_string(index=False))
 
 
 # Run Button

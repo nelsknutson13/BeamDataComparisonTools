@@ -49,6 +49,9 @@ DEFAULT_YRANGE_PCT = 7.0    # y-limits = 1 ± 7%
 DEFAULT_MAJOR_PCT  = 1.0    # major tick every 1%
 DEFAULT_MINOR_PCT  = 0.5    # minor tick every 0.5%
 
+# Default font size for plot text (tick labels, axis labels, legend)
+DEFAULT_FONT_SIZE = 12
+
 # ---------- Data helpers ----------
 def read_table(path: str) -> pd.DataFrame:
     ext = os.path.splitext(path)[1].lower()
@@ -200,7 +203,8 @@ def _tolerance_handle(tol: float = DEFAULT_TOL):
 def _apply_yaxis(ax, range_pct=DEFAULT_YRANGE_PCT,
                  major_pct=DEFAULT_MAJOR_PCT, minor_pct=DEFAULT_MINOR_PCT):
     """Set y-limits to 1±range_pct and major/minor tick spacing — all in percent
-    of the 1.0 baseline. A non-positive range or spacing skips that piece."""
+    of the 1.0 baseline. A non-positive range or spacing skips that piece.
+    Also mirrors tick marks (major + minor) onto the right side of the plot."""
     if range_pct and range_pct > 0:
         r = range_pct / 100.0
         ax.set_ylim(1.0 - r, 1.0 + r)
@@ -208,6 +212,9 @@ def _apply_yaxis(ax, range_pct=DEFAULT_YRANGE_PCT,
         ax.yaxis.set_major_locator(MultipleLocator(major_pct / 100.0))
     if minor_pct and minor_pct > 0:
         ax.yaxis.set_minor_locator(MultipleLocator(minor_pct / 100.0))
+    # Mirror ticks (no duplicated labels on the right)
+    ax.tick_params(axis='y', which='major', left=True, right=True, labelright=False)
+    ax.tick_params(axis='y', which='minor', left=True, right=True, labelright=False)
 
 
 def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution", show_tolerance: bool = True, tol: float = DEFAULT_TOL,
@@ -231,7 +238,8 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
     pos_map = {sys: i for i, sys in enumerate(systems_present)}
 
     # Figure/axes
-    fig = plt.figure(figsize=(8.5, 5))
+    fig = plt.figure(figsize=(8.5, 5), constrained_layout=True)
+    fig.set_constrained_layout_pads(w_pad=0.15, h_pad=0.15)
     ax = fig.add_subplot(111)
 
     # Boxplot styling to match existing grouped plots
@@ -307,7 +315,6 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
         handles.append(_tolerance_handle(tol))
     ax.legend(handles=handles, loc="best", frameon=True)
 
-    plt.tight_layout()
     plt.show()
 
 
@@ -362,7 +369,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
         base += n_sys + gap
 
     # Plot
-    fig = plt.figure(figsize=(11.5, 6))
+    fig = plt.figure(figsize=(11.5, 6), constrained_layout=True)
+    fig.set_constrained_layout_pads(w_pad=0.15, h_pad=0.15)
     ax = fig.add_subplot(111)
     bp = ax.boxplot(
         series,
@@ -445,7 +453,6 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
 
     ax.legend(handles=handles, loc="best", frameon=True)
 
-    plt.tight_layout()
     plt.show()
 
 
@@ -588,7 +595,18 @@ def make_plots(df: pd.DataFrame,
                y_range: float = DEFAULT_YRANGE_PCT,
                major_tick: float = DEFAULT_MAJOR_PCT,
                minor_tick: float = DEFAULT_MINOR_PCT,
-               show_points: bool = True):
+               show_points: bool = True,
+               font_size: float = DEFAULT_FONT_SIZE):
+
+    # Apply font size to all subsequently created matplotlib text
+    plt.rcParams.update({
+        "font.size":       font_size,
+        "axes.labelsize":  font_size,
+        "axes.titlesize":  font_size,
+        "xtick.labelsize": font_size,
+        "ytick.labelsize": font_size,
+        "legend.fontsize": font_size,
+    })
 
     long, energies = to_long(df)
 
@@ -688,8 +706,9 @@ class App(tk.Tk):
         self.show_tolerance = tk.BooleanVar(value=True)
         self.tol_var = tk.StringVar(value="5")
         self.y_range_var = tk.StringVar(value="7")
-        self.major_tick_var = tk.StringVar(value="2")
-        self.minor_tick_var = tk.StringVar(value="1")
+        self.major_tick_var = tk.StringVar(value="1")
+        self.minor_tick_var = tk.StringVar(value="0.5")
+        self.font_size_var = tk.StringVar(value=str(DEFAULT_FONT_SIZE))
         self.show_points = tk.BooleanVar(value=True)
 
         ttk.Checkbutton(
@@ -760,7 +779,9 @@ class App(tk.Tk):
         ttk.Label(axis_frame, text="Major tick (%):").pack(side="left")
         ttk.Entry(axis_frame, textvariable=self.major_tick_var, width=5).pack(side="left", padx=(2, 12))
         ttk.Label(axis_frame, text="Minor tick (%):").pack(side="left")
-        ttk.Entry(axis_frame, textvariable=self.minor_tick_var, width=5).pack(side="left", padx=(2, 0))
+        ttk.Entry(axis_frame, textvariable=self.minor_tick_var, width=5).pack(side="left", padx=(2, 12))
+        ttk.Label(axis_frame, text="Font size:").pack(side="left")
+        ttk.Entry(axis_frame, textvariable=self.font_size_var, width=5).pack(side="left", padx=(2, 0))
 
         # Plot button
         ttk.Button(self, text="Plot", command=self.plot).grid(row=16, column=0, columnspan=3, **pad)
@@ -895,6 +916,13 @@ class App(tk.Tk):
                 messagebox.showerror("Error", "Y-axis range and tick spacing must be numbers (percent).")
                 return
 
+            # ---- Font size ----
+            try:
+                font_size = float(self.font_size_var.get())
+            except ValueError:
+                messagebox.showerror("Error", "Font size must be a number.")
+                return
+
             make_plots(df,
                show_system=self.do_system.get(),
                show_sn=self.do_sn.get(),
@@ -911,7 +939,8 @@ class App(tk.Tk):
                y_range=y_range,
                major_tick=major_tick,
                minor_tick=minor_tick,
-               show_points=self.show_points.get())
+               show_points=self.show_points.get(),
+               font_size=font_size)
         except Exception as e:
             messagebox.showerror("Plot error", str(e))
 

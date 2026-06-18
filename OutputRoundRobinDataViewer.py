@@ -99,10 +99,13 @@ def renormalize_to_reference(long: pd.DataFrame, reference_system: str):
     reference value (no cross-session averaging). If the reference system
     appears multiple times in a session, those are averaged (with a warning).
 
-    'Institution' is already the 1.0 baseline → no-op.
+    A reference of 'None' (or empty) means NO normalization — the data is
+    returned as-is (institution is assumed to already sit at 1.0). Any named
+    system, INCLUDING 'Institution', is actively normalized (each session is
+    divided by that system's value, forcing it to exactly 1.0).
     """
-    ref = (reference_system or "Institution").strip()
-    if ref == "Institution":
+    ref = (reference_system or "None").strip()
+    if ref in ("", "None"):
         return long, 0
 
     data = long.copy()
@@ -219,7 +222,7 @@ def _apply_yaxis(ax, range_pct=DEFAULT_YRANGE_PCT,
 
 def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution", show_tolerance: bool = True, tol: float = DEFAULT_TOL,
                     y_range: float = DEFAULT_YRANGE_PCT, major_tick: float = DEFAULT_MAJOR_PCT, minor_tick: float = DEFAULT_MINOR_PCT,
-                    show_points: bool = True):
+                    show_points: bool = True, normalized: bool = False):
 
 
     data = long.copy()
@@ -296,8 +299,8 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
     # Labels (no title)
     ax.set_xticks(positions)
     ax.set_xticklabels(systems_present, rotation=0)
-    ax.set_ylabel("Output [cGy/MU]" if ref_label == "Institution"
-                  else f"Output (relative to {ref_label})")
+    ax.set_ylabel(f"Output (relative to {ref_label})" if normalized
+                  else "Output [cGy/MU]")
     _apply_yaxis(ax, y_range, major_tick, minor_tick)
 
     # Legend to match grouped plot
@@ -329,7 +332,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                      y_range: float = DEFAULT_YRANGE_PCT,
                      major_tick: float = DEFAULT_MAJOR_PCT,
                      minor_tick: float = DEFAULT_MINOR_PCT,
-                     show_points: bool = True):
+                     show_points: bool = True,
+                     normalized: bool = False):
 
 
     data = long.copy()
@@ -435,8 +439,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
     # Labels (no title)
     ax.set_xticks(xticks)
     ax.set_xticklabels(xtlabs)
-    ax.set_ylabel("Output [cGy/MU]" if ref_label == "Institution"
-                  else f"Output (relative to {ref_label})")
+    ax.set_ylabel(f"Output (relative to {ref_label})" if normalized
+                  else "Output [cGy/MU]")
     _apply_yaxis(ax, y_range, major_tick, minor_tick)
 
     # Legend: markers for each system + dashed baseline
@@ -589,7 +593,7 @@ def make_plots(df: pd.DataFrame,
                show_dates: bool = False,
                show_sn_labels: bool = False,
                show_energy_labels: bool = False,
-               normalize_to: str = "Institution",
+               normalize_to: str = "None",
                show_tolerance: bool = True,
                tolerance: float = DEFAULT_TOL,
                y_range: float = DEFAULT_YRANGE_PCT,
@@ -616,7 +620,11 @@ def make_plots(df: pd.DataFrame,
     long, _ = renormalize_to_reference(long, normalize_to)
     if long.empty:
         raise ValueError(f"No data left after normalizing to '{normalize_to}'.")
-    ref_label = (normalize_to or "Institution").strip()
+    # 'None' (or empty) = no normalization; otherwise data was divided by ref.
+    norm = (normalize_to or "None").strip()
+    normalized = norm not in ("", "None")
+    # In no-norm mode the 1.0 baseline still represents the institution.
+    ref_label = norm if normalized else "Institution"
 
     if not (show_system or show_sn or show_energy):
         raise ValueError("No plots selected. Please enable at least one plot type.")
@@ -648,7 +656,7 @@ def make_plots(df: pd.DataFrame,
                         show_energy_labels=show_energy_labels, ref_label=ref_label,
                         show_tolerance=show_tolerance, tol=tolerance,
                         y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
-                        show_points=show_points)
+                        show_points=show_points, normalized=normalized)
 
     if show_sn:
         _grouped_boxplot(
@@ -661,7 +669,7 @@ def make_plots(df: pd.DataFrame,
             show_tolerance=show_tolerance,
             tol=tolerance,
             y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
-            show_points=show_points
+            show_points=show_points, normalized=normalized
         )
 
 
@@ -677,7 +685,7 @@ def make_plots(df: pd.DataFrame,
             show_tolerance=show_tolerance,
             tol=tolerance,
             y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
-            show_points=show_points
+            show_points=show_points, normalized=normalized
         )
 
 
@@ -763,12 +771,12 @@ class App(tk.Tk):
         self.sn_values = []
         self.energy_values = []
 
-        # ---- Normalize-to selection ----
-        ttk.Label(self, text="Normalize to:").grid(row=14, column=0, sticky="w", **pad)
-        self.normalize_var = tk.StringVar(value="Institution")
+        # ---- Normalization selection ('None' = no normalization) ----
+        ttk.Label(self, text="Normalization:").grid(row=14, column=0, sticky="w", **pad)
+        self.normalize_var = tk.StringVar(value="None")
         self.normalize_combo = ttk.Combobox(self, textvariable=self.normalize_var,
                                              state="readonly", width=40)
-        self.normalize_combo["values"] = ["Institution"]
+        self.normalize_combo["values"] = ["None"]
         self.normalize_combo.grid(row=14, column=1, sticky="w", **pad)
 
         # ---- Y-axis range / tick spacing (all in percent) ----
@@ -824,14 +832,13 @@ class App(tk.Tk):
         if systems:
             self.system_listbox.selection_set(0, tk.END)
 
-        # ---- Normalize-to dropdown options (Institution first, then others) ----
-        norm_opts = (["Institution"] if "Institution" in sys_set else []) + \
+        # ---- Normalization dropdown options ('None' first, then Institution,
+        #      then the other systems). 'None' = no normalization. ----
+        norm_opts = ["None"] + (["Institution"] if "Institution" in sys_set else []) + \
                     [s for s in systems if s != "Institution"]
-        if not norm_opts:
-            norm_opts = ["Institution"]
         self.normalize_combo["values"] = norm_opts
         if self.normalize_var.get() not in norm_opts:
-            self.normalize_var.set(norm_opts[0])
+            self.normalize_var.set("None")
 
         # ---- SN list ----
         self.sn_listbox.delete(0, tk.END)

@@ -159,6 +159,15 @@ def renormalize_to_reference(long: pd.DataFrame, reference_system: str):
     return out, dropped + orphan
 
 
+def filter_paired_dates(long: pd.DataFrame) -> pd.DataFrame:
+    """Keep only rows where (SN, Energy, Date) has measurements from ALL systems present in the data."""
+    df = long.copy()
+    df["_dk"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+    n_systems = df["System"].nunique()
+    mask = df.groupby(["SN", "Energy", "_dk"])["System"].transform("nunique") >= n_systems
+    return df[mask].drop(columns=["_dk"])
+
+
 def _draw_tukey_fliers_threshold(ax, series, positions, min_n, color, markersize=10, zorder=6):
     """
     Draw Tukey (1.5*IQR) fliers ONLY for boxes with N >= min_n.
@@ -256,8 +265,9 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
         medianprops=dict(color='black', linewidth=1.2),
     )
 
-    # Draw outlier stars only when N >= OUTLIER_MIN_N
-    _draw_tukey_fliers_threshold(ax, series, positions, OUTLIER_MIN_N, MARKER_COLOR, markersize=10, zorder=6)
+    # Draw outlier stars only when showing all points and N >= OUTLIER_MIN_N
+    if show_points:
+        _draw_tukey_fliers_threshold(ax, series, positions, OUTLIER_MIN_N, MARKER_COLOR, markersize=10, zorder=6)
 
     # Baseline at 1.0
     ax.axhline(1.0, linestyle="--", color="black", linewidth=1.0)
@@ -266,8 +276,19 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
 
     # Overlay sample points with shared marker map
     marker_map = MARKER_MAP
-    for sys in (systems_present if show_points else []):
+    for sys in systems_present:
         sub = data.loc[data["System"] == sys, ["Ratio", "Date", "SN", "Energy"]].dropna(subset=["Ratio"])
+
+        if not show_points:
+            vals_all = sub["Ratio"].values
+            if len(vals_all) >= 4:
+                q1, q3 = np.percentile(vals_all, [25, 75])
+                iqr = q3 - q1
+                mask = (vals_all < q1 - 1.5 * iqr) | (vals_all > q3 + 1.5 * iqr)
+                sub = sub[mask]
+            else:
+                sub = sub.iloc[0:0]
+
         vals = sub["Ratio"].values
         dates = sub["Date"].values
         sns = sub["SN"].values
@@ -276,7 +297,6 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
         if len(vals) == 0:
             continue
         x = pos_map[sys]
-        #xs = np.full(len(vals), x, dtype=float)
         xs = x + np.random.uniform(-0.01, 0.01, size=len(vals))
 
         ax.scatter(
@@ -292,7 +312,6 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
                 if show_sn_labels and pd.notna(sn): parts.append(f"SN {sn}")
                 if show_energy_labels and pd.notna(en): parts.append(str(en))
                 if parts: ax.text(xi + 0.01, yi + 0.00015, " | ".join(parts), fontsize=7, alpha=0.8)
-        
 
 
 
@@ -312,8 +331,9 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
         for sys in systems_present
     ]
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
-    handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
-                          color=MARKER_COLOR, label="Outlier"))
+    if show_points:
+        handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
+                              color=MARKER_COLOR, label="Outlier"))
     if show_tolerance:
         handles.append(_tolerance_handle(tol))
     ax.legend(handles=handles, loc="best", frameon=True)
@@ -386,8 +406,9 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
         medianprops=dict(color='black', linewidth=1.2),
     )
 
-    # Draw outlier stars only when N >= OUTLIER_MIN_N
-    _draw_tukey_fliers_threshold(ax, series, positions, OUTLIER_MIN_N, MARKER_COLOR, markersize=10, zorder=6)
+    # Draw outlier stars only when showing all points and N >= OUTLIER_MIN_N
+    if show_points:
+        _draw_tukey_fliers_threshold(ax, series, positions, OUTLIER_MIN_N, MARKER_COLOR, markersize=10, zorder=6)
 
     # Baseline at 1.0 (and use black so legend matches)
     ax.axhline(1.0, linestyle="--", color="black", linewidth=1.0)
@@ -397,9 +418,19 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
     # Overlay sample points with shared marker map
     marker_map = MARKER_MAP
 
-    for g in (groups if show_points else []):
+    for g in groups:
         for sys in systems:
             sub = data[(data[group_col] == g) & (data["System"] == sys)][["Ratio", "Date", "SN", "Energy"]].dropna(subset=["Ratio"])
+
+            if not show_points:
+                vals_all = sub["Ratio"].values
+                if len(vals_all) >= 4:
+                    q1, q3 = np.percentile(vals_all, [25, 75])
+                    iqr = q3 - q1
+                    mask = (vals_all < q1 - 1.5 * iqr) | (vals_all > q3 + 1.5 * iqr)
+                    sub = sub[mask]
+                else:
+                    sub = sub.iloc[0:0]
 
             vals = sub["Ratio"].values
             dates = sub["Date"].values
@@ -409,13 +440,12 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
             if len(vals) == 0:
                 continue
             x = pos_map[(g, sys)]
-            #xs = np.full(len(vals), x, dtype=float)
             xs = x + np.random.uniform(-0.01, 0.01, size=len(vals))
 
             ax.scatter(xs, vals,
                        marker=marker_map.get(sys, "D"), s=40, alpha=0.9,
                        facecolors="none", edgecolors=MARKER_COLOR, linewidths=1.0,
-                       zorder=5)  # draw above boxplot fliers (we draw fliers at zorder=6)
+                       zorder=5)
             if show_dates:
                 for xi, yi, di in zip(xs, vals, dates):
                     if pd.notna(di):
@@ -424,7 +454,7 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                             pd.to_datetime(di).strftime("%Y-%m-%d"),
                             fontsize=7, alpha=0.8
                         )
-            
+
             if show_sn_labels and group_col == "Energy":
                 for xi, yi, sn in zip(xs, vals, sns):
                     if pd.notna(sn):
@@ -450,8 +480,9 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                       label=sys) for sys in systems]
 
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
-    handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
-                          color=MARKER_COLOR, label="Outlier"))
+    if show_points:
+        handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
+                              color=MARKER_COLOR, label="Outlier"))
     if show_tolerance:
         handles.append(_tolerance_handle(tol))
 
@@ -600,7 +631,8 @@ def make_plots(df: pd.DataFrame,
                major_tick: float = DEFAULT_MAJOR_PCT,
                minor_tick: float = DEFAULT_MINOR_PCT,
                show_points: bool = True,
-               font_size: float = DEFAULT_FONT_SIZE):
+               font_size: float = DEFAULT_FONT_SIZE,
+               paired_dates: bool = False):
 
     # Apply font size to all subsequently created matplotlib text
     plt.rcParams.update({
@@ -643,6 +675,11 @@ def make_plots(df: pd.DataFrame,
     long_filt = long[mask]
     if long_filt.empty:
         raise ValueError("No data left after applying SN/Energy/System filters.")
+
+    if paired_dates:
+        long_filt = filter_paired_dates(long_filt)
+        if long_filt.empty:
+            raise ValueError("No data left after filtering to paired dates.")
 
     # Analysis B
     try:
@@ -696,7 +733,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Output Round Robin — Boxplots")
-        self.geometry("720x650")  # taller to fit 3 listboxes + normalize dropdown + tolerance + axis controls
+        self.geometry("900x800")
         pad = {"padx": 8, "pady": 6}
 
         ttk.Label(self, text="Data file (XLSX/CSV):").grid(row=0, column=0, sticky="w", **pad)
@@ -718,6 +755,7 @@ class App(tk.Tk):
         self.minor_tick_var = tk.StringVar(value="0.5")
         self.font_size_var = tk.StringVar(value=str(DEFAULT_FONT_SIZE))
         self.show_points = tk.BooleanVar(value=True)
+        self.paired_dates = tk.BooleanVar(value=False)
 
         ttk.Checkbutton(
             self, text="System boxplot (all data)",
@@ -744,27 +782,28 @@ class App(tk.Tk):
         ttk.Entry(self, textvariable=self.tol_var, width=6).grid(row=7, column=1, sticky="w", **pad)
         ttk.Label(self, text="%").grid(row=7, column=1, sticky="w", padx=(60, 0))
         ttk.Checkbutton(self, text="Show all points (off = outliers only)", variable=self.show_points).grid(row=7, column=2, sticky="w", **pad)
+        ttk.Checkbutton(self, text="Paired dates only (require ≥2 systems per date)", variable=self.paired_dates).grid(row=8, column=0, columnspan=3, sticky="w", **pad)
 
         # ---- System selection ----
         ttk.Label(self, text="Select System(s) for global filter:").grid(
-            row=8, column=0, columnspan=3, sticky="w", **pad
+            row=9, column=0, columnspan=3, sticky="w", **pad
         )
         self.system_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
-        self.system_listbox.grid(row=9, column=0, columnspan=3, sticky="nsew", **pad)
+        self.system_listbox.grid(row=10, column=0, columnspan=3, sticky="nsew", **pad)
 
         # ---- SN selection ----
         ttk.Label(self, text="Select SN(s) for SN-grouped plot:").grid(
-            row=10, column=0, columnspan=3, sticky="w", **pad
+            row=11, column=0, columnspan=3, sticky="w", **pad
         )
         self.sn_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
-        self.sn_listbox.grid(row=11, column=0, columnspan=3, sticky="nsew", **pad)
+        self.sn_listbox.grid(row=12, column=0, columnspan=3, sticky="nsew", **pad)
 
         # ---- Energy selection ----
         ttk.Label(self, text="Select Energy(ies) for Energy-grouped plot:").grid(
-            row=12, column=0, columnspan=3, sticky="w", **pad
+            row=13, column=0, columnspan=3, sticky="w", **pad
         )
         self.energy_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
-        self.energy_listbox.grid(row=13, column=0, columnspan=3, sticky="nsew", **pad)
+        self.energy_listbox.grid(row=14, column=0, columnspan=3, sticky="nsew", **pad)
 
         # backing lists for listbox indices
         self.system_values = []
@@ -772,16 +811,16 @@ class App(tk.Tk):
         self.energy_values = []
 
         # ---- Normalization selection ('None' = no normalization) ----
-        ttk.Label(self, text="Normalization:").grid(row=14, column=0, sticky="w", **pad)
+        ttk.Label(self, text="Normalization:").grid(row=15, column=0, sticky="w", **pad)
         self.normalize_var = tk.StringVar(value="None")
         self.normalize_combo = ttk.Combobox(self, textvariable=self.normalize_var,
                                              state="readonly", width=40)
         self.normalize_combo["values"] = ["None"]
-        self.normalize_combo.grid(row=14, column=1, sticky="w", **pad)
+        self.normalize_combo.grid(row=15, column=1, sticky="w", **pad)
 
         # ---- Y-axis range / tick spacing (all in percent) ----
         axis_frame = ttk.Frame(self)
-        axis_frame.grid(row=15, column=0, columnspan=3, sticky="w", **pad)
+        axis_frame.grid(row=16, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(axis_frame, text="Y-axis ±(%):").pack(side="left")
         ttk.Entry(axis_frame, textvariable=self.y_range_var, width=5).pack(side="left", padx=(2, 12))
         ttk.Label(axis_frame, text="Major tick (%):").pack(side="left")
@@ -792,7 +831,7 @@ class App(tk.Tk):
         ttk.Entry(axis_frame, textvariable=self.font_size_var, width=5).pack(side="left", padx=(2, 0))
 
         # Plot button
-        ttk.Button(self, text="Plot", command=self.plot).grid(row=16, column=0, columnspan=3, **pad)
+        ttk.Button(self, text="Plot", command=self.plot).grid(row=17, column=0, columnspan=3, **pad)
 
         # populate lists from default file if possible
         self.populate_lists_from_file()
@@ -947,7 +986,8 @@ class App(tk.Tk):
                major_tick=major_tick,
                minor_tick=minor_tick,
                show_points=self.show_points.get(),
-               font_size=font_size)
+               font_size=font_size,
+               paired_dates=self.paired_dates.get())
         except Exception as e:
             messagebox.showerror("Plot error", str(e))
 

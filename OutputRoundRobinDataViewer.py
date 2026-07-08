@@ -550,7 +550,7 @@ def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True):
         vc_formula=vc if vc else None,
         re_formula="1"
     )
-    res = model.fit(reml=True, method="lbfgs")
+    res = model.fit(reml=True, method=["lbfgs", "bfgs", "powell"], maxiter=200)
 
     if verbose:
         print("\n=== Analysis B: Mixed Effects on Delta = Ratio - 1.00 ===")

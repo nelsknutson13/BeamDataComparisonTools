@@ -5,7 +5,10 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 
+current_fig = None
+
 def load_and_plot():
+    global current_fig
     file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
     if not file_path:
         return
@@ -31,8 +34,19 @@ def load_and_plot():
         marker_map = {site: markers[i % len(markers)] for i, site in enumerate(unique_sites)}
 
         # Setup plot
-        plt.figure(figsize=(10, 6))
-        sns.set(style="whitegrid", palette="colorblind")
+        FONT_SIZE = 24
+        current_fig = plt.figure(figsize=(14, 8))
+        sns.set_theme(style="whitegrid", palette="colorblind")
+        plt.rcParams.update({
+            "font.size":        FONT_SIZE,
+            "axes.labelsize":   FONT_SIZE,
+            "xtick.labelsize":  FONT_SIZE,
+            "ytick.labelsize":  FONT_SIZE,
+            "legend.fontsize":  FONT_SIZE - 2,
+            "legend.title_fontsize": FONT_SIZE - 2,
+            "font.weight":      "bold",
+            "axes.labelweight": "bold",
+        })
         flier_style = dict(marker='o', markerfacecolor='none', markersize=5, linestyle='none', color='gray')
         ax = sns.boxplot(data=df_clean, x='Body Site', y='%RX Difference', whis=1.5, flierprops=flier_style)
 
@@ -50,8 +64,10 @@ def load_and_plot():
                     x_jitter = np.random.normal(loc=i, scale=0.08, size=len(site_data))
                     plt.scatter(x_jitter, site_data['%RX Difference'],
                                 marker=marker_map[site],
-                                edgecolor='black', facecolor='none', s=70, alpha=0.8)
+                                edgecolor='black', facecolor='none', s=70, alpha=0.8,
+                                linewidths=2.0)
 
+        ax.set_xlim(-0.6, 4.0)
         plt.axhline(0, color='gray', linestyle='--')
         plt.ylabel('Difference (MC vs IROC)[%RX]')
         plt.xlabel('Phantom Type')
@@ -60,26 +76,40 @@ def load_and_plot():
         legend_handles = []
         for site in unique_sites:
             handle = plt.Line2D([], [], marker=marker_map[site], linestyle='None',
-                                markersize=7, label=site,
-                                markerfacecolor='none', markeredgecolor='black')
+                                markersize=10, label=site,
+                                markerfacecolor='none', markeredgecolor='black',
+                                markeredgewidth=2.0)
             legend_handles.append(handle)
 
         plt.legend(handles=legend_handles,
                    title="Site:", loc='upper right',
-                   fontsize='small', title_fontsize='small', frameon=True)
+                   frameon=True)
 
-        plt.tight_layout()
+        plt.tight_layout(pad=0.01)
         plt.show()
 
     except Exception as e:
         print(f"Error: {e}")
 
+def save_plot():
+    if current_fig is None:
+        tk.messagebox.showwarning("No plot", "Load and plot data first.")
+        return
+    save_path = filedialog.asksaveasfilename(
+        defaultextension=".png",
+        filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")],
+    )
+    if not save_path:
+        return
+    current_fig.savefig(save_path, dpi=300, bbox_inches="tight")
+
+
 # Simple GUI
 root = tk.Tk()
 root.title("IROC TLD Plotter")
-root.geometry("300x100")
+root.geometry("300x150")
 
-btn_load = tk.Button(root, text="Load Excel and Plot", command=load_and_plot)
-btn_load.pack(pady=30)
+tk.Button(root, text="Load Excel and Plot", command=load_and_plot).pack(pady=15)
+tk.Button(root, text="Save Plot (300 DPI)", command=save_plot).pack(pady=5)
 
 root.mainloop()

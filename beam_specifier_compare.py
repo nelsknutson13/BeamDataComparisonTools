@@ -71,6 +71,187 @@ def metric_dmax_depth(df, fs, depth_cm):
     return float(fine[int(np.argmax(vals))])
 
 
+def _profile_sorted(df, fs, depth_cm, axis):
+    """Return (pos, dose) arrays for a profile at the given FS, depth, and axis."""
+    if 'Depth' not in df.columns:
+        return None, None
+    sub = df[(df['FS'] == fs) & (df['Axis'] == axis)]
+    if sub.empty:
+        return None, None
+    available = sub['Depth'].dropna().to_numpy(dtype=float)
+    if len(available) == 0:
+        return None, None
+    nearest = available[np.argmin(np.abs(available - depth_cm))]
+    sub = sub[sub['Depth'] == nearest].sort_values('Pos')
+    if len(sub) < 4:
+        return None, None
+    return sub['Pos'].to_numpy(dtype=float), sub['Dose'].to_numpy(dtype=float)
+
+
+def _fwhm(pos, dose):
+    """FWHM [same units as pos] via pchip 50% crossing on a fine grid."""
+    try:
+        pchip = interp.pchip(pos, dose)
+    except Exception:
+        return float('nan')
+    d_max = float(dose.max())
+    fine = np.linspace(float(pos.min()), float(pos.max()), 10001)
+    fine_dose = pchip(fine)
+    above = fine_dose >= d_max * 0.5
+    if not above.any() or above.all():
+        return float('nan')
+    diff = np.diff(above.astype(int))
+    up_x   = np.where(diff > 0)[0]
+    down_x = np.where(diff < 0)[0]
+    if len(up_x) == 0 or len(down_x) == 0:
+        return float('nan')
+    return float(fine[down_x[-1]]) - float(fine[up_x[0]])
+
+
+def _flatness(pos, dose):
+    """Flatness within 80% of FWHM: (Dmax-Dmin)/(2*D_CAX)*100."""
+    if pos is None:
+        return float('nan')
+    try:
+        d_cax = float(interp.pchip(pos, dose)(0.0))
+    except Exception:
+        return float('nan')
+    if d_cax <= 0:
+        return float('nan')
+    fwhm = _fwhm(pos, dose)
+    if np.isnan(fwhm) or fwhm <= 0:
+        return float('nan')
+    half_eval = fwhm * 0.4
+    mask = np.abs(pos) <= half_eval
+    if mask.sum() < 2:
+        return float('nan')
+    d = dose[mask]
+    lo, hi = float(d.min()), float(d.max())
+    return (hi - lo) / (2.0 * d_cax) * 100.0
+
+
+def metric_flatness(df, fs, depth_cm, axis='X'):
+    """Profile flatness for axis='X', 'Y', or 'Both' (worst of X/Y)."""
+    if axis == 'Both':
+        fx = _flatness(*_profile_sorted(df, fs, depth_cm, 'X'))
+        fy = _flatness(*_profile_sorted(df, fs, depth_cm, 'Y'))
+        valid = [v for v in (fx, fy) if not np.isnan(v)]
+        return max(valid) if valid else float('nan')
+    pos, dose = _profile_sorted(df, fs, depth_cm, axis)
+    return _flatness(pos, dose)
+
+
+def metric_symmetry(df, fs, depth_cm, axis='X'):
+    """Symmetry: max|D(+x)-D(-x)|/D_CAX*100 within 80% of FWHM. Both=worst of X/Y."""
+    if axis == 'Both':
+        sx = metric_symmetry(df, fs, depth_cm, 'X')
+        sy = metric_symmetry(df, fs, depth_cm, 'Y')
+        valid = [v for v in (sx, sy) if not np.isnan(v)]
+        return max(valid) if valid else float('nan')
+    pos, dose = _profile_sorted(df, fs, depth_cm, axis)
+    if pos is None:
+        return float('nan')
+    try:
+        pchip = interp.pchip(pos, dose)
+        d_cax = float(pchip(0.0))
+    except Exception:
+        return float('nan')
+    if d_cax <= 0:
+        return float('nan')
+    fwhm = _fwhm(pos, dose)
+    if np.isnan(fwhm) or fwhm <= 0:
+        return float('nan')
+    half_eval = fwhm * 0.4
+    pos_eval = pos[(pos > 0) & (pos <= half_eval)]
+    if len(pos_eval) == 0:
+        return float('nan')
+    d_pos = pchip(pos_eval)
+    d_neg = pchip(-pos_eval)
+    return float(np.max(np.abs(d_pos - d_neg))) / d_cax * 100.0
+
+
+def _penumbra_side(pos, dose, side):
+    """80-20 penumbra width [cm] on one side. side='left' or 'right'."""
+    try:
+        pchip = interp.pchip(pos, dose)
+    except Exception:
+        return float('nan')
+    d_max = float(dose.max())
+    fine = np.linspace(float(pos.min()), float(pos.max()), 10001)
+    fine_dose = pchip(fine)
+    if side == 'right':
+        f = fine[fine >= 0]
+        d = fine_dose[fine >= 0]
+    else:
+        f = fine[fine <= 0][::-1]       # reverse so index 0 = centre, outward
+        d = fine_dose[fine <= 0][::-1]
+    d_80, d_20 = d_max * 0.80, d_max * 0.20
+    diff_80 = np.diff((d >= d_80).astype(int))
+    diff_20 = np.diff((d >= d_20).astype(int))
+    down_80 = np.where(diff_80 < 0)[0]
+    down_20 = np.where(diff_20 < 0)[0]
+    if len(down_80) == 0 or len(down_20) == 0:
+        return float('nan')
+    return abs(float(f[down_20[0]]) - float(f[down_80[0]]))
+
+
+def metric_penumbra(df, fs, depth_cm, axis='X', side='Both'):
+    """80-20 penumbra width. axis: X/Y/Both; side: Left/Right/Both (avg of selected)."""
+    if axis == 'Both':
+        px = metric_penumbra(df, fs, depth_cm, 'X', side)
+        py = metric_penumbra(df, fs, depth_cm, 'Y', side)
+        valid = [v for v in (px, py) if not np.isnan(v)]
+        return float(np.mean(valid)) if valid else float('nan')
+    pos, dose = _profile_sorted(df, fs, depth_cm, axis)
+    if pos is None:
+        return float('nan')
+    if side == 'Both':
+        pl = _penumbra_side(pos, dose, 'left')
+        pr = _penumbra_side(pos, dose, 'right')
+        valid = [v for v in (pl, pr) if not np.isnan(v)]
+        return float(np.mean(valid)) if valid else float('nan')
+    return _penumbra_side(pos, dose, side.lower())
+
+
+def metric_oar(df, fs, depth_cm, axis='X', side='Both', oar_pos=2.0):
+    """Off-axis ratio D(±oar_pos)/D_CAX [%]. Both=average of + and - sides."""
+    if axis == 'Both':
+        ox = metric_oar(df, fs, depth_cm, 'X', side, oar_pos)
+        oy = metric_oar(df, fs, depth_cm, 'Y', side, oar_pos)
+        valid = [v for v in (ox, oy) if not np.isnan(v)]
+        return float(np.mean(valid)) if valid else float('nan')
+    pos, dose = _profile_sorted(df, fs, depth_cm, axis)
+    if pos is None:
+        return float('nan')
+    try:
+        pchip = interp.pchip(pos, dose)
+        d_cax = float(pchip(0.0))
+    except Exception:
+        return float('nan')
+    if d_cax <= 0:
+        return float('nan')
+    if side == 'Both':
+        vals = [float(pchip(oar_pos)), float(pchip(-oar_pos))]
+        return float(np.mean(vals)) / d_cax * 100.0
+    elif side == 'Right':
+        return float(pchip(oar_pos)) / d_cax * 100.0
+    else:
+        return float(pchip(-oar_pos)) / d_cax * 100.0
+
+
+def metric_field_size(df, fs, depth_cm, axis='X'):
+    """Measured field size (FWHM) for axis='X', 'Y', or 'Both' (average of X and Y)."""
+    if axis == 'Both':
+        fx = metric_field_size(df, fs, depth_cm, 'X')
+        fy = metric_field_size(df, fs, depth_cm, 'Y')
+        valid = [v for v in (fx, fy) if not np.isnan(v)]
+        return float(np.mean(valid)) if valid else float('nan')
+    pos, dose = _profile_sorted(df, fs, depth_cm, axis)
+    if pos is None:
+        return float('nan')
+    return _fwhm(pos, dose)
+
+
 def metric_tmr_20_10(df, fs, depth_cm):
     """TMR(20,10) beam quality index, derived from PDD data.
 
@@ -98,10 +279,26 @@ def metric_tmr_20_10(df, fs, depth_cm):
     return 1.2661 * (d20 / d10) - 0.0595
 
 
+_ENERGIES = ["6X", "10X", "15X", "6FFF", "8FFF", "10FFF"]
+
 METRICS = {
-    "PDD at depth": {"fn": metric_pdd_at_depth, "file_keyword": "PDD", "unit": "%"},
-    "Depth of dmax": {"fn": metric_dmax_depth,  "file_keyword": "PDD", "unit": "cm"},
-    "TMR 20/10":     {"fn": metric_tmr_20_10,   "file_keyword": "PDD", "unit": ""},
+    "PDD at depth":     {"fn": metric_pdd_at_depth, "file_keyword": "PDD",     "unit": "%",
+                         "spec": {e: None for e in _ENERGIES}, "tol": 0.5},
+    "Depth of dmax":    {"fn": metric_dmax_depth,   "file_keyword": "PDD",     "unit": "cm",
+                         "spec": {e: None for e in _ENERGIES}, "tol": 0.5},
+    "TMR 20/10":        {"fn": metric_tmr_20_10,    "file_keyword": "PDD",     "unit": "",
+                         "spec": None, "tol": None},
+    "Profile Flatness":   {"fn": metric_flatness,    "file_keyword": "Profile", "unit": "%",
+                           "spec": 0.0, "tol": 3.0,  "needs_axis": True},
+    "Profile Field Size": {"fn": metric_field_size,  "file_keyword": "Profile", "unit": "cm",
+                           "spec": None, "tol": 0.2,  "needs_axis": True},
+    "Profile Symmetry":   {"fn": metric_symmetry,   "file_keyword": "Profile", "unit": "%",
+                           "spec": 0.0,  "tol": 3.0,  "needs_axis": True},
+    "Profile Penumbra":   {"fn": metric_penumbra,  "file_keyword": "Profile", "unit": "cm",
+                           "spec": None, "tol": None, "needs_axis": True, "needs_side": True},
+    "Profile OAR":        {"fn": metric_oar,       "file_keyword": "Profile", "unit": "%",
+                           "spec": None, "tol": None, "needs_axis": True, "needs_side": True,
+                           "needs_oar_pos": True},
 }
 
 
@@ -123,6 +320,7 @@ def parse_energy_ssd(name):
 # ── File registry: list of {'path', 'energy', 'ssd', 'sheets'} ──────────────
 
 loaded_files = []
+_user_specs  = {}   # {metric_name: {energy: float or None}}
 
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
@@ -130,11 +328,16 @@ loaded_files = []
 root = tk.Tk()
 root.title("Beam Specifier Compare v0.2")
 
-fs_var        = tk.StringVar(master=root, value="10.5")
-depth_var     = tk.StringVar(master=root, value="10")
-metric_var    = tk.StringVar(master=root, value="PDD at depth")
-highlight_var = tk.StringVar(master=root)
+fs_var          = tk.StringVar(master=root, value="10.5")
+depth_var       = tk.StringVar(master=root, value="10")
+metric_var      = tk.StringVar(master=root, value="PDD at depth")
+highlight_var   = tk.StringVar(master=root)
 show_labels_var = tk.BooleanVar(master=root, value=False)
+axis_var        = tk.StringVar(master=root, value="X")
+side_var        = tk.StringVar(master=root, value="Both")
+oar_pos_var     = tk.StringVar(master=root, value="2.0")
+spec_var        = tk.StringVar(master=root, value="")
+tol_var         = tk.StringVar(master=root, value="")
 
 main = ttk.Frame(root, padding=10)
 main.grid(row=0, column=0, sticky="nsew")
@@ -256,28 +459,138 @@ metric_combo = ttk.Combobox(main, textvariable=metric_var, values=list(METRICS.k
                             state="readonly", width=20)
 metric_combo.grid(row=5, column=1, sticky="w", padx=5, pady=(10, 0))
 
-# Row 6: FS entry
+# Row 6: FS entry + Spec
 ttk.Label(main, text="Reference field size [cm]:").grid(row=6, column=0, sticky="w")
 ttk.Entry(main, textvariable=fs_var, width=8).grid(row=6, column=1, sticky="w", padx=5)
+spec_single_frame = ttk.Frame(main)
+spec_single_frame.grid(row=6, column=2, sticky="w", padx=5)
+ttk.Label(spec_single_frame, text="Spec:").pack(side='left')
+ttk.Entry(spec_single_frame, textvariable=spec_var, width=8).pack(side='left', padx=4)
 
-# Row 7: depth entry
+spec_multi_frame = ttk.Frame(main)
+spec_multi_frame.grid(row=6, column=2, sticky="w", padx=5)
+ttk.Label(spec_multi_frame, text="Spec:").pack(side='left')
+# Button command assigned after _open_spec_editor is defined below
+spec_multi_btn = ttk.Button(spec_multi_frame, text="Per energy…")
+spec_multi_btn.pack(side='left', padx=4)
+spec_multi_frame.grid_remove()
+
+# Row 7: depth entry + Tolerance
 ttk.Label(main, text="Reference depth [cm]:").grid(row=7, column=0, sticky="w")
 ttk.Entry(main, textvariable=depth_var, width=8).grid(row=7, column=1, sticky="w", padx=5)
+tol_frame = ttk.Frame(main)
+tol_frame.grid(row=7, column=2, sticky="w", padx=5)
+ttk.Label(tol_frame, text="Tolerance ±:").pack(side='left')
+ttk.Entry(tol_frame, textvariable=tol_var, width=8).pack(side='left', padx=4)
 
-# Row 8: highlight + show all labels
-ttk.Label(main, text="Highlight sheet:").grid(row=8, column=0, sticky="w")
+# Row 8: profile axis selector (shown only for axis-aware metrics)
+axis_label = ttk.Label(main, text="Profile axis:")
+axis_label.grid(row=8, column=0, sticky="w")
+axis_frame = ttk.Frame(main)
+axis_frame.grid(row=8, column=1, columnspan=2, sticky="w")
+for _txt, _val in (("X", "X"), ("Y", "Y"), ("Both (worst)", "Both")):
+    ttk.Radiobutton(axis_frame, text=_txt, variable=axis_var, value=_val).pack(side='left', padx=6)
+
+# Row 9: profile side selector (shown only for metrics with needs_side)
+side_label = ttk.Label(main, text="Side:")
+side_label.grid(row=9, column=0, sticky="w")
+side_frame = ttk.Frame(main)
+side_frame.grid(row=9, column=1, columnspan=2, sticky="w")
+for _txt, _val in (("Left", "Left"), ("Right", "Right"), ("Both (avg)", "Both")):
+    ttk.Radiobutton(side_frame, text=_txt, variable=side_var, value=_val).pack(side='left', padx=6)
+side_label.grid_remove()
+side_frame.grid_remove()
+
+
+def _open_spec_editor():
+    metric = metric_var.get()
+    defaults = METRICS[metric].get("spec", {})
+    if metric not in _user_specs:
+        _user_specs[metric] = dict(defaults)
+
+    dlg = tk.Toplevel(root)
+    dlg.title(f"Spec per energy — {metric}")
+    dlg.resizable(False, False)
+    dlg.grab_set()
+
+    entries = {}
+    for i, energy in enumerate(_ENERGIES):
+        ttk.Label(dlg, text=energy, width=8).grid(row=i, column=0, padx=12, pady=4, sticky='w')
+        val = _user_specs[metric].get(energy)
+        var = tk.StringVar(value="" if val is None else str(val))
+        ttk.Entry(dlg, textvariable=var, width=10).grid(row=i, column=1, padx=12, pady=4)
+        entries[energy] = var
+
+    def _save():
+        for e, v in entries.items():
+            txt = v.get().strip()
+            try:
+                _user_specs[metric][e] = float(txt) if txt else None
+            except ValueError:
+                _user_specs[metric][e] = None
+        dlg.destroy()
+
+    n = len(_ENERGIES)
+    ttk.Button(dlg, text="OK",     command=_save       ).grid(row=n, column=0, pady=8)
+    ttk.Button(dlg, text="Cancel", command=dlg.destroy ).grid(row=n, column=1, pady=8)
+
+spec_multi_btn.configure(command=_open_spec_editor)
+
+
+def _on_metric_change(*_):
+    info = METRICS.get(metric_var.get(), {})
+    if info.get("needs_axis"):
+        axis_label.grid()
+        axis_frame.grid()
+    else:
+        axis_label.grid_remove()
+        axis_frame.grid_remove()
+    if info.get("needs_side"):
+        side_label.grid()
+        side_frame.grid()
+    else:
+        side_label.grid_remove()
+        side_frame.grid_remove()
+    if info.get("needs_oar_pos"):
+        oar_pos_frame.grid()
+    else:
+        oar_pos_frame.grid_remove()
+    spec_info = info.get("spec")
+    if isinstance(spec_info, dict):
+        spec_single_frame.grid_remove()
+        spec_multi_frame.grid()
+        spec_var.set("")
+    else:
+        spec_multi_frame.grid_remove()
+        spec_single_frame.grid()
+        spec_var.set("" if spec_info is None else str(spec_info))
+    tol_var.set("" if info.get("tol") is None else str(info["tol"]))
+
+
+metric_combo.bind("<<ComboboxSelected>>", _on_metric_change)
+_on_metric_change()   # initialize visibility
+
+# Row 10: off-axis position entry (shown only for OAR metric)
+oar_pos_frame = ttk.Frame(main)
+oar_pos_frame.grid(row=10, column=0, columnspan=2, sticky="w")
+ttk.Label(oar_pos_frame, text="Off-axis position [cm]:").pack(side='left')
+ttk.Entry(oar_pos_frame, textvariable=oar_pos_var, width=8).pack(side='left', padx=5)
+oar_pos_frame.grid_remove()
+
+# Row 11: highlight + show all labels
+ttk.Label(main, text="Highlight sheet:").grid(row=11, column=0, sticky="w")
 highlight_combo = ttk.Combobox(main, textvariable=highlight_var, values=[''],
                                state="readonly", width=20)
-highlight_combo.grid(row=8, column=1, sticky="w", padx=5)
+highlight_combo.grid(row=11, column=1, sticky="w", padx=5)
 ttk.Checkbutton(main, text="Label all points", variable=show_labels_var).grid(
-    row=8, column=2, sticky="w", padx=5)
+    row=11, column=2, sticky="w", padx=5)
 
-# Row 9: Run button (above output so it's always visible)
-# Row 9 run button is bound after run_compare is defined, below.
+# Row 12: Run button (above output so it's always visible)
+# Row 12 run button is bound after run_compare is defined, below.
 
-# Row 10: output
+# Row 13: output
 output_frame = ttk.Frame(main)
-output_frame.grid(row=10, column=0, columnspan=3, sticky="w")
+output_frame.grid(row=13, column=0, columnspan=3, sticky="w")
 output_text = tk.Text(output_frame, height=15, width=110, wrap='none',
                       font=('Courier', 9))
 output_text.grid(row=0, column=0, sticky="nsew")
@@ -318,20 +631,57 @@ def run_compare():
 
     metric_name = metric_var.get()
     metric_info = METRICS[metric_name]
-    metric_fn   = metric_info["fn"]
     file_kw     = metric_info.get("file_keyword")
     unit        = metric_info.get("unit", "")
     highlight   = highlight_var.get().strip() or None
 
+    if metric_info.get("needs_axis"):
+        _axis = axis_var.get()
+        if metric_info.get("needs_side"):
+            _side = side_var.get()
+            if metric_info.get("needs_oar_pos"):
+                try:
+                    _oar = float(oar_pos_var.get())
+                except ValueError:
+                    _oar = 2.0
+                metric_fn = lambda df, fs, d, __ax=_axis, __sd=_side, __p=_oar: metric_info["fn"](df, fs, d, __ax, __sd, __p)
+                axis_str = f", axis={_axis}, side={_side}, pos=±{_oar}cm"
+            else:
+                metric_fn = lambda df, fs, d, __ax=_axis, __sd=_side: metric_info["fn"](df, fs, d, __ax, __sd)
+                axis_str = f", axis={_axis}, side={_side}"
+        else:
+            metric_fn = lambda df, fs, d, __ax=_axis: metric_info["fn"](df, fs, d, __ax)
+            axis_str = f", axis={_axis}"
+    else:
+        metric_fn = metric_info["fn"]
+        axis_str = ""
+
     # results[(energy, ssd)] = { sheet: value }
     results = {}
 
+    spec_info = metric_info.get("spec")
+    use_per_energy_spec = isinstance(spec_info, dict)
+    if use_per_energy_spec:
+        energy_specs = _user_specs.get(metric_name, spec_info)
+        spec_val = None   # resolved per group below
+    else:
+        try:
+            spec_val = float(spec_var.get()) if spec_var.get().strip() else None
+        except ValueError:
+            spec_val = None
+    try:
+        tol_val = float(tol_var.get()) if tol_var.get().strip() else None
+    except ValueError:
+        tol_val = None
+
     output_text.delete("1.0", tk.END)
-    output_text.insert(tk.END, f"{metric_name}  (FS={fs_ref} cm, depth={depth_ref} cm)\n")
+    output_text.insert(tk.END, f"{metric_name}  (FS={fs_ref} cm, depth={depth_ref} cm{axis_str})\n")
     output_text.insert(tk.END, "=" * 70 + "\n")
 
     for entry in loaded_files:
         energy = entry['energy']; ssd = entry['ssd']
+        if use_per_energy_spec:
+            spec_val = energy_specs.get(energy)
         if has_energy_filter and energy is not None and energy not in allowed_energies:
             continue
         if has_ssd_filter and ssd is not None and ssd not in allowed_ssds:
@@ -367,7 +717,11 @@ def run_compare():
                 pass
             val = metric_fn(df, fs_ref, depth_ref)
             results[group_key][s] = val
-            output_text.insert(tk.END, f"  {s:<15}  {val:.3f}\n")
+            flag = ""
+            if spec_val is not None and tol_val is not None and not np.isnan(val):
+                if abs(val - spec_val) > tol_val:
+                    flag = "  ***"
+            output_text.insert(tk.END, f"  {s:<15}  {val:.3f}{flag}\n")
 
     # Keep a stable order
     def _group_sort_key(k):
@@ -440,13 +794,15 @@ def run_compare():
     ncols = min(n, 3)
     nrows = math.ceil(n / ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.8 * nrows), squeeze=False)
-    fig.suptitle(f"{metric_name} at FS {fs_ref:g} cm, depth {depth_ref:g} cm", fontsize=12)
+    fig.suptitle(f"{metric_name}{axis_str} at FS {fs_ref:g} cm, depth {depth_ref:g} cm", fontsize=12)
 
     rng = np.random.default_rng(0)
     for i, k in enumerate(group_keys):
         r, col_ = divmod(i, ncols)
         ax = axes[r][col_]
         e, s = k
+        if use_per_energy_spec:
+            spec_val = energy_specs.get(e)
         sheet_items = [(sh, v) for sh, v in results[k].items() if not np.isnan(v)]
         vals = [v for _, v in sheet_items]
 
@@ -472,6 +828,12 @@ def run_compare():
         # Pad y-range a bit around the data so the box isn't hugging the edges.
         # Floor scales with the value magnitude (not an absolute 0.05) so small
         # dimensionless metrics like TMR 20/10 (~0.7) aren't dwarfed by the pad.
+        if spec_val is not None:
+            ax.axhline(spec_val, color='green', linewidth=1.2, alpha=0.8, label='Spec')
+            if tol_val is not None:
+                ax.axhline(spec_val + tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8, label='Tol')
+                ax.axhline(spec_val - tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8)
+
         vmin, vmax = min(vals), max(vals)
         pad = max((vmax - vmin) * 0.3, abs(vmax) * 0.01)
         ax.set_ylim(vmin - pad, vmax + pad)
@@ -485,6 +847,6 @@ def run_compare():
     plt.show()
 
 
-ttk.Button(main, text="Run", command=run_compare).grid(row=9, column=0, columnspan=3, pady=10)
+ttk.Button(main, text="Run", command=run_compare).grid(row=12, column=0, columnspan=3, pady=10)
 
 root.mainloop()

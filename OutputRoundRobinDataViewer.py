@@ -27,7 +27,7 @@ import statsmodels.formula.api as smf
 # ---------- Config ----------
 DEFAULT_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\OutputRoundRobinData.xlsx"
 EXPECTED_ENERGIES = ["6X", "10X", "15X", "6FFF", "8FFF", "10FFF"]
-SYSTEM_ORDER = ["Institution", "IROC", "RDS", "Consortium Audit", "Institution Reported (Consortium Form)", "Consortium Audit (Form-Corrected)"]
+SYSTEM_ORDER = ["IROC", "RDS", "Institution", "Consortium Audit", "Institution Reported (Consortium Form)", "Consortium Audit (Form-Corrected)"]
 ORDER = {name: i for i, name in enumerate(SYSTEM_ORDER)}
 # Marker per system (used in both boxplots)
 MARKER_MAP = {
@@ -38,8 +38,6 @@ MARKER_MAP = {
     "Consortium Audit": "X",
     "Consortium Audit (Form-Corrected)": "^",
 }
-OUTLIER_MIN_N = 15   # only show 1.5*IQR fliers when N >= this
-
 MARKER_COLOR = "black"   # or "#444", "0.3", etc.
 
 DEFAULT_TOL = 0.05   # default acceptance tolerance (±5%), drawn as dashed lines around the 1.0 baseline
@@ -113,31 +111,36 @@ def renormalize_to_reference(long: pd.DataFrame, reference_system: str):
     data["_date"] = pd.to_datetime(data["Date"], errors="coerce")
 
     kept = []
-    dropped = orphan = 0
+    dropped = 0
     multi_ref_warned = False
 
     for (sn, en), grp in data.groupby(["SN", "Energy"], dropna=False):
-        grp = grp.sort_values("_date", kind="mergesort")
-        # Assign session ids: each Institution row increments the counter.
-        sids, sid = [], 0
-        for sysname in grp["System"]:
-            if sysname == "Institution":
-                sid += 1
-            sids.append(sid)
-        grp = grp.assign(_session=sids)
+        ref_rows = grp[grp["System"] == ref].dropna(subset=["_date"])
+        if ref_rows.empty:
+            dropped += len(grp)
+            continue
 
-        # Rows before the first Institution (session 0) are orphans.
-        orphan += int((grp["_session"] == 0).sum())
-        grp = grp[grp["_session"] > 0]
+        ref_dates = np.array(ref_rows["_date"].values, dtype="datetime64[ns]")
 
-        for _sess, sgrp in grp.groupby("_session"):
+        # Drop rows with no date
+        grp_valid = grp.dropna(subset=["_date"])
+        dropped += len(grp) - len(grp_valid)
+
+        # Match each row to the nearest reference date
+        row_dates = np.array(grp_valid["_date"].values, dtype="datetime64[ns]")
+        diffs = np.abs(row_dates[:, None].astype("int64") - ref_dates[None, :].astype("int64"))
+        nearest_idx = np.argmin(diffs, axis=1)
+        grp_valid = grp_valid.copy()
+        grp_valid["_session_key"] = ref_dates[nearest_idx]
+
+        for _, sgrp in grp_valid.groupby("_session_key"):
             ref_vals = sgrp.loc[sgrp["System"] == ref, "Ratio"].dropna()
             if ref_vals.empty:
                 dropped += len(sgrp)
                 continue
             if len(ref_vals) > 1 and not multi_ref_warned:
-                print(f"[renormalize] reference '{ref}' has multiple measurements in a "
-                      f"session (e.g. SN {sn}, {en}) — averaging them for the divisor.")
+                print(f"[renormalize] reference '{ref}' has multiple measurements matched to "
+                      f"same session (e.g. SN {sn}, {en}) — averaging them.")
                 multi_ref_warned = True
             ref_val = float(ref_vals.mean())
             if ref_val == 0 or not np.isfinite(ref_val):
@@ -147,16 +150,13 @@ def renormalize_to_reference(long: pd.DataFrame, reference_system: str):
             s["Ratio"] = s["Ratio"] / ref_val
             kept.append(s)
 
-    if orphan:
-        print(f"[renormalize] dropped {orphan} orphan row(s) appearing before any "
-              f"Institution measurement.")
     if dropped:
-        print(f"[renormalize] dropped {dropped} row(s) in sessions with no '{ref}' measurement.")
+        print(f"[renormalize] dropped {dropped} row(s) with no date or no matching reference.")
 
     if not kept:
-        return data.iloc[0:0].drop(columns=["_date", "_session"], errors="ignore"), dropped + orphan
-    out = pd.concat(kept, ignore_index=True).drop(columns=["_date", "_session"], errors="ignore")
-    return out, dropped + orphan
+        return data.iloc[0:0].drop(columns=["_date", "_session_key"], errors="ignore"), dropped
+    out = pd.concat(kept, ignore_index=True).drop(columns=["_date", "_session_key"], errors="ignore")
+    return out, dropped
 
 
 def filter_paired_dates(long: pd.DataFrame) -> pd.DataFrame:
@@ -168,15 +168,12 @@ def filter_paired_dates(long: pd.DataFrame) -> pd.DataFrame:
     return df[mask].drop(columns=["_dk"])
 
 
-def _draw_tukey_fliers_threshold(ax, series, positions, min_n, color, markersize=10, zorder=6):
-    """
-    Draw Tukey (1.5*IQR) fliers ONLY for boxes with N >= min_n.
-    Works across matplotlib versions regardless of boxplot(showfliers=...) behavior.
-    """
+def _draw_tukey_fliers(ax, series, positions, color, markersize=10, zorder=6):
+    """Draw Tukey (1.5*IQR) flier asterisks for all boxes."""
     for vals, x in zip(series, positions):
         vals = np.asarray(vals, dtype=float)
         vals = vals[np.isfinite(vals)]
-        if len(vals) < min_n:
+        if len(vals) < 4:
             continue
 
         q1 = np.percentile(vals, 25)
@@ -231,7 +228,7 @@ def _apply_yaxis(ax, range_pct=DEFAULT_YRANGE_PCT,
 
 def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution", show_tolerance: bool = True, tol: float = DEFAULT_TOL,
                     y_range: float = DEFAULT_YRANGE_PCT, major_tick: float = DEFAULT_MAJOR_PCT, minor_tick: float = DEFAULT_MINOR_PCT,
-                    show_points: bool = True, normalized: bool = False):
+                    show_points: bool = True, normalized: bool = False, show_outlier_markers: bool = True):
 
 
     data = long.copy()
@@ -265,9 +262,8 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
         medianprops=dict(color='black', linewidth=1.2),
     )
 
-    # Draw outlier stars only when showing all points and N >= OUTLIER_MIN_N
-    if show_points:
-        _draw_tukey_fliers_threshold(ax, series, positions, OUTLIER_MIN_N, MARKER_COLOR, markersize=10, zorder=6)
+    if show_outlier_markers:
+        _draw_tukey_fliers(ax, series, positions, MARKER_COLOR, markersize=10, zorder=6)
 
     # Baseline at 1.0
     ax.axhline(1.0, linestyle="--", color="black", linewidth=1.0)
@@ -297,7 +293,7 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
         if len(vals) == 0:
             continue
         x = pos_map[sys]
-        xs = x + np.random.uniform(-0.01, 0.01, size=len(vals))
+        xs = x + (np.random.uniform(-0.01, 0.01, size=len(vals)) if show_points else np.zeros(len(vals)))
 
         ax.scatter(
             xs, vals,
@@ -331,7 +327,7 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
         for sys in systems_present
     ]
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
-    if show_points:
+    if show_outlier_markers:
         handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
                               color=MARKER_COLOR, label="Outlier"))
     if show_tolerance:
@@ -353,7 +349,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                      major_tick: float = DEFAULT_MAJOR_PCT,
                      minor_tick: float = DEFAULT_MINOR_PCT,
                      show_points: bool = True,
-                     normalized: bool = False):
+                     normalized: bool = False,
+                     show_outlier_markers: bool = True):
 
 
     data = long.copy()
@@ -406,9 +403,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
         medianprops=dict(color='black', linewidth=1.2),
     )
 
-    # Draw outlier stars only when showing all points and N >= OUTLIER_MIN_N
-    if show_points:
-        _draw_tukey_fliers_threshold(ax, series, positions, OUTLIER_MIN_N, MARKER_COLOR, markersize=10, zorder=6)
+    if show_outlier_markers:
+        _draw_tukey_fliers(ax, series, positions, MARKER_COLOR, markersize=10, zorder=6)
 
     # Baseline at 1.0 (and use black so legend matches)
     ax.axhline(1.0, linestyle="--", color="black", linewidth=1.0)
@@ -440,7 +436,7 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
             if len(vals) == 0:
                 continue
             x = pos_map[(g, sys)]
-            xs = x + np.random.uniform(-0.01, 0.01, size=len(vals))
+            xs = x + (np.random.uniform(-0.01, 0.01, size=len(vals)) if show_points else np.zeros(len(vals)))
 
             ax.scatter(xs, vals,
                        marker=marker_map.get(sys, "D"), s=40, alpha=0.9,
@@ -480,7 +476,7 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                       label=sys) for sys in systems]
 
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
-    if show_points:
+    if show_outlier_markers:
         handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,
                               color=MARKER_COLOR, label="Outlier"))
     if show_tolerance:
@@ -632,7 +628,8 @@ def make_plots(df: pd.DataFrame,
                minor_tick: float = DEFAULT_MINOR_PCT,
                show_points: bool = True,
                font_size: float = DEFAULT_FONT_SIZE,
-               paired_dates: bool = False):
+               paired_dates: bool = False,
+               show_outlier_markers: bool = True):
 
     # Apply font size to all subsequently created matplotlib text
     plt.rcParams.update({
@@ -693,7 +690,7 @@ def make_plots(df: pd.DataFrame,
                         show_energy_labels=show_energy_labels, ref_label=ref_label,
                         show_tolerance=show_tolerance, tol=tolerance,
                         y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
-                        show_points=show_points, normalized=normalized)
+                        show_points=show_points, normalized=normalized, show_outlier_markers=show_outlier_markers)
 
     if show_sn:
         _grouped_boxplot(
@@ -706,7 +703,7 @@ def make_plots(df: pd.DataFrame,
             show_tolerance=show_tolerance,
             tol=tolerance,
             y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
-            show_points=show_points, normalized=normalized
+            show_points=show_points, normalized=normalized, show_outlier_markers=show_outlier_markers
         )
 
 
@@ -722,7 +719,7 @@ def make_plots(df: pd.DataFrame,
             show_tolerance=show_tolerance,
             tol=tolerance,
             y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
-            show_points=show_points, normalized=normalized
+            show_points=show_points, normalized=normalized, show_outlier_markers=show_outlier_markers
         )
 
 
@@ -756,6 +753,7 @@ class App(tk.Tk):
         self.font_size_var = tk.StringVar(value=str(DEFAULT_FONT_SIZE))
         self.show_points = tk.BooleanVar(value=True)
         self.paired_dates = tk.BooleanVar(value=False)
+        self.show_outlier_markers = tk.BooleanVar(value=True)
 
         ttk.Checkbutton(
             self, text="System boxplot (all data)",
@@ -782,7 +780,8 @@ class App(tk.Tk):
         ttk.Entry(self, textvariable=self.tol_var, width=6).grid(row=7, column=1, sticky="w", **pad)
         ttk.Label(self, text="%").grid(row=7, column=1, sticky="w", padx=(60, 0))
         ttk.Checkbutton(self, text="Show all points (off = outliers only)", variable=self.show_points).grid(row=7, column=2, sticky="w", **pad)
-        ttk.Checkbutton(self, text="Paired dates only (require ≥2 systems per date)", variable=self.paired_dates).grid(row=8, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(self, text="Paired dates only (require ≥2 systems per date)", variable=self.paired_dates).grid(row=8, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Checkbutton(self, text="Mark outliers (★)", variable=self.show_outlier_markers).grid(row=8, column=2, sticky="w", **pad)
 
         # ---- System selection ----
         ttk.Label(self, text="Select System(s) for global filter:").grid(
@@ -987,7 +986,8 @@ class App(tk.Tk):
                minor_tick=minor_tick,
                show_points=self.show_points.get(),
                font_size=font_size,
-               paired_dates=self.paired_dates.get())
+               paired_dates=self.paired_dates.get(),
+               show_outlier_markers=self.show_outlier_markers.get())
         except Exception as e:
             messagebox.showerror("Plot error", str(e))
 

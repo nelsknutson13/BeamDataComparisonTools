@@ -558,6 +558,18 @@ def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True):
         for i, ln in enumerate(summary_lines):
             if "Var" in ln and "0.000 " in ln:
                 summary_lines[i] = ln.replace("0.000 ", "<0.001", 1)
+        # Insert audit-type counts after the header block (before coefficients)
+        sep = "----------------------------------------------------------------------"
+        insert_after = next(
+            (i for i, ln in enumerate(summary_lines) if ln.strip() == sep), None
+        )
+        if insert_after is not None:
+            counts = df.groupby("System").size()
+            count_lines = [sep, "Observations by audit type:"]
+            for sys, n in counts.items():
+                count_lines.append(f"  {sys:<24} N={n}")
+            count_lines.append(sep)
+            summary_lines[insert_after + 1:insert_after + 1] = count_lines
         print("\n".join(summary_lines))
 
         # The summary table rounds variances to 3 decimals, so small (but

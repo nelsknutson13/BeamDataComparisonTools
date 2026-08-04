@@ -283,7 +283,8 @@ _ENERGIES = ["6X", "10X", "15X", "6FFF", "8FFF", "10FFF"]
 
 METRICS = {
     "PDD at depth":     {"fn": metric_pdd_at_depth, "file_keyword": "PDD",     "unit": "%",
-                         "spec": {e: None for e in _ENERGIES}, "tol": 0.5},
+                         "spec": {"6X": 66.6, "10X": 73.8, "15X": 76.8,
+                                  "6FFF": 63.8, "8FFF": 68.9, "10FFF": 70.9}, "tol": 0.5},
     "Depth of dmax":    {"fn": metric_dmax_depth,   "file_keyword": "PDD",     "unit": "cm",
                          "spec": {e: None for e in _ENERGIES}, "tol": 0.5},
     "TMR 20/10":        {"fn": metric_tmr_20_10,    "file_keyword": "PDD",     "unit": "",
@@ -338,6 +339,7 @@ side_var        = tk.StringVar(master=root, value="Both")
 oar_pos_var     = tk.StringVar(master=root, value="2.0")
 spec_var        = tk.StringVar(master=root, value="")
 tol_var         = tk.StringVar(master=root, value="")
+show_spec_var   = tk.BooleanVar(master=root, value=True)
 
 main = ttk.Frame(root, padding=10)
 main.grid(row=0, column=0, sticky="nsew")
@@ -352,6 +354,7 @@ def _refresh_sheets():
         for s in entry['sheets']:
             if s not in seen:
                 all_sheets.append(s); seen.add(s)
+    all_sheets.sort(key=str.casefold)
     for s in all_sheets:
         sheet_listbox.insert(tk.END, s)
     highlight_combo['values'] = [''] + all_sheets
@@ -482,13 +485,14 @@ tol_frame = ttk.Frame(main)
 tol_frame.grid(row=7, column=2, sticky="w", padx=5)
 ttk.Label(tol_frame, text="Tolerance ±:").pack(side='left')
 ttk.Entry(tol_frame, textvariable=tol_var, width=8).pack(side='left', padx=4)
+ttk.Checkbutton(tol_frame, text="Show spec/tol lines", variable=show_spec_var).pack(side='left', padx=10)
 
 # Row 8: profile axis selector (shown only for axis-aware metrics)
 axis_label = ttk.Label(main, text="Profile axis:")
 axis_label.grid(row=8, column=0, sticky="w")
 axis_frame = ttk.Frame(main)
 axis_frame.grid(row=8, column=1, columnspan=2, sticky="w")
-for _txt, _val in (("X", "X"), ("Y", "Y"), ("Both (worst)", "Both")):
+for _txt, _val in (("X", "X"), ("Y", "Y"), ("Both", "Both")):
     ttk.Radiobutton(axis_frame, text=_txt, variable=axis_var, value=_val).pack(side='left', padx=6)
 
 # Row 9: profile side selector (shown only for metrics with needs_side)
@@ -496,10 +500,17 @@ side_label = ttk.Label(main, text="Side:")
 side_label.grid(row=9, column=0, sticky="w")
 side_frame = ttk.Frame(main)
 side_frame.grid(row=9, column=1, columnspan=2, sticky="w")
-for _txt, _val in (("Left", "Left"), ("Right", "Right"), ("Both (avg)", "Both")):
+for _txt, _val in (("Left", "Left"), ("Right", "Right"), ("Both", "Both")):
     ttk.Radiobutton(side_frame, text=_txt, variable=side_var, value=_val).pack(side='left', padx=6)
 side_label.grid_remove()
 side_frame.grid_remove()
+
+# Row 10: off-axis position entry (shown only for OAR metric)
+oar_pos_frame = ttk.Frame(main)
+oar_pos_frame.grid(row=10, column=0, columnspan=2, sticky="w")
+ttk.Label(oar_pos_frame, text="Off-axis position [cm]:").pack(side='left')
+ttk.Entry(oar_pos_frame, textvariable=oar_pos_var, width=8).pack(side='left', padx=5)
+oar_pos_frame.grid_remove()
 
 
 def _open_spec_editor():
@@ -570,13 +581,6 @@ def _on_metric_change(*_):
 metric_combo.bind("<<ComboboxSelected>>", _on_metric_change)
 _on_metric_change()   # initialize visibility
 
-# Row 10: off-axis position entry (shown only for OAR metric)
-oar_pos_frame = ttk.Frame(main)
-oar_pos_frame.grid(row=10, column=0, columnspan=2, sticky="w")
-ttk.Label(oar_pos_frame, text="Off-axis position [cm]:").pack(side='left')
-ttk.Entry(oar_pos_frame, textvariable=oar_pos_var, width=8).pack(side='left', padx=5)
-oar_pos_frame.grid_remove()
-
 # Row 11: highlight + show all labels
 ttk.Label(main, text="Highlight sheet:").grid(row=11, column=0, sticky="w")
 highlight_combo = ttk.Combobox(main, textvariable=highlight_var, values=[''],
@@ -635,26 +639,42 @@ def run_compare():
     unit        = metric_info.get("unit", "")
     highlight   = highlight_var.get().strip() or None
 
+    # Build (suffix, callable) combos — one per axis×side combination to run
+    axis_list = (["X", "Y"] if metric_info.get("needs_axis") and axis_var.get() == "Both"
+                 else [axis_var.get()] if metric_info.get("needs_axis") else [None])
+    side_list = (["Left", "Right"] if metric_info.get("needs_side") and side_var.get() == "Both"
+                 else [side_var.get()] if metric_info.get("needs_side") else [None])
+    try:
+        oar_p = float(oar_pos_var.get()) if metric_info.get("needs_oar_pos") else None
+    except ValueError:
+        oar_p = 2.0
+
+    def _make_combo_fn(ax, sd, p):
+        def _fn(df, fs, d):
+            if ax is None:
+                return metric_info["fn"](df, fs, d)
+            if sd is None:
+                return metric_info["fn"](df, fs, d, ax)
+            if p is None:
+                return metric_info["fn"](df, fs, d, ax, sd)
+            return metric_info["fn"](df, fs, d, ax, sd, p)
+        return _fn
+
+    combos = []
+    for ax in axis_list:
+        for sd in side_list:
+            parts = ([ax] if len(axis_list) > 1 else []) + ([sd] if len(side_list) > 1 else [])
+            suffix = ("_" + "_".join(parts)) if parts else ""
+            combos.append((suffix, _make_combo_fn(ax, sd, oar_p)))
+    expand = len(combos) > 1
+
+    axis_str = ""
     if metric_info.get("needs_axis"):
-        _axis = axis_var.get()
-        if metric_info.get("needs_side"):
-            _side = side_var.get()
-            if metric_info.get("needs_oar_pos"):
-                try:
-                    _oar = float(oar_pos_var.get())
-                except ValueError:
-                    _oar = 2.0
-                metric_fn = lambda df, fs, d, __ax=_axis, __sd=_side, __p=_oar: metric_info["fn"](df, fs, d, __ax, __sd, __p)
-                axis_str = f", axis={_axis}, side={_side}, pos=±{_oar}cm"
-            else:
-                metric_fn = lambda df, fs, d, __ax=_axis, __sd=_side: metric_info["fn"](df, fs, d, __ax, __sd)
-                axis_str = f", axis={_axis}, side={_side}"
-        else:
-            metric_fn = lambda df, fs, d, __ax=_axis: metric_info["fn"](df, fs, d, __ax)
-            axis_str = f", axis={_axis}"
-    else:
-        metric_fn = metric_info["fn"]
-        axis_str = ""
+        axis_str += f", axis={axis_var.get()}"
+    if metric_info.get("needs_side"):
+        axis_str += f", side={side_var.get()}"
+    if oar_p is not None:
+        axis_str += f", pos=±{oar_p}cm"
 
     # results[(energy, ssd)] = { sheet: value }
     results = {}
@@ -715,13 +735,16 @@ def run_compare():
                 df['FS'] = df['FS'].astype(float)
             except Exception:
                 pass
-            val = metric_fn(df, fs_ref, depth_ref)
-            results[group_key][s] = val
-            flag = ""
-            if spec_val is not None and tol_val is not None and not np.isnan(val):
-                if abs(val - spec_val) > tol_val:
-                    flag = "  ***"
-            output_text.insert(tk.END, f"  {s:<15}  {val:.3f}{flag}\n")
+            for suffix, combo_fn in combos:
+                val = combo_fn(df, fs_ref, depth_ref)
+                key = f"{s}{suffix}"
+                results[group_key][key] = val
+                flag = ""
+                if show_spec_var.get() and spec_val is not None and tol_val is not None and not np.isnan(val):
+                    if abs(val - spec_val) > tol_val:
+                        flag = "  ***"
+                w = 18 if expand else 15
+                output_text.insert(tk.END, f"  {key:<{w}}  {val:.3f}{flag}\n")
 
     # Keep a stable order
     def _group_sort_key(k):
@@ -770,23 +793,28 @@ def run_compare():
         output_text.insert(tk.END, f"Position of '{highlight}' within each group:\n")
         for k in group_keys:
             vals_all = results[k]
-            if highlight not in vals_all or np.isnan(vals_all[highlight]):
+            hl_keys = [key for key in vals_all
+                       if key == highlight or key.startswith(highlight + "_")]
+            if not hl_keys:
                 continue
-            v = vals_all[highlight]
-            others = np.array([x for s_, x in vals_all.items()
-                               if s_ != highlight and not np.isnan(x)], dtype=float)
-            if others.size == 0:
-                continue
-            mean = float(others.mean())
-            std  = float(others.std(ddof=1)) if others.size > 1 else 0.0
-            z    = (v - mean) / std if std > 0 else float('nan')
-            delta = v - mean
             e, s = k
             label = f"{e or '?'} {s or '?'} SSD"
-            output_text.insert(tk.END,
-                f"  {label:<18} value={v:.3f}  Δ(mean others)={delta:+.3f}  "
-                f"z={z:+.2f}σ\n"
-            )
+            for hl_key in hl_keys:
+                v = vals_all[hl_key]
+                if np.isnan(v):
+                    continue
+                others = np.array([x for s_, x in vals_all.items()
+                                   if s_ != hl_key and not np.isnan(x)], dtype=float)
+                if others.size == 0:
+                    continue
+                mean  = float(others.mean())
+                std   = float(others.std(ddof=1)) if others.size > 1 else 0.0
+                z     = (v - mean) / std if std > 0 else float('nan')
+                delta = v - mean
+                output_text.insert(tk.END,
+                    f"  {label:<18} [{hl_key}]  value={v:.3f}  Δ(mean others)={delta:+.3f}  "
+                    f"z={z:+.2f}σ\n"
+                )
 
     # ── plot: one subplot per group, per-group y-axis scaling ──
     import math
@@ -811,7 +839,7 @@ def run_compare():
         xs = (rng.random(len(sheet_items)) - 0.5) * 0.15
         label_all = show_labels_var.get()
         for (sh, v), x in zip(sheet_items, xs):
-            if highlight and sh == highlight:
+            if highlight and (sh == highlight or sh.startswith(highlight + "_")):
                 ax.plot(x, v, 'o', color='red', ms=11, zorder=5)
                 ax.annotate(sh, (x, v), xytext=(8, 0), textcoords='offset points',
                             color='red', fontweight='bold', fontsize=9, va='center')
@@ -828,7 +856,7 @@ def run_compare():
         # Pad y-range a bit around the data so the box isn't hugging the edges.
         # Floor scales with the value magnitude (not an absolute 0.05) so small
         # dimensionless metrics like TMR 20/10 (~0.7) aren't dwarfed by the pad.
-        if spec_val is not None:
+        if show_spec_var.get() and spec_val is not None:
             ax.axhline(spec_val, color='green', linewidth=1.2, alpha=0.8, label='Spec')
             if tol_val is not None:
                 ax.axhline(spec_val + tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8, label='Tol')

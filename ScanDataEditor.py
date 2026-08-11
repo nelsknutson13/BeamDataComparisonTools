@@ -39,7 +39,8 @@ TAG_DUP_CONFL = 'dup_confl'
 
 # Group key: a "scan position" — Detector is handled inside the group
 PROFILE_KEY_COLS = ['Energy', 'SSD', 'FS', 'Axis', 'Depth']
-DEPTH_KEY_COLS   = ['Energy', 'SSD', 'FS']
+Z_KEY_COLS       = ['Energy', 'SSD', 'FS', 'Axis']   # PDD/TPR: Depth is measured, not fixed
+DEPTH_KEY_COLS   = ['Energy', 'SSD', 'FS']            # legacy depth files without Axis column
 
 # (treeview column id, scan dict key, numeric sort?)
 TREE_COLS = [
@@ -68,8 +69,13 @@ FILTER_COLS = [
 
 # ── Core logic ────────────────────────────────────────────────────────────────
 
+def _pos_col(df):
+    return 'Pos' if 'Pos' in df.columns else 'Depth'
+
+
 def _fingerprint(sub_df):
-    arr = sub_df[['Pos', 'Dose']].apply(pd.to_numeric, errors='coerce').dropna().to_numpy()
+    pos = _pos_col(sub_df)
+    arr = sub_df[[pos, 'Dose']].apply(pd.to_numeric, errors='coerce').dropna().to_numpy()
     if len(arr) == 0:
         return ''
     arr = np.round(arr[np.argsort(arr[:, 0])], 6)
@@ -88,7 +94,7 @@ def _copies_from_group(det_val, det_group):
     """Split one (key + detector) sub-group into copies using Pos occurrence.
     Returns list of (det_val, sub_df, fingerprint).
     """
-    pos_num  = pd.to_numeric(det_group['Pos'], errors='coerce')
+    pos_num  = pd.to_numeric(det_group[_pos_col(det_group)], errors='coerce')
     n_total  = len(det_group)
     n_unique = int(pos_num.nunique(dropna=True))
 
@@ -117,8 +123,14 @@ def parse_scans(df):
     """
     has_axis     = 'Axis'     in df.columns
     has_detector = 'Detector' in df.columns
-    candidates   = PROFILE_KEY_COLS if has_axis else DEPTH_KEY_COLS
-    key_cols     = [c for c in candidates if c in df.columns]
+
+    if has_axis:
+        axes = df['Axis'].astype(str).str.strip().unique()
+        is_depth_only = set(axes).issubset({'Z', 'z', '', 'nan'})
+        candidates = Z_KEY_COLS if is_depth_only else PROFILE_KEY_COLS
+    else:
+        candidates = DEPTH_KEY_COLS
+    key_cols = [c for c in candidates if c in df.columns]
 
     df = df.copy()
     for c in ('SSD', 'FS', 'Depth'):

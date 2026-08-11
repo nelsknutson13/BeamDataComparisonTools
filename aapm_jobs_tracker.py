@@ -12,6 +12,7 @@ Dependencies (install once):
 import json
 import re
 import sqlite3
+import webbrowser
 import subprocess
 import threading
 import time
@@ -46,6 +47,7 @@ DEBUG_HTML = HERE / "aapm_debug_page.html"
 FETCH_DAYS = 14
 LIVE_BASE  = "https://careers.aapm.org/jobs"
 WB_BASE    = "https://web.archive.org/web/{ts}/https://careers.aapm.org/jobs/"
+API_BASE   = "https://careers.aapm.org/api/v1/jobs"
 
 # HTTP-200 Wayback snapshots (collected 2026-08-05)
 WAYBACK_200 = [
@@ -170,13 +172,14 @@ def upsert_jobs(jobs: list[dict], source: str) -> tuple[int, int]:
                        position_type=COALESCE(?,position_type),
                        rank_level=COALESCE(?,rank_level),
                        job_type=COALESCE(?,job_type),
+                       date_posted=COALESCE(?,date_posted),
                        date_closes=COALESCE(?,date_closes)
                        WHERE job_id=?""",
                     (seen_at, job.get("title"), job.get("employer"),
                      job.get("salary_text"), job.get("salary_min"),
                      job.get("salary_max"), job.get("position_type"),
                      job.get("rank_level"), job.get("job_type"),
-                     job.get("date_closes"), job["job_id"])
+                     job.get("date_posted"), job.get("date_closes"), job["job_id"])
                 )
             else:
                 conn.execute(
@@ -241,14 +244,145 @@ def _infer_rank(title: str) -> str | None:
 
 
 def _parse_salary(text: str) -> tuple[float | None, float | None]:
+    t = (text or "").lower()
+    if "hour" in t:
+        multiplier = 2080        # full-time annual hours
+    elif "month" in t:
+        multiplier = 12
+    else:
+        multiplier = 1           # already annual
     nums = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", text or "")]
+    # Sanity check: if hourly rate implies > $2M/yr, the listing likely meant annual
+    if multiplier > 1 and nums and nums[0] * multiplier > 2_000_000:
+        multiplier = 1
     if len(nums) >= 2:
-        return nums[0], nums[1]
+        return nums[0] * multiplier, nums[1] * multiplier
     if len(nums) == 1:
-        return nums[0], None
+        return nums[0] * multiplier, None
     return None, None
 
 
+
+
+def _fetch_all_ids_for_filter(filter_val: str) -> set[str]:
+    """Return all job IDs matching a filter_1 value (e.g. '50015' for residency)."""
+    ids: set[str] = set()
+    page = 1
+    last_page = 1
+    while page <= last_page:
+        url = (f"{API_BASE}?locale=en&page={page}&sort=date&filter_1={filter_val}")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            last_page = data.get("meta", {}).get("last_page", 1)
+            for item in data.get("data", []):
+                jid = str(item.get("id", ""))
+                if jid:
+                    ids.add(jid)
+        except Exception:
+            break
+        page += 1
+        if page <= last_page:
+            time.sleep(0.5)
+    return ids
+
+
+def fetch_api_jobs(log_fn=None) -> list[dict]:
+    """Fetch current live jobs via the careers.aapm.org REST API (no Selenium needed)."""
+    # Pre-fetch trainee job IDs so we can tag job_type correctly.
+    # The job_type category (Career/Residency/Training) is only in meta filters,
+    # not on individual item records, so we query each trainee filter separately.
+    residency_ids = _fetch_all_ids_for_filter("50015")   # CAMPEP Accredited Residency
+    training_ids  = _fetch_all_ids_for_filter("50014")   # Training Position
+    if log_fn:
+        log_fn(f"  Trainee IDs: {len(residency_ids)} residency, {len(training_ids)} training")
+
+    jobs: list[dict] = []
+    seen_ids: set[str] = set()
+    page = 1
+    last_page = 1
+
+    while page <= last_page:
+        url = (f"{API_BASE}?locale=en&page={page}&sort=date"
+               "&country=&state=&city=&zip=&latitude=&longitude="
+               "&keywords=&city_state_zip=")
+        if log_fn:
+            log_fn(f"  API page {page}/{last_page} → {url}")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+        except Exception as e:
+            if log_fn:
+                log_fn(f"  API error page {page}: {e}")
+            break
+
+        last_page = data.get("meta", {}).get("last_page", 1)
+
+        for item in data.get("data", []):
+            job_id = str(item.get("id", ""))
+            if not job_id or job_id in seen_ids:
+                continue
+            seen_ids.add(job_id)
+
+            # Strip "(Hybrid)" / "(Remote)" suffixes, then split "City, State"
+            loc = re.sub(r"\s*\(.*?\)\s*$", "", item.get("location", "")).strip()
+            parts = [p.strip() for p in loc.split(",")]
+            city  = parts[0] if parts else None
+            state = parts[1] if len(parts) > 1 else None
+
+            # "August 6, 2026" → "2026-08-06"
+            date_posted = None
+            pd_str = item.get("posted_date", "")
+            if pd_str:
+                try:
+                    date_posted = datetime.strptime(pd_str, "%B %d, %Y").strftime("%Y-%m-%d")
+                except ValueError:
+                    date_posted = pd_str
+
+            salary_text = salary_min = salary_max = None
+            position_type = None
+            for block in item.get("customBlockList", []):
+                path = block.get("path", "")
+                val  = block.get("value", "")
+                if path == "approx_salary_text" and val:
+                    salary_text = val
+                    salary_min, salary_max = _parse_salary(val)
+                elif path == "local_position_type" and val:
+                    position_type = val
+
+            if job_id in residency_ids:
+                job_type = "CAMPEP Accredited Residency"
+            elif job_id in training_ids:
+                job_type = "Training Position"
+            else:
+                job_type = "Career Position"
+
+            title = item.get("title", "")
+            jobs.append({
+                "job_id":        job_id,
+                "title":         title,
+                "employer":      item.get("company", {}).get("name"),
+                "city":          city,
+                "state":         state,
+                "date_posted":   date_posted,
+                "url":           item.get("url", ""),
+                "salary_text":   salary_text,
+                "salary_min":    salary_min,
+                "salary_max":    salary_max,
+                "position_type": position_type,
+                "job_type":      job_type,
+                "rank_level":    _infer_rank(title) if title else None,
+            })
+
+        page += 1
+        if page <= last_page:
+            time.sleep(1)
+
+    if log_fn:
+        log_fn(f"  API total: {len(jobs)} jobs across {last_page} page(s).")
+    return jobs
 
 
 def _make_driver():
@@ -757,6 +891,8 @@ class App:
         root.title("AAPM Jobs Tracker")
         root.resizable(True, True)
         self._busy = False
+        self._last_api_jobs: list[dict] = []
+        self._last_selenium_jobs: list[dict] = []
         self._build()
         self._refresh_stats()
         self._refresh_charts()
@@ -802,6 +938,13 @@ class App:
         ttk.Checkbutton(cf, text="Scrape detail pages (slower, more data)",
                         variable=self.var_details).pack(side="left", padx=(10, 0))
 
+        self.var_test_mode = tk.BooleanVar(value=False)
+        ttk.Checkbutton(cf, text="Test mode (no DB write)",
+                        variable=self.var_test_mode).pack(side="left", padx=(10, 0))
+
+        ttk.Button(cf, text="Compare API vs Selenium",
+                   command=self._compare_fetchers).pack(side="left", padx=(10, 0))
+
         ttk.Button(cf, text="Retry Zero-Result Snapshots",
                    command=self._retry_zero_snapshots).pack(side="left", padx=(10, 0))
 
@@ -834,29 +977,72 @@ class App:
         # Charts tab
         charts_tab = ttk.Frame(nb, padding=4)
         nb.add(charts_tab, text="Charts")
-        charts_tab.rowconfigure(0, weight=1)
+        charts_tab.rowconfigure(1, weight=1)
         charts_tab.columnconfigure(0, weight=1)
+
+        # Filter bar
+        chart_filter_bar = ttk.Frame(charts_tab)
+        chart_filter_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(chart_filter_bar, text="Show jobs seen in:").pack(side="left")
+        self.var_chart_days = tk.StringVar(value="14")
+        for label, val in [("Last 2 weeks", "14"), ("Last 30 days", "30"),
+                            ("Last 90 days", "90"), ("All time", "all")]:
+            ttk.Radiobutton(chart_filter_bar, text=label, variable=self.var_chart_days,
+                            value=val, command=self._refresh_charts).pack(side="left", padx=(6, 0))
+        ttk.Separator(chart_filter_bar, orient="vertical").pack(side="left", padx=(10, 0), fill="y", pady=2)
+        self.var_excl_trainees = tk.BooleanVar(value=True)
+        ttk.Checkbutton(chart_filter_bar, text="Exclude trainees (salary chart)",
+                        variable=self.var_excl_trainees,
+                        command=self._refresh_charts).pack(side="left", padx=(6, 0))
+        self.lbl_chart_filter_info = ttk.Label(chart_filter_bar, text="", foreground="gray")
+        self.lbl_chart_filter_info.pack(side="left", padx=(12, 0))
 
         if _HAS_CHARTS:
             self._fig = Figure(figsize=(10, 6), dpi=96, tight_layout=True)
             canvas = FigureCanvasTkAgg(self._fig, master=charts_tab)
-            canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+            canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
             self._canvas = canvas
         else:
             ttk.Label(charts_tab,
                       text="Charts unavailable — install matplotlib and pandas",
-                      foreground="gray").grid(row=0, column=0)
+                      foreground="gray").grid(row=1, column=0)
 
         # Trending tab
         trend_tab = ttk.Frame(nb, padding=4)
         nb.add(trend_tab, text="Trending")
-        trend_tab.rowconfigure(0, weight=1)
+        trend_tab.rowconfigure(1, weight=1)
         trend_tab.columnconfigure(0, weight=1)
+
+        trend_filter_bar = ttk.Frame(trend_tab)
+        trend_filter_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self.var_show_active      = tk.BooleanVar(value=True)
+        self.var_show_new         = tk.BooleanVar(value=True)
+        self.var_show_offered     = tk.BooleanVar(value=True)
+        self.var_show_filled      = tk.BooleanVar(value=True)
+        self.var_show_registered  = tk.BooleanVar(value=True)
+        self.var_show_unmatched   = tk.BooleanVar(value=True)
+        ttk.Label(trend_filter_bar, text="Job data:").pack(side="left", padx=(0, 4))
+        for text, var in [
+            ("Active listings",       self.var_show_active),
+            ("New listings",          self.var_show_new),
+        ]:
+            ttk.Checkbutton(trend_filter_bar, text=text, variable=var,
+                            command=self._refresh_trending).pack(side="left", padx=(0, 8))
+        ttk.Separator(trend_filter_bar, orient="vertical").pack(side="left", padx=(4, 8), fill="y", pady=2)
+        ttk.Label(trend_filter_bar, text="Match stats:").pack(side="left", padx=(0, 4))
+        for text, var in [
+            ("Positions offered",     self.var_show_offered),
+            ("Matches filled",        self.var_show_filled),
+            ("Registered applicants", self.var_show_registered),
+            ("Unmatched applicants",  self.var_show_unmatched),
+        ]:
+            ttk.Checkbutton(trend_filter_bar, text=text, variable=var,
+                            command=self._refresh_trending).pack(side="left", padx=(0, 8))
 
         if _HAS_CHARTS:
             self._trend_fig = Figure(figsize=(10, 6), dpi=96, tight_layout=True)
             trend_canvas = FigureCanvasTkAgg(self._trend_fig, master=trend_tab)
-            trend_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+            trend_canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
             self._trend_canvas = trend_canvas
         else:
             ttk.Label(trend_tab,
@@ -945,6 +1131,10 @@ class App:
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
         self._tree_cols: list[str] = []
+        self._sort_col: str | None = None
+        self._sort_asc: bool = True
+        self._tree.bind("<ButtonRelease-3>", self._tree_right_click)
+        self._tree.bind("<Double-1>", self._tree_open_url)
 
         sql_frame = ttk.LabelFrame(db_tab, text="Run SQL", padding=4)
         sql_frame.grid(row=2, column=0, sticky="ew", pady=(4, 0))
@@ -984,6 +1174,23 @@ class App:
         if df.empty:
             return
 
+        days_val = self.var_chart_days.get()
+        if days_val != "all":
+            cutoff = datetime.now() - timedelta(days=int(days_val))
+            posted = pd.to_datetime(df["date_posted"], errors="coerce", utc=True).dt.tz_convert(None)
+            df = df[posted >= cutoff]
+            self.lbl_chart_filter_info.configure(
+                foreground="gray",
+                text=f"{len(df)} jobs posted since {cutoff.strftime('%Y-%m-%d')}"
+            )
+        else:
+            self.lbl_chart_filter_info.configure(
+                foreground="gray", text=f"{len(df)} jobs total"
+            )
+
+        if df.empty:
+            return
+
         C  = "#2B5DA8"   # primary blue
         C2 = "#6B9DD4"   # lighter blue
         BG = "#F5F6F8"
@@ -1005,23 +1212,25 @@ class App:
         # ── Rank breakdown ────────────────────────────────────────────────
         ax = axes[0, 0]
         ranks = df["rank_level"].fillna("Unspecified")
-        cnt = ranks.value_counts().sort_values()
+        n_unspec = (ranks == "Unspecified").sum()
+        cnt = ranks[ranks != "Unspecified"].value_counts().sort_values()
         bars = ax.barh(cnt.index, cnt.values, color=C, height=0.6)
         for bar, v in zip(bars, cnt.values):
             ax.text(v + 0.3, bar.get_y() + bar.get_height() / 2,
                     str(v), va="center", fontsize=7, color="#1A2030")
-        _style(ax, "Rank / Position")
+        _style(ax, f"Rank / Position  ({n_unspec} of {len(df)} unspecified)")
         ax.set_xlabel("Listings", fontsize=8)
 
         # ── Top states ───────────────────────────────────────────────────
         ax = axes[0, 1]
         states = df["state"].dropna()
-        cnt = states.value_counts().head(12).sort_values()
+        n_unique = states.nunique()
+        cnt = states.value_counts().head(10).sort_values()
         bars = ax.barh(cnt.index, cnt.values, color=C2, height=0.6)
         for bar, v in zip(bars, cnt.values):
             ax.text(v + 0.3, bar.get_y() + bar.get_height() / 2,
                     str(v), va="center", fontsize=7, color="#1A2030")
-        _style(ax, "Top States")
+        _style(ax, f"Top 10 States  ({len(df)} jobs  |  {n_unique} states)")
         ax.set_xlabel("Listings", fontsize=8)
 
         # ── Job type ─────────────────────────────────────────────────────
@@ -1035,37 +1244,83 @@ class App:
         _style(ax, "Job Type")
         ax.set_xlabel("Listings", fontsize=8)
 
-        # ── Salary coverage + distribution ────────────────────────────────
+        # ── Salary by rank + All combined ─────────────────────────────────
         ax = axes[1, 1]
-        has_sal = df["salary_min"].notna()
-        n_sal = has_sal.sum()
-        pct = 100 * n_sal / max(len(df), 1)
-        if n_sal >= 3:
-            sal_df = df[has_sal].copy()
-            sal_df["rank_label"] = sal_df["rank_level"].fillna("Unspecified")
-            grp = sal_df.groupby("rank_label")["salary_min"]
-            labels = [k for k, _ in grp]
-            data   = [v.values / 1000 for _, v in grp]
-            ax.boxplot(data, labels=labels, vert=False, patch_artist=True,
+        _TRAINEE_TYPES = {"CAMPEP Accredited Residency", "Training Position"}
+        sal_df = df[df["salary_min"].notna() & (df["salary_min"] >= 30000)][
+            ["rank_level", "salary_min", "salary_max", "job_type"]].copy()
+        # Zero-out any salary_max that is too low (hourly rate parsed as annual, or bad data)
+        sal_df.loc[(sal_df["salary_max"].notna()) & (sal_df["salary_max"] < 30000), "salary_max"] = None
+        sal_df["rank_level"] = sal_df["rank_level"].fillna("Unspecified")
+        if self.var_excl_trainees.get():
+            sal_df = sal_df[~sal_df["job_type"].isin(_TRAINEE_TYPES)]
+        # midpoint: average of min+max when max exists, else just use min
+        sal_df["salary_mid"] = sal_df.apply(
+            lambda r: (r["salary_min"] + r["salary_max"]) / 2
+                      if pd.notna(r["salary_max"]) else r["salary_min"], axis=1)
+        sal_df["salary_max"] = sal_df["salary_max"].fillna(sal_df["salary_min"])
+
+        n_sal    = len(sal_df)
+        n_no_sal = len(df[df["salary_min"].isna() | (df["salary_min"] == 0)])
+        pct      = 100 * n_sal / max(len(df), 1)
+
+        if n_sal >= 2:
+            ranks  = sorted(sal_df["rank_level"].unique()) + ["— All —"]
+            C_MID  = "#4A7BBF"   # medium blue for midpoint boxes
+            STEP   = 4           # y-rows per rank group
+            positions, data_sets = [], []
+            yticks, ytick_labels = [], []
+
+            for i, rank in enumerate(ranks):
+                sub = sal_df if rank == "— All —" else sal_df[sal_df["rank_level"] == rank]
+                if sub.empty:
+                    continue
+                base = i * STEP
+                for col, offset in [("salary_min", 1), ("salary_mid", 2), ("salary_max", 3)]:
+                    positions.append(base + offset)
+                    data_sets.append((sub[col].values / 1000).tolist())
+                yticks.append(base + 2)
+                ytick_labels.append(rank)
+
+            bp = ax.boxplot(data_sets, positions=positions, vert=False, patch_artist=True,
+                            widths=0.6,
                             medianprops=dict(color="#1A2030", linewidth=1.5),
-                            boxprops=dict(facecolor=C2, linewidth=0.8),
                             whiskerprops=dict(linewidth=0.8),
                             capprops=dict(linewidth=0.8),
-                            flierprops=dict(marker="o", markersize=3,
-                                            markerfacecolor=C, linewidth=0))
-            _style(ax, f"Salary by Rank  ({n_sal}/{len(df)} listed, {pct:.0f}%)")
-            ax.set_xlabel("Salary Min ($k)", fontsize=8)
+                            flierprops=dict(marker="o", markersize=3, linewidth=0))
+            box_colors = [C2, C_MID, C]
+            for j, box in enumerate(bp["boxes"]):
+                box.set_facecolor(box_colors[j % 3])
+                box.set_linewidth(0.7)
+            for j, flier in enumerate(bp["fliers"]):
+                flier.set(markerfacecolor=box_colors[j % 3])
+
+            ax.set_yticks(yticks)
+            ax.set_yticklabels(ytick_labels, fontsize=7)
+            if positions:
+                ax.set_ylim(0, max(positions) + 1)
+
+            from matplotlib.patches import Patch
+            ax.legend(handles=[Patch(facecolor=C2, label="Min"),
+                                Patch(facecolor=C_MID, label="Mid"),
+                                Patch(facecolor=C, label="Max")],
+                      loc="lower right", fontsize=7, framealpha=0.7)
+
+            _style(ax, f"Salary by Rank  (n={n_sal}, {pct:.0f}% reported  |  "
+                       f"{n_no_sal} no salary listed)")
+            ax.set_xlabel("Salary ($k)", fontsize=8)
         else:
             ax.text(0.5, 0.5,
                     f"Salary listed on {n_sal} of {len(df)} jobs ({pct:.0f}%)\n"
-                    "(not enough data for distribution)",
+                    f"{n_no_sal} jobs did not specify salary",
                     ha="center", va="center", fontsize=9, color="#4A5568",
                     transform=ax.transAxes)
-            _style(ax, "Salary Coverage")
+            _style(ax, "Salary by Rank")
             ax.set_xticks([])
             ax.set_yticks([])
 
         self._canvas.draw()
+        self._canvas.flush_events()
 
     def _refresh_trending(self):
         if not _HAS_CHARTS:
@@ -1073,6 +1328,10 @@ class App:
         with _conn() as conn:
             log_df = pd.read_sql(
                 "SELECT fetched_at, source, jobs_found, new_jobs FROM fetch_log ORDER BY fetched_at",
+                conn,
+            )
+            ms_df = pd.read_sql(
+                "SELECT year, positions_offered, matches_filled, registered_applicants, unmatched_applicants FROM match_stats ORDER BY year",
                 conn,
             )
         if log_df.empty:
@@ -1085,11 +1344,20 @@ class App:
 
         log_df["date"] = log_df.apply(_plot_date, axis=1)
         log_df = log_df.sort_values("date").reset_index(drop=True)
+        log_df = log_df[log_df["jobs_found"] > 0].copy()
+        if log_df.empty:
+            return
+        # Don't draw new_jobs=0 points on the line (artifact of fetch order)
+        log_df["new_jobs"] = log_df["new_jobs"].replace(0, float("nan"))
 
-        C    = "#2B5DA8"
-        C2   = "#E07B39"
-        BG   = "#F5F6F8"
-        GRID = "#D8DCE8"
+        C      = "#2B5DA8"
+        C2     = "#E07B39"
+        C3     = "#2E9E6B"   # green — positions offered
+        C4     = "#9B59B6"   # purple — matches filled
+        C5     = "#C0392B"   # red — registered applicants
+        C6     = "#17A589"   # teal — unmatched applicants
+        BG     = "#F5F6F8"
+        GRID   = "#D8DCE8"
 
         self._trend_fig.clear()
         self._trend_fig.patch.set_facecolor(BG)
@@ -1097,17 +1365,38 @@ class App:
 
         import matplotlib.dates as mdates
 
-        ax.plot(log_df["date"], log_df["jobs_found"], color=C, linewidth=2,
-                marker="o", markersize=5, zorder=3, label="Active listings")
-        ax.fill_between(log_df["date"], log_df["jobs_found"], alpha=0.10, color=C)
+        if self.var_show_active.get():
+            ax.plot(log_df["date"], log_df["jobs_found"], color=C, linewidth=2,
+                    marker="o", markersize=5, zorder=3, label="Active listings")
+            ax.fill_between(log_df["date"], log_df["jobs_found"], alpha=0.10, color=C)
 
-        ax.plot(log_df["date"], log_df["new_jobs"], color=C2, linewidth=1.5,
-                marker="o", markersize=4, zorder=3, label="New listings")
-        ax.fill_between(log_df["date"], log_df["new_jobs"], alpha=0.10, color=C2)
+        if self.var_show_new.get():
+            ax.plot(log_df["date"], log_df["new_jobs"], color=C2, linewidth=1.5,
+                    marker="o", markersize=4, zorder=3, label="New listings")
+            ax.fill_between(log_df["date"], log_df["new_jobs"], alpha=0.10, color=C2)
+
+        if not ms_df.empty:
+            ms_dates = pd.to_datetime(ms_df["year"].astype(str) + "-03-01")
+            if self.var_show_offered.get():
+                ax.plot(ms_dates, ms_df["positions_offered"], color=C3, linewidth=2,
+                        linestyle="--", marker="s", markersize=5, zorder=3,
+                        label="Positions offered (match)")
+            if self.var_show_filled.get():
+                ax.plot(ms_dates, ms_df["matches_filled"], color=C4, linewidth=2,
+                        linestyle="--", marker="s", markersize=5, zorder=3,
+                        label="Matches filled")
+            if self.var_show_registered.get() and "registered_applicants" in ms_df.columns:
+                ax.plot(ms_dates, ms_df["registered_applicants"], color=C5, linewidth=2,
+                        linestyle="--", marker="^", markersize=5, zorder=3,
+                        label="Registered applicants")
+            if self.var_show_unmatched.get() and "unmatched_applicants" in ms_df.columns:
+                ax.plot(ms_dates, ms_df["unmatched_applicants"], color=C6, linewidth=2,
+                        linestyle="--", marker="^", markersize=5, zorder=3,
+                        label="Unmatched applicants")
 
         ax.set_facecolor(BG)
-        ax.set_title("Job Postings Over Time", fontsize=11, fontweight="bold", pad=8)
-        ax.set_ylabel("Listings", fontsize=9)
+        ax.set_title("Job Postings & Match Stats Over Time", fontsize=11, fontweight="bold", pad=8)
+        ax.set_ylabel("Count", fontsize=9)
         ax.tick_params(labelsize=8, axis="x", rotation=30)
         ax.spines[["top", "right"]].set_visible(False)
         ax.spines[["left", "bottom"]].set_color(GRID)
@@ -1146,16 +1435,24 @@ class App:
     def _fetch_live(self):
         if self._busy:
             return
-        details = self.var_details.get()
         self._log("=== Live fetch started ===")
 
         def task():
-            jobs = scrape(LIVE_BASE, self._log, scrape_details=details, save_debug=True)
+            jobs = fetch_api_jobs(self._log)
+            self._last_api_jobs = jobs
             if jobs:
-                found, new = upsert_jobs(jobs, "live")
-                self._log(f"Done — {found} listings found, {new} new to DB.")
+                if self.var_test_mode.get():
+                    self._log(f"TEST MODE — {len(jobs)} listings found, nothing written.")
+                    self._log("Sample (first 3 jobs):")
+                    for j in jobs[:3]:
+                        self._log(f"  [{j['job_id']}] date_posted={j.get('date_posted')} "
+                                  f"position_type={j.get('position_type')} "
+                                  f"salary={j.get('salary_text')}")
+                else:
+                    found, new = upsert_jobs(jobs, "live")
+                    self._log(f"Done — {found} listings found, {new} new to DB.")
             else:
-                self._log("No jobs extracted. Open Debug HTML to inspect page structure.")
+                self._log("No jobs returned from API.")
 
         self._run_in_thread(task)
 
@@ -1181,11 +1478,14 @@ class App:
                 self._log(f"[{i+1}/{len(remaining)}] {dt_str}")
                 url  = WB_BASE.format(ts=ts)
                 jobs = scrape(url, self._log, scrape_details=False, save_debug=False)
-                found, new = upsert_jobs(jobs, ts)
-                if found:
-                    self._log(f"  → {found} listings, {new} new.")
+                if self.var_test_mode.get():
+                    self._log(f"  → TEST MODE — {len(jobs)} listings, nothing written.")
                 else:
-                    self._log("  → No listings extracted (logged as done).")
+                    found, new = upsert_jobs(jobs, ts)
+                    if found:
+                        self._log(f"  → {found} listings, {new} new.")
+                    else:
+                        self._log("  → No listings extracted (logged as done).")
                 time.sleep(4)
 
         self._run_in_thread(task)
@@ -1201,12 +1501,58 @@ class App:
         self._tree_cols = cols
         self._tree.delete(*self._tree.get_children())
         self._tree["columns"] = cols
+        self._sort_col = None
+        self._sort_asc = True
         for col in cols:
             w = 180 if col in ("title", "url", "employer", "fetched_at", "first_seen", "last_seen") else 80
-            self._tree.heading(col, text=col)
+            self._tree.heading(col, text=col, command=lambda c=col: self._sort_tree_by(c))
             self._tree.column(col, width=w, minwidth=40, stretch=False)
         for row in rows:
             self._tree.insert("", "end", values=list(row))
+
+    def _sort_tree_by(self, col: str):
+        items = [(self._tree.set(iid, col), iid) for iid in self._tree.get_children("")]
+        reverse = (self._sort_col == col and self._sort_asc)
+        try:
+            items.sort(key=lambda x: float(x[0]) if x[0] not in ("", "None") else float("-inf"),
+                       reverse=reverse)
+        except (ValueError, TypeError):
+            items.sort(key=lambda x: (x[0] or "").lower(), reverse=reverse)
+        for i, (_, iid) in enumerate(items):
+            self._tree.move(iid, "", i)
+        self._sort_col = col
+        self._sort_asc = not reverse
+        arrow = " ▲" if not reverse else " ▼"
+        for c in self._tree_cols:
+            self._tree.heading(c, text=(c + arrow if c == col else c),
+                               command=lambda c=c: self._sort_tree_by(c))
+
+    def _tree_open_url(self, event):
+        iid = self._tree.identify_row(event.y)
+        if not iid or "url" not in self._tree_cols:
+            return
+        url = str(self._tree.item(iid)["values"][self._tree_cols.index("url")])
+        if url and url != "None":
+            webbrowser.open(url)
+
+    def _tree_right_click(self, event):
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            return
+        self._tree.selection_set(iid)
+        vals = self._tree.item(iid)["values"]
+        url = ""
+        if "url" in self._tree_cols:
+            url = str(vals[self._tree_cols.index("url")])
+        menu = tk.Menu(self, tearoff=0)
+        if url and url not in ("", "None"):
+            menu.add_command(label="Copy URL",
+                             command=lambda: (self.clipboard_clear(), self.clipboard_append(url)))
+            menu.add_separator()
+        row_text = "\t".join(str(v) for v in vals)
+        menu.add_command(label="Copy row",
+                         command=lambda: (self.clipboard_clear(), self.clipboard_append(row_text)))
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _delete_selected(self):
         selected = self._tree.selection()
@@ -1294,13 +1640,15 @@ class App:
                         jobs = jobs + extra
                         self._log(f"  → Sitemap added {len(extra)} more (CDX+sitemap total: {len(jobs)})")
 
-                if jobs:
+                if not jobs:
+                    self._log("  → No data found.")
+                elif self.var_test_mode.get():
+                    self._log(f"  → TEST MODE — {len(jobs)} jobs found, nothing written.")
+                else:
                     with _conn() as conn:
                         conn.execute("DELETE FROM fetch_log WHERE source=?", (ts,))
                     found, new = upsert_jobs(jobs, ts)
                     self._log(f"  → {found} jobs found, {new} new to DB.")
-                else:
-                    self._log("  → No data found.")
                 time.sleep(2)
 
         self._run_in_thread(task)
@@ -1459,6 +1807,28 @@ class App:
         with _conn() as conn:
             conn.execute("DELETE FROM match_stats WHERE year=?", (year,))
         self._refresh_match_stats()
+
+    def _compare_fetchers(self):
+        api = {j["job_id"]: j for j in self._last_api_jobs}
+        sel = {j["job_id"]: j for j in self._last_selenium_jobs}
+        if not api and not sel:
+            self._log("Compare: no results cached — run both fetchers first.")
+            return
+        only_api = set(api) - set(sel)
+        only_sel = set(sel) - set(api)
+        self._log(f"=== Compare: API={len(api)} Selenium={len(sel)} ===")
+        if only_api:
+            self._log(f"  In API only ({len(only_api)}):")
+            for jid in sorted(only_api):
+                j = api[jid]
+                self._log(f"    [{jid}] {j.get('title','?')} — {j.get('employer','?')}")
+        if only_sel:
+            self._log(f"  In Selenium only ({len(only_sel)}):")
+            for jid in sorted(only_sel):
+                j = sel[jid]
+                self._log(f"    [{jid}] {j.get('title','?')} — {j.get('employer','?')}")
+        if not only_api and not only_sel:
+            self._log("  Identical job sets — no differences.")
 
     def _check_autofetch(self):
         last = get_last_fetch()

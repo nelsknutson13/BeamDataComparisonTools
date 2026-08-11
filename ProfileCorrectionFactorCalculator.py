@@ -334,6 +334,26 @@ def _second_deriv_at_zero(x, y, win=0.5):
     return 2.0 * a
 
 
+def _savgol_smooth(x, y, window_cm, polyorder=2):
+    """Savitzky-Golay smoothing with the window given in cm, mapped to samples via median point spacing."""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    if len(y) < polyorder + 2:
+        return y
+    ux = np.unique(x)
+    dx = np.median(np.diff(ux)) if ux.size > 1 else 0.0
+    if not np.isfinite(dx) or dx <= 0:
+        return y
+    win_pts = int(round(float(window_cm) / dx))
+    win_pts = max(win_pts, polyorder + 2)
+    if win_pts % 2 == 0:
+        win_pts += 1
+    if win_pts > len(y):
+        win_pts = len(y) if len(y) % 2 == 1 else len(y) - 1
+    if win_pts < polyorder + 2:
+        return y
+    return sig.savgol_filter(y, win_pts, polyorder)
+
+
 def run_comparison():
     """Wrapper: loops over selected energies × axes (and adds X+Y avg when both selected)."""
     sel = energy_listbox.curselection()
@@ -442,6 +462,8 @@ def _run_comparison_single_energy(selected_energy=None, axis_sel='X'):
             cax = float(ya[np.argmin(np.abs(xa))])
         if cax != 0:
             ya = ya / cax
+        if smooth_var.get():
+            ya = _savgol_smooth(xa, ya, float(smooth_window_var.get()))
         return xa, ya
 
     if axis_sel == 'AVG':
@@ -503,6 +525,8 @@ def _run_comparison_single_energy(selected_energy=None, axis_sel='X'):
             cax = float(yo[cmask].mean()) if np.any(cmask) else float(np.interp(0.0, xo, yo))
             if cax != 0:
                 yo = yo / cax
+            if smooth_var.get():
+                yo = _savgol_smooth(xo, yo, float(smooth_window_var.get()))
             return _second_deriv_at_zero(xo, yo, win=0.5)
         return np.nan
 
@@ -744,6 +768,19 @@ det_orient_combo = ttk.Combobox(
     ],
 )
 det_orient_combo.grid(row=2, column=1, sticky="w", padx=5)
+
+# Profile smoothing (Savitzky-Golay), applied to the CAX-normalized profile
+# before SC_field/S_eq and the curvature-based VAE/Prp calculations.
+smooth_var = tk.BooleanVar(master=root, value=False)
+ttk.Checkbutton(
+    processing_frame, text="Smooth profile (Savitzky-Golay)", variable=smooth_var
+).grid(row=3, column=0, columnspan=2, sticky="w")
+
+smooth_window_var = tk.StringVar(master=root, value="0.5")
+tk.Label(processing_frame, text="Smoothing window (cm):").grid(row=4, column=0, sticky="w")
+tk.Entry(processing_frame, textvariable=smooth_window_var, width=6).grid(
+    row=4, column=1, sticky="w", padx=5
+)
 
 # --- NEW: Explicitly set values after widget creation ---
 det_len_var.set("2.3")

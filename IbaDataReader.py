@@ -12,35 +12,51 @@ import numpy as np
 import tkinter as tk
 from tkinter import filedialog, ttk
 import os
+from pathlib import Path
 import xml.etree.ElementTree as ET
 import datetime
 
+SELECTED_FILES = []
 
-def select_file_or_folder():
-    path = filedialog.askopenfilename(filetypes=[("IBA OPAX Files", "*.opax")])
-    if not path:
-        path = filedialog.askdirectory()
+
+def _set_selected(paths):
+    global SELECTED_FILES
+    SELECTED_FILES = list(paths)
+    display = SELECTED_FILES[0] if SELECTED_FILES else ""
+    if len(SELECTED_FILES) > 1:
+        display = f"{SELECTED_FILES[0]}  (+{len(SELECTED_FILES)-1} more)"
     file_entry.delete(0, tk.END)
-    file_entry.insert(0, path)
-    print("Selected:", path)
+    file_entry.insert(0, display)
+    status_label.config(text=f"Status: Ready ({len(SELECTED_FILES)} file(s) selected)")
+
+
+def select_files():
+    paths = filedialog.askopenfilenames(filetypes=[("IBA OPAX Files", "*.opax")])
+    if paths:
+        _set_selected(paths)
+
+
+def select_folder():
+    folder = filedialog.askdirectory(title="Select folder containing .opax files")
+    if not folder:
+        return
+    found = sorted(str(p) for p in Path(folder).rglob("*.opax"))
+    if not found:
+        from tkinter import messagebox
+        messagebox.showinfo("No files found", f"No .opax files found in:\n{folder}")
+        return
+    _set_selected(found)
 
 def run_conversion():
-    path = file_entry.get()
-    cl = ['Depth', 'Pos', 'Dose', 'FS', 'Axis', 'SSD','Detector','Energy']
+    files_to_process = list(SELECTED_FILES)
+    if not files_to_process:
+        status_label.config(text="No files selected.")
+        return
 
-
+    cl = ['Depth', 'Pos', 'Dose', 'FS', 'Axis', 'SSD', 'Detector', 'Energy']
     df = pd.DataFrame(columns=cl)
     processed_files = 0
-
-    files_to_process = []
-
-    if os.path.isfile(path):
-        files_to_process.append(path)
-    elif os.path.isdir(path):
-        files_to_process = [os.path.join(path, f) for f in os.listdir(path) if f.endswith('.opax')]
-    else:
-        status_label.config(text="Invalid file or folder selected.")
-        return
+    path = files_to_process[0]  # used for output directory
 
     progress_bar['maximum'] = len(files_to_process)
 
@@ -241,10 +257,11 @@ root.title("IBA data conversion tool V1.0")
 # File selection section
 file_frame = ttk.Frame(root, padding="10")
 file_frame.grid(row=0, column=0, sticky="ew")
-ttk.Label(file_frame, text="Select File:").grid(row=0, column=0, sticky="w")
-file_entry = ttk.Entry(file_frame, width=40)
+ttk.Label(file_frame, text="Select File(s):").grid(row=0, column=0, sticky="w")
+file_entry = ttk.Entry(file_frame, width=60)
 file_entry.grid(row=0, column=1, padx=5)
-ttk.Button(file_frame, text="Browse", command=select_file_or_folder).grid(row=0, column=2, padx=5)
+ttk.Button(file_frame, text="Browse Files…", command=select_files).grid(row=0, column=2, padx=5)
+ttk.Button(file_frame, text="Browse Folder…", command=select_folder).grid(row=0, column=3, padx=5)
 
 # Convert Data button
 run_button = ttk.Button(root, text="Convert Data", command=run_conversion)
@@ -267,7 +284,4 @@ def _on_close():
         root.destroy()   # destroy the window
 
 root.protocol("WM_DELETE_WINDOW", _on_close)
-root.mainloop()
-
-# Start the GUI loop
 root.mainloop()

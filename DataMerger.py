@@ -68,9 +68,14 @@ def _load_source_dfs(source_path, status_cb=None):
         return result
 
     try:
-        xl = pd.ExcelFile(source_path)
+        engine = 'openpyxl' if ext in ('.xlsx', '.xlsm') else 'xlrd'
+        xl = pd.ExcelFile(source_path, engine=engine)
     except Exception as e:
-        raise RuntimeError(f"Cannot open source file: {e}")
+        raise RuntimeError(
+            f"Cannot open source file: {e}\n\n"
+            f"File: {os.path.basename(source_path)}\n"
+            f"Make sure this is a valid Excel file (.xlsx or .xls), not an MCC or CSV file."
+        )
 
     for kind, candidates in (('depth', DEPTH_SHEET_CANDIDATES),
                              ('profile', PROFILE_SHEET_CANDIDATES)):
@@ -114,18 +119,21 @@ def _dest_filename(energy, ssd, kind):
 def _scan_key_columns(kind, df):
     """Return identifier columns for a scan (filtered to those present in df)."""
     if kind == 'depth':
-        cols = ['Energy', 'SSD', 'FS', 'Detector']
+        cols = ['Energy', 'SSD', 'FS', 'Axis', 'Detector']
     else:
         cols = ['Energy', 'SSD', 'FS', 'Axis', 'Depth', 'Detector']
     return [c for c in cols if c in df.columns]
 
 
 def _scan_mask(df, key_dict):
-    """Boolean mask for rows matching all (col, value) pairs in key_dict."""
+    """Boolean mask for rows matching all (col, value) pairs in key_dict.
+    Columns absent from df are skipped so that destination files written
+    before a key column was added (e.g. Axis on depth scans) still match.
+    """
     mask = pd.Series([True] * len(df), index=df.index)
     for col, val in key_dict.items():
         if col not in df.columns:
-            return pd.Series([False] * len(df), index=df.index)
+            continue
         if pd.isna(val):
             mask &= df[col].isna()
         else:
@@ -380,8 +388,22 @@ dest_var     = tk.StringVar(master=root, value=DEFAULT_DEST)
 machine_var  = tk.StringVar(master=root)
 conflict_var = tk.StringVar(master=root, value='replace')   # replace | append
 
-_scans      = []   # list of scan info dicts (mirrors tree rows)
-_source_dfs = {}   # {'depth': df, 'profile': df}
+_scans         = []   # list of scan info dicts
+_source_dfs    = {}   # {'depth': df, 'profile': df}
+_visible_scans = []   # subset currently shown in tree (after filter/sort)
+_sort_col      = None
+_sort_asc      = True
+_filter_vars   = {}   # col -> StringVar
+
+_FILTER_COLS = [
+    ('Kind',     'kind'),
+    ('Energy',   'Energy'),
+    ('SSD',      'SSD'),
+    ('FS',       'FS'),
+    ('Axis',     'Axis'),
+    ('Status',   'Status'),
+]
+_NUMERIC_COLS = {'SSD', 'FS', 'Depth'}
 
 main = ttk.Frame(root, padding=10)
 main.grid(row=0, column=0, sticky="nsew")
@@ -391,6 +413,90 @@ def _log(msg):
     output.insert(tk.END, str(msg) + "\n")
     output.see(tk.END)
     output.update_idletasks()
+
+
+def _get_scan_val(scan, col):
+    if col == 'kind':      return scan['kind']
+    if col == 'Status':    return scan['status']
+    if col == 'Dest File': return scan['dest_file']
+    v = scan['keys'].get(col, '')
+    if isinstance(v, float):
+        if pd.isna(v): return ''
+        return int(v) if v.is_integer() else v
+    return '' if v is None else str(v)
+
+
+def _scan_sort_key(scan, col):
+    v = _get_scan_val(scan, col)
+    if col in _NUMERIC_COLS:
+        try:    return (0, float(v))
+        except: return (1, 0)
+    return (0, str(v).lower())
+
+
+def _matches_filters(scan):
+    for col, var in _filter_vars.items():
+        val = var.get()
+        if val == 'All':
+            continue
+        if str(_get_scan_val(scan, col)) != val:
+            return False
+    return True
+
+
+def _repopulate_tree():
+    global _visible_scans
+    visible = [s for s in _scans if _matches_filters(s)]
+    if _sort_col:
+        visible.sort(key=lambda s: _scan_sort_key(s, _sort_col),
+                     reverse=not _sort_asc)
+    _visible_scans = visible
+    tree.delete(*tree.get_children())
+    for s in _visible_scans:
+        tree.insert('', 'end', values=_format_scan_row(s))
+
+
+def _refresh_filter_values():
+    for col, key in _FILTER_COLS:
+        var = _filter_vars.get(key)
+        cb  = _filter_cbs.get(key)
+        if var is None or cb is None:
+            continue
+        vals = sorted(
+            {str(_get_scan_val(s, key)) for s in _scans
+             if str(_get_scan_val(s, key)) not in ('', 'nan')},
+            key=lambda x: (float(x),) if key in _NUMERIC_COLS and _try_float(x) else (float('inf'), x)
+        )
+        cb['values'] = ['All'] + vals
+
+
+def _try_float(x):
+    try:    float(x); return True
+    except: return False
+
+
+def _clear_filters():
+    for var in _filter_vars.values():
+        var.set('All')
+
+
+def _on_header(col):
+    global _sort_col, _sort_asc
+    if _sort_col == col:
+        _sort_asc = not _sort_asc
+    else:
+        _sort_col = col
+        _sort_asc = True
+    _update_header_labels()
+    _repopulate_tree()
+
+
+def _update_header_labels():
+    for c in columns:
+        if c == 'check':
+            continue
+        arrow = (' ↑' if _sort_asc else ' ↓') if c == _sort_col else ''
+        tree.heading(c, text=c.title() + arrow)
 
 
 def choose_source():
@@ -424,7 +530,7 @@ def _format_scan_row(scan):
 
 
 def do_read():
-    global _scans, _source_dfs
+    global _scans, _source_dfs, _sort_col, _sort_asc
     output.delete("1.0", tk.END)
     tree.delete(*tree.get_children())
     _scans = []
@@ -445,13 +551,17 @@ def do_read():
         return
     _scans = scans
     _source_dfs = source_dfs
-    for s in _scans:
-        tree.insert('', 'end', values=_format_scan_row(s))
+    _sort_col = None
+    _sort_asc = True
+    _update_header_labels()
+    _refresh_filter_values()
+    _clear_filters()
+    _repopulate_tree()
 
 
 def _selected_scans():
     selected = []
-    for iid, scan in zip(tree.get_children(), _scans):
+    for iid, scan in zip(tree.get_children(), _visible_scans):
         if tree.set(iid, 'check') == CHECKED:
             selected.append(scan)
     return selected
@@ -527,19 +637,37 @@ ttk.Radiobutton(conflict_frame, text="Skip",
 btn_frame = ttk.Frame(main)
 btn_frame.grid(row=4, column=0, columnspan=3, pady=10, sticky="w")
 ttk.Button(btn_frame, text="Read",            command=do_read     ).pack(side='left', padx=4)
-ttk.Button(btn_frame, text="Select all",      command=select_all  ).pack(side='left', padx=12)
-ttk.Button(btn_frame, text="Deselect all",    command=deselect_all).pack(side='left', padx=4)
+ttk.Button(btn_frame, text="Select visible",   command=select_all  ).pack(side='left', padx=12)
+ttk.Button(btn_frame, text="Deselect visible",command=deselect_all).pack(side='left', padx=4)
 ttk.Button(btn_frame, text="Write selected",  command=do_write    ).pack(side='left', padx=24)
 
-# Row 5: tree of scans
+# Row 5: filter bar
+_filter_cbs = {}
+fbar = ttk.LabelFrame(main, text="Filter")
+fbar.grid(row=5, column=0, columnspan=3, sticky="ew", padx=0, pady=(2, 0))
+for _col, _key in _FILTER_COLS:
+    ttk.Label(fbar, text=f"{_col}:").pack(side='left', padx=(8, 2))
+    _fvar = tk.StringVar(value='All')
+    _filter_vars[_key] = _fvar
+    _fcb = ttk.Combobox(fbar, textvariable=_fvar, state='readonly', width=10)
+    _fcb['values'] = ['All']
+    _fcb.pack(side='left', padx=(0, 4))
+    _filter_cbs[_key] = _fcb
+    _fvar.trace_add('write', lambda *_: _repopulate_tree())
+ttk.Button(fbar, text="Clear filters", command=_clear_filters).pack(side='right', padx=8)
+
+# Row 6: tree of scans
 tree_frame = ttk.Frame(main)
-tree_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
+tree_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
 columns = ('check', 'kind', 'Energy', 'SSD', 'FS', 'Axis', 'Depth', 'Detector', 'Dest File', 'Status')
 tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=18, selectmode='none')
 widths = {'check': 30, 'kind': 60, 'Energy': 60, 'SSD': 50, 'FS': 50,
           'Axis': 50, 'Depth': 60, 'Detector': 90, 'Dest File': 240, 'Status': 90}
 for c in columns:
-    tree.heading(c, text=c.title() if c != 'check' else '')
+    if c == 'check':
+        tree.heading(c, text='')
+    else:
+        tree.heading(c, text=c.title(), command=lambda col=c: _on_header(col))
     tree.column(c, width=widths.get(c, 80), anchor='w', stretch=False)
 tree.grid(row=0, column=0, sticky="nsew")
 vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=tree.yview)
@@ -548,10 +676,11 @@ tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 vsb.grid(row=0, column=1, sticky="ns")
 hsb.grid(row=1, column=0, sticky="ew")
 tree.bind('<Button-1>', _on_tree_click)
+main.rowconfigure(6, weight=1)
 
-# Row 6: log
+# Row 7: log
 output_frame = ttk.Frame(main)
-output_frame.grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
+output_frame.grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
 output = tk.Text(output_frame, height=8, width=110, wrap='none', font=('Courier', 9))
 output.grid(row=0, column=0, sticky="nsew")
 ovsb = ttk.Scrollbar(output_frame, orient="vertical", command=output.yview)

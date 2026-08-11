@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Created on Wed Apr 17 08:46:36 2019
 @author: nknutson
@@ -13,13 +13,15 @@ UPDATE (2026-02-10):
 - Convert runs through all selected files and writes one Excel per file
 """
 import os, datetime, hashlib
+from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import pandas as pd
 import numpy as np
 
 # ---------------- Multi-file selection state ----------------
-SELECTED_FILES = []  # list of file paths
+SELECTED_FILES = []   # list of file paths
+SELECTED_ROOT  = None # folder chosen via Browse Folder (None when using Browse Files)
 
 INSTRUCTIONS_TEXT = (
     "PTW Data Conversion Tool\n"
@@ -49,21 +51,39 @@ def clear_summary():
     summary_text.config(state=tk.DISABLED)
 
 
-def select_file():
-    """Select one OR multiple .mcc files."""
-    global SELECTED_FILES
-    file_paths = filedialog.askopenfilenames(
-        filetypes=[("PTW MCC files", "*.mcc"), ("All files", "*.*")]
-    )
-    if not file_paths:
+def _set_selected_files(paths, root_folder=None):
+    global SELECTED_FILES, SELECTED_ROOT
+    SELECTED_FILES = list(paths)
+    SELECTED_ROOT  = root_folder
+    if not SELECTED_FILES:
         return
-    SELECTED_FILES = list(file_paths)
     display = SELECTED_FILES[0]
     if len(SELECTED_FILES) > 1:
         display = f"{SELECTED_FILES[0]}  (+{len(SELECTED_FILES)-1} more)"
     file_entry.delete(0, tk.END)
     file_entry.insert(0, display)
     status_label.config(text=f"Status: Ready ({len(SELECTED_FILES)} file(s) selected)")
+
+
+def select_file():
+    """Select one OR multiple .mcc files."""
+    file_paths = filedialog.askopenfilenames(
+        filetypes=[("PTW MCC files", "*.mcc"), ("All files", "*.*")]
+    )
+    if file_paths:
+        _set_selected_files(file_paths, root_folder=None)
+
+
+def select_folder():
+    """Select a folder and find all .mcc files in it (including subfolders)."""
+    folder = filedialog.askdirectory(title="Select folder containing .mcc files")
+    if not folder:
+        return
+    found = sorted(str(p) for p in Path(folder).rglob("*.mcc"))
+    if not found:
+        messagebox.showinfo("No files found", f"No .mcc files found in:\n{folder}")
+        return
+    _set_selected_files(found, root_folder=folder)
 
 
 def run_comparison():
@@ -75,24 +95,91 @@ def run_comparison():
     if not SELECTED_FILES:
         status_label.config(text="Status: No valid file(s) selected")
         return
-    ok = 0; fail = 0; fail_list = []
+
+    # Parse all files, combining into one dataset
+    all_dfs        = []
+    all_scans_info = []
+    combined_counts = {'TPR': 0, 'PDD': 0, 'CROSSPLANE': 0, 'INPLANE': 0}
+    out_dir        = SELECTED_ROOT  # set by Browse Folder; falls back below
+    id_offset      = 0
+    fail_list      = []
+
     for fn in SELECTED_FILES:
         try:
-            process_one_file(fn)
-            ok += 1
+            df, scans_info, ssd_cm, scan_counts = _parse_mcc_file(fn, id_offset)
         except Exception as e:
-            fail += 1
             fail_list.append((fn, str(e)))
             messagebox.showerror("Error", f"{os.path.basename(fn)} failed:\n{e}")
-    status_label.config(text=f"Done. OK={ok}, Failed={fail}")
-    if len(SELECTED_FILES) > 1:
-        msg = f"Multi-file run complete.\n\nProcessed: {ok}\nFailed: {fail}"
-        if fail_list:
-            msg += "\n\nFailures:\n" + "\n".join([f"- {os.path.basename(a)}: {b}" for a, b in fail_list[:10]])
-        messagebox.showinfo("Done", msg)
+            continue
+        for si in scans_info:
+            si['Source'] = os.path.basename(fn)
+        all_dfs.append(df)
+        all_scans_info.extend(scans_info)
+        id_offset += len(scans_info)
+        for k in combined_counts:
+            combined_counts[k] += scan_counts.get(k, 0)
+        if out_dir is None:
+            out_dir = os.path.dirname(fn)
+
+    if not all_dfs:
+        status_label.config(text="Status: No data loaded.")
+        return
+
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+
+    # One selection dialog covering all files
+    selected_ids = scan_selection_dialog(root, all_scans_info)
+    if selected_ids is None:
+        status_label.config(text="Status: Cancelled.")
+        return
+
+    df_sel      = combined_df[combined_df['scan_id'].isin(selected_ids)].copy()
+    pdd_tmr_df  = df_sel[df_sel['Axis'] == 'Z'].copy()
+    profiles_df = df_sel[df_sel['Axis'].isin(['X', 'Y', 'XY', 'YX'])].copy()
+
+    # Summary log
+    summary = []
+    summary.append(f"Files processed: {len(all_dfs)}" +
+                   (f"  ({len(fail_list)} failed)" if fail_list else ""))
+    summary.append(f"Total scans found: {len(all_scans_info)}  |  Selected: {len(selected_ids)}")
+    summary.append(f"Scan types: {combined_counts}")
+    axes_present = sorted({s['Axis'] for s in all_scans_info})
+    summary.append(f"Axes present: {', '.join(axes_present) if axes_present else '—'}")
+    det_list = sorted(set(df_sel['Detector'].astype(str)))
+    summary.append("Detector(s): " + ", ".join(det_list))
+    summary.append("Will write: 'Depth Scans' (Axis=Z) and 'Profiles' (Axis X/Y/XY/YX)")
+    append_summary("\n".join(summary))
+    append_summary("-" * 60)
+
+    # Save one combined output
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if len(SELECTED_FILES) == 1:
+        base = os.path.splitext(os.path.basename(SELECTED_FILES[0]))[0]
+        out_name = f"{base}_PTWOutput_{timestamp}.xlsx"
+    else:
+        out_name = f"PTWOutput_combined_{timestamp}.xlsx"
+    output_path = os.path.join(out_dir, out_name)
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            pdd_tmr_df.drop(columns=["scan_id"]).to_excel(writer, sheet_name='Depth Scans', index=False)
+            profiles_df.drop(columns=["scan_id"]).to_excel(writer, sheet_name='Profiles', index=False)
+            sel_rows = [s for s in all_scans_info if s["scan_id"] in selected_ids]
+            pd.DataFrame(sel_rows).to_excel(writer, sheet_name="ScanSelection", index=False)
+            pd.DataFrame(all_scans_info).to_excel(writer, sheet_name="ScanCatalog", index=False)
+        status_label.config(text=f"Saved: {output_path}")
+        try:
+            os.startfile(output_path)
+        except Exception:
+            pass
+    except Exception as e:
+        messagebox.showerror("Error", f"Write error:\n{e}")
 
 
-def process_one_file(fn):
+def _parse_mcc_file(fn, id_offset=0):
+    """Parse one .mcc file. Returns (df, scans_info, ssd_cm, scan_counts).
+    scan_ids start at id_offset so they stay unique across multiple files.
+    """
     if not fn or not os.path.isfile(fn):
         raise FileNotFoundError(f"Invalid file: {fn}")
     try:
@@ -103,78 +190,66 @@ def process_one_file(fn):
     processed_lines = 0
 
     cols = ['Depth', 'Pos', 'Dose', 'FS', 'Axis', 'Energy', 'Detector', 'scan_id']
-    df = pd.DataFrame(columns=cols)
 
     ssd_mm = None
     current_detector = None
     scan_detector = "Detector (unspecified)"
 
-    # live state
     data = False
     fs = 0.0
     axis = 'X'
     depth = 0.0
-    scan_id = -1
-    scan_type = None  # 'TPR', 'PDD', 'CROSSPLANE', 'INPLANE', etc.
-    energy_mv = None        # e.g., 6.00
-    filter_tag = None       # e.g., 'FFF' or 'FF'
-    energy_key = ""      # e.g., '6FFF' or '6X'
-    scan_diagonal = None  # 'FIRST_DIAGONAL', 'SECOND_DIAGONAL', or None
-    scan_angle = None   # float degrees or None
+    scan_id = id_offset - 1
+    scan_type = None
+    energy_mv = None
+    filter_tag = None
+    energy_key = ""
+    scan_diagonal = None
+    scan_angle = None
 
-    # tallies (for initial overview)
     total_scans = 0
     scan_counts = {'TPR': 0, 'PDD': 0, 'CROSSPLANE': 0, 'INPLANE': 0}
     axes_seen = set()
-
-    # we’ll collect per-scan info as we go to show in the selector
-    scans_info = []   # list of dict
-
-    # temp accumulators per scan
+    scans_info = []
     cur_points = []
 
     def _finalize_scan():
-        """Called on END_DATA to record current scan’s metadata + points."""
-        nonlocal cur_points, scans_info, scan_id, scan_type, axis, depth, fs
+        nonlocal cur_points, scan_id, scan_type, axis, depth, fs
         if not cur_points:
             return
-        pts = np.array(cur_points, dtype=float)  # [[pos_mm, dose], ...]
-        # stats
+        pts = np.array(cur_points, dtype=float)
         npts = pts.shape[0]
         pos_min = float(np.nanmin(pts[:,0])) if npts else np.nan
         pos_max = float(np.nanmax(pts[:,0])) if npts else np.nan
         dose_min = float(np.nanmin(pts[:,1])) if npts else np.nan
         dose_max = float(np.nanmax(pts[:,1])) if npts else np.nan
         scans_info.append({
-            "scan_id": scan_id,
-            "Type": scan_type if scan_type else "UNKNOWN",
-            "Axis": axis,
-            "Energy": energy_key,
-            "Depth_mm": float(depth),
-            "FS_mm": float(fs),
-            "npts": int(npts),
+            "scan_id":    scan_id,
+            "Type":       scan_type if scan_type else "UNKNOWN",
+            "Axis":       axis,
+            "Energy":     energy_key,
+            "Depth_mm":   float(depth),
+            "FS_mm":      float(fs),
+            "npts":       int(npts),
             "pos_min_mm": pos_min,
             "pos_max_mm": pos_max,
-            "dose_min": dose_min,
-            "dose_max": dose_max,
-            "Detector": scan_detector,
+            "dose_min":   dose_min,
+            "dose_max":   dose_max,
+            "Detector":   scan_detector,
         })
-        cur_points = []
+        cur_points.clear()
 
-    # pass 1: parse
     try:
-        rows =[]
+        rows = []
         with open(fn, 'r', errors='ignore') as f:
             for line in f:
                 processed_lines += 1
                 if total_lines and (processed_lines == 1 or processed_lines == total_lines or processed_lines % 200 == 0):
-                    progress_percent = (processed_lines / total_lines) * 100
-                    status_label.config(text=f"Processing... {progress_percent:.1f}%")
+                    status_label.config(text=f"Parsing {os.path.basename(fn)}… {processed_lines/total_lines*100:.0f}%")
                     root.update_idletasks()
 
                 s = line.strip()
 
-                # capture header/meta BEFORE data
                 if not data:
                     if s.startswith('SSD='):
                         try: ssd_mm = float(s.split('=', 1)[1])
@@ -184,10 +259,9 @@ def process_one_file(fn):
                     elif s.upper().startswith('ENERGY='):
                         val = s.split('=', 1)[1].strip()
                         try:
-                            energy_mv = float(val.split()[0])          # accepts "6.00" or "6.00 MV"
+                            energy_mv = float(val.split()[0])
                         except Exception:
                             energy_mv = None
-                        # compute energy_key immediately
                         if energy_mv is not None:
                             mv = int(round(energy_mv))
                             suffix = "FFF" if (filter_tag or "").strip().upper() == "FFF" else "X"
@@ -195,18 +269,14 @@ def process_one_file(fn):
                         else:
                             energy_key = ""
                         continue
-                
                     elif s.upper().startswith('FILTER='):
-                        # grab the first token (e.g., "FFF" or "FF"), not the first character
                         filter_tag = s.split('=', 1)[1].split()[0].strip().upper()
-                        # recompute only if ENERGY already known
                         if energy_mv is not None:
                             mv = int(round(energy_mv))
                             suffix = "FFF" if filter_tag == "FFF" else "X"
                             energy_key = f"{mv}{suffix}"
                         continue
-           
-                # state switches
+
                 if 'END_DATA' in s:
                     data = False
                     _finalize_scan()
@@ -219,16 +289,13 @@ def process_one_file(fn):
                     total_scans += 1
                     cur_points = []
                     scan_diagonal = None
-                    scan_angle = None   # float degrees or None
-
+                    scan_angle = None
                     if energy_mv is not None:
                         mv = int(round(energy_mv))
                         suffix = "FFF" if (filter_tag or "").strip().upper() == "FFF" else "X"
                         energy_key = f"{mv}{suffix}"
-                    
                     continue
 
-                # inside a data block: parse points
                 if data:
                     parts = s.replace('\t\t', '\t').split('\t')
                     if len(parts) >= 2:
@@ -241,7 +308,6 @@ def process_one_file(fn):
                             pass
                     continue
 
-                # outside data: scan settings / meta
                 if 'CURVETYPE' in s:
                     if 'TPR' in s:
                         axis = 'Z'; scan_type = 'TPR'; scan_counts['TPR'] += 1
@@ -253,8 +319,6 @@ def process_one_file(fn):
                         axis = 'Y'; scan_type = 'INPLANE'; scan_counts['INPLANE'] += 1
                     axes_seen.add(axis)
 
-                
- 
                 if s.upper().startswith('SCAN_DIAGONAL'):
                     raw = s.split('=', 1)[1].strip().upper()
                     if raw.startswith('FIRST'):
@@ -265,9 +329,7 @@ def process_one_file(fn):
                         scan_diagonal = None
                     else:
                         scan_diagonal = raw
-                
-                    # Fix: set axis immediately if scan_type is known
-                    if scan_type in ('INPLANE','CROSSPLANE') and scan_diagonal in ('FIRST_DIAGONAL','SECOND_DIAGONAL'):
+                    if scan_type in ('INPLANE', 'CROSSPLANE') and scan_diagonal in ('FIRST_DIAGONAL', 'SECOND_DIAGONAL'):
                         if scan_type == 'INPLANE':
                             axis = 'YX' if scan_diagonal == 'FIRST_DIAGONAL' else 'XY'
                         else:
@@ -281,15 +343,13 @@ def process_one_file(fn):
                         scan_angle = float(raw)
                     except Exception:
                         scan_angle = None
-                
-                    # Fix: assign XY/YX if no diagonal but we know the type
-                    if scan_type in ('INPLANE','CROSSPLANE') and scan_diagonal not in ('FIRST_DIAGONAL','SECOND_DIAGONAL') and scan_angle is not None:
+                    if scan_type in ('INPLANE', 'CROSSPLANE') and scan_diagonal not in ('FIRST_DIAGONAL', 'SECOND_DIAGONAL') and scan_angle is not None:
                         ang = scan_angle % 180.0
                         if scan_type == 'INPLANE':
-                            if ang == 45.0: axis = 'YX'
+                            if ang == 45.0:  axis = 'YX'
                             elif ang == 135.0: axis = 'XY'
-                        else:  # CROSSPLANE
-                            if ang == 45.0: axis = 'XY'
+                        else:
+                            if ang == 45.0:  axis = 'XY'
                             elif ang == 135.0: axis = 'YX'
                         axes_seen.add(axis)
 
@@ -301,92 +361,29 @@ def process_one_file(fn):
                     try: fs = float(s.split('=', 1)[1])
                     except Exception: pass
 
-        # in case file didn’t end with END_DATA
         if data:
             _finalize_scan()
-        if rows:
-            df = pd.DataFrame(rows, columns=cols)
-        else:
-            df = pd.DataFrame(columns=cols)
+        df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
     except Exception as e:
         raise RuntimeError(f"Failed to parse file:\n{fn}\n\n{e}")
 
     if df.empty:
-        status_label.config(text=f"Status: No data found in {os.path.basename(fn)}")
-        return
+        raise RuntimeError(f"No data found in {os.path.basename(fn)}")
 
-    # ---- Unit conversion (mm -> cm) ----
-    df['Pos']   = df['Pos'] / 10.0
+    df['Pos']   = df['Pos']   / 10.0
     df['Depth'] = df['Depth'] / 10.0
-    df['FS']    = df['FS'] / 10.0
-
-    # SSD
+    df['FS']    = df['FS']    / 10.0
     ssd_cm = (ssd_mm / 10.0) if ssd_mm is not None else None
     df['SSD'] = ssd_cm
 
-    # ---- Show selection dialog so user chooses which scans to keep ----
-    # Convert scans_info mm → cm for display
     for si in scans_info:
-        si["Depth_cm"] = si.pop("Depth_mm") / 10.0 if si["Depth_mm"] is not None else np.nan
-        si["FS_cm"]    = si.pop("FS_mm") / 10.0 if si["FS_mm"] is not None else np.nan
-        si["pos_min_cm"] = si.pop("pos_min_mm") / 10.0 if not np.isnan(si["pos_min_mm"]) else np.nan
-        si["pos_max_cm"] = si.pop("pos_max_mm") / 10.0 if not np.isnan(si["pos_max_mm"]) else np.nan
+        si["Depth_cm"]   = si.pop("Depth_mm")   / 10.0 if si["Depth_mm"]   is not None else np.nan
+        si["FS_cm"]      = si.pop("FS_mm")       / 10.0 if si["FS_mm"]      is not None else np.nan
+        si["pos_min_cm"] = si.pop("pos_min_mm")  / 10.0 if not np.isnan(si["pos_min_mm"]) else np.nan
+        si["pos_max_cm"] = si.pop("pos_max_mm")  / 10.0 if not np.isnan(si["pos_max_mm"]) else np.nan
 
-    selected_ids = scan_selection_dialog(root, scans_info)
-    if selected_ids is None:
-        # user cancelled → abort
-        status_label.config(text=f"Status: Cancelled — {os.path.basename(fn)}")
-        return
-
-    # filter to selected
-    keep_mask = df['scan_id'].isin(selected_ids)
-    df_sel = df.loc[keep_mask].copy()
-
-    # Split outputs
-    pdd_tmr_df  = df_sel[df_sel['Axis'] == 'Z'].copy()
-    profiles_df = df_sel[df_sel['Axis'].isin(['X', 'Y', 'XY', 'YX'])].copy()
-
-
-    # ---- UI summary ----
-    status_label.config(text=f"Processing complete: {os.path.basename(fn)} (ready to save).")
-
-    summary = []
-    summary.append(f"File: {os.path.basename(fn)}")
-    summary.append(f"Total Scans Found: {len(scans_info)}")
-    summary.append(f"Selected Scans: {len(selected_ids)}")
-    summary.append(f"Scan Types: {scan_counts}")
-    axes_present = sorted({s['Axis'] for s in scans_info})
-    summary.append(f"Axes Present: {', '.join(axes_present) if axes_present else '—'}")
-    if ssd_cm is not None:
-        summary.append(f"SSD: {ssd_cm:.1f} cm")
-    det_list = sorted(set(df_sel['Detector'].astype(str)))
-    summary.append("Detector(s): " + ", ".join(det_list))
-    summary.append("Will write: 'Depth Scans' (Axis=Z) and 'Profiles' (Axis X/Y/XY/YX)")
-    append_summary("\n".join(summary))
-    append_summary("-" * 60)
-
-    # ---- Save output ----
-    try:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = os.path.splitext(os.path.basename(fn))[0]
-        output_filename = f"{base}_PTWOutput_{timestamp}.xlsx"
-        output_path = os.path.join(os.path.dirname(fn), output_filename)
-        with pd.ExcelWriter(output_path) as writer:
-            pdd_tmr_df.drop(columns=["scan_id"]).to_excel(writer, sheet_name='Depth Scans', index=False)
-            profiles_df.drop(columns=["scan_id"]).to_excel(writer, sheet_name='Profiles', index=False)
-            sel_rows = [s for s in scans_info if s["scan_id"] in selected_ids]
-            all_rows = [s for s in scans_info]
-            pd.DataFrame(sel_rows).to_excel(writer, sheet_name="ScanSelection", index=False)
-            pd.DataFrame(all_rows).to_excel(writer, sheet_name="ScanCatalog", index=False)
-        status_label.config(text=f"Saved: {output_path}")
-        print(f"Data saved successfully to {output_path}")
-        try:
-            os.startfile(output_path)   # Windows: opens Excel automatically
-        except Exception:
-            pass
-    except Exception as e:
-        raise RuntimeError(f"Write error for {fn}:\n{e}")
+    return df, scans_info, ssd_cm, scan_counts
 
 
 # ---------------- selection dialog ----------------
@@ -400,15 +397,20 @@ def scan_selection_dialog(parent, scans_info):
     dlg.transient(parent)
     dlg.grab_set()
 
+    show_source = any("Source" in s for s in scans_info)
     cols = ("Keep", "ID", "Type", "Axis", "Energy", "Detector", "Depth(cm)", "FS(cm)", "npts", "Pos range (cm)", "Dose range")
+    if show_source:
+        cols = cols + ("Source",)
+    widths = [60, 50, 90, 60, 80, 160, 90, 80, 70, 150, 150]
+    if show_source:
+        widths = widths + [200]
     tree = ttk.Treeview(dlg, columns=cols, show="headings", height=16, selectmode="extended")
     for c in cols:
         tree.heading(c, text=c)
-    widths = [60, 50, 90, 60, 80, 160, 90, 80, 70, 150, 150]
     for c, w in zip(cols, widths):
         tree.column(c, width=w, anchor="w")
 
-    # we’ll manage selection with a set of ids
+    # we'll manage selection with a set of ids
     selected_ids = {s["scan_id"] for s in scans_info}  # default: select all
 
     def fmt_rng(a, b, prec):
@@ -425,6 +427,8 @@ def scan_selection_dialog(parent, scans_info):
             fmt_rng(s["pos_min_cm"], s["pos_max_cm"], 3),
             fmt_rng(s["dose_min"], s["dose_max"], 4),
         )
+        if show_source:
+            row = row + (s.get("Source", ""),)
         tree.insert("", "end", iid=str(s["scan_id"]), values=row)
 
     # toggle selection on double-click
@@ -486,7 +490,8 @@ file_frame.grid(row=0, column=0, sticky="ew")
 ttk.Label(file_frame, text="Select File(s):").grid(row=0, column=0, sticky="w")
 file_entry = ttk.Entry(file_frame, width=60)
 file_entry.grid(row=0, column=1, padx=5)
-ttk.Button(file_frame, text="Browse", command=select_file).grid(row=0, column=2, padx=5)
+ttk.Button(file_frame, text="Browse Files…", command=select_file).grid(row=0, column=2, padx=5)
+ttk.Button(file_frame, text="Browse Folder…", command=select_folder).grid(row=0, column=3, padx=5)
 
 run_button = ttk.Button(root, text="Convert Data (choose scans)", command=run_comparison)
 run_button.grid(row=1, column=0, pady=8)

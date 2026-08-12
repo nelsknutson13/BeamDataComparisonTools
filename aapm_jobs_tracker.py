@@ -128,6 +128,21 @@ def init_db():
                 matches_filled        INTEGER,
                 unmatched_applicants  INTEGER
             );
+            CREATE TABLE IF NOT EXISTS salary_data (
+                year             INTEGER PRIMARY KEY,
+                masters_no_cert  REAL,
+                masters_cert     REAL,
+                phd_no_cert      REAL,
+                phd_cert         REAL
+            );
+            CREATE TABLE IF NOT EXISTS cpi_data (
+                year       INTEGER PRIMARY KEY,
+                cpi_value  REAL
+            );
+            CREATE TABLE IF NOT EXISTS medical_cpi_data (
+                year       INTEGER PRIMARY KEY,
+                cpi_value  REAL
+            );
         """)
         # Seed approximate values read from the published MedPhys Match chart.
         # User should verify/correct from the official annual PDFs.
@@ -149,6 +164,42 @@ def init_db():
                 "(year,registered_applicants,positions_offered,matches_filled,unmatched_applicants)"
                 " VALUES (?,?,?,?,?)",
                 _MATCH_SEED
+            )
+        # BLS CPI-U (CUUR0000SA0) annual averages — INSERT OR IGNORE so manual edits are preserved
+        _CPI_SEED = [
+            (2015, 237.017),
+            (2016, 240.007),
+            (2017, 245.120),
+            (2018, 251.107),
+            (2019, 255.657),
+            (2020, 258.811),
+            (2021, 270.970),
+            (2022, 292.655),
+            (2023, 304.702),
+            (2024, 314.175),
+        ]
+        with _conn() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO cpi_data (year, cpi_value) VALUES (?,?)",
+                _CPI_SEED
+            )
+        _MED_CPI_SEED = [
+            (2015, 446.762),
+            (2016, 463.678),
+            (2017, 475.317),
+            (2018, 484.704),
+            (2019, 498.402),
+            (2020, 518.856),
+            (2021, 525.265),
+            (2022, 546.551),
+            (2023, 549.085),
+            (2024, 563.852),
+            (2025, 580.098),
+        ]
+        with _conn() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO medical_cpi_data (year, cpi_value) VALUES (?,?)",
+                _MED_CPI_SEED
             )
 
 
@@ -898,6 +949,9 @@ class App:
         self._refresh_charts()
         self._refresh_trending()
         self._refresh_match_stats()
+        self._refresh_salary_data()
+        self._refresh_cpi_data()
+        self._refresh_medical_cpi_data()
         self._check_autofetch()
 
     def _build(self):
@@ -1019,8 +1073,16 @@ class App:
         self.var_show_new         = tk.BooleanVar(value=True)
         self.var_show_offered     = tk.BooleanVar(value=True)
         self.var_show_filled      = tk.BooleanVar(value=True)
-        self.var_show_registered  = tk.BooleanVar(value=True)
+        self.var_show_registered  = tk.BooleanVar(value=False)
         self.var_show_unmatched   = tk.BooleanVar(value=True)
+        self.var_show_sal_mnc     = tk.BooleanVar(value=False)
+        self.var_show_sal_mc      = tk.BooleanVar(value=True)
+        self.var_show_sal_pnc     = tk.BooleanVar(value=False)
+        self.var_show_sal_pc      = tk.BooleanVar(value=True)
+        self.var_show_cpi         = tk.BooleanVar(value=False)
+        self.var_show_med_cpi     = tk.BooleanVar(value=False)
+        self.var_show_sal_proj    = tk.BooleanVar(value=False)
+        self.var_show_sal_fwd     = tk.BooleanVar(value=False)
         ttk.Label(trend_filter_bar, text="Job data:").pack(side="left", padx=(0, 4))
         for text, var in [
             ("Active listings",       self.var_show_active),
@@ -1035,6 +1097,25 @@ class App:
             ("Matches filled",        self.var_show_filled),
             ("Registered applicants", self.var_show_registered),
             ("Unmatched applicants",  self.var_show_unmatched),
+        ]:
+            ttk.Checkbutton(trend_filter_bar, text=text, variable=var,
+                            command=self._refresh_trending).pack(side="left", padx=(0, 8))
+        ttk.Separator(trend_filter_bar, orient="vertical").pack(side="left", padx=(4, 8), fill="y", pady=2)
+        ttk.Label(trend_filter_bar, text="Salary:").pack(side="left", padx=(0, 4))
+        for text, var in [
+            ("Masters (no cert)",  self.var_show_sal_mnc),
+            ("Masters (cert)",     self.var_show_sal_mc),
+            ("PhD (no cert)",      self.var_show_sal_pnc),
+            ("PhD (cert)",         self.var_show_sal_pc),
+            ("Lag-adjusted",       self.var_show_sal_proj),
+            ("Projected (+1yr)",   self.var_show_sal_fwd),
+        ]:
+            ttk.Checkbutton(trend_filter_bar, text=text, variable=var,
+                            command=self._refresh_trending).pack(side="left", padx=(0, 8))
+        ttk.Separator(trend_filter_bar, orient="vertical").pack(side="left", padx=(4, 8), fill="y", pady=2)
+        for text, var in [
+            ("CPI-U",         self.var_show_cpi),
+            ("Medical CPI-U", self.var_show_med_cpi),
         ]:
             ttk.Checkbutton(trend_filter_bar, text=text, variable=var,
                             command=self._refresh_trending).pack(side="left", padx=(0, 8))
@@ -1102,6 +1183,144 @@ class App:
         sb = ttk.Scrollbar(ms_lower, orient="vertical", command=self._ms_tree.yview)
         sb.grid(row=1, column=1, sticky="ns")
         self._ms_tree.configure(yscrollcommand=sb.set)
+
+        # Salary Data tab
+        sd_tab = ttk.Frame(nb, padding=4)
+        nb.add(sd_tab, text="Salary Data")
+        sd_tab.rowconfigure(0, weight=2)
+        sd_tab.rowconfigure(1, weight=1)
+        sd_tab.columnconfigure(0, weight=1)
+
+        if _HAS_CHARTS:
+            self._sd_fig = Figure(figsize=(10, 4), dpi=96, tight_layout=True)
+            sd_canvas = FigureCanvasTkAgg(self._sd_fig, master=sd_tab)
+            sd_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+            self._sd_canvas = sd_canvas
+        else:
+            ttk.Label(sd_tab, text="Charts unavailable",
+                      foreground="gray").grid(row=0, column=0)
+
+        sd_lower = ttk.Frame(sd_tab)
+        sd_lower.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+        sd_lower.rowconfigure(1, weight=1)
+        sd_lower.columnconfigure(0, weight=1)
+
+        sd_ctrl = ttk.Frame(sd_lower)
+        sd_ctrl.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(sd_ctrl, text="Year:").pack(side="left")
+        self._sd_year = ttk.Entry(sd_ctrl, width=6); self._sd_year.pack(side="left", padx=4)
+        ttk.Label(sd_ctrl, text="Masters (no cert):").pack(side="left")
+        self._sd_mnc  = ttk.Entry(sd_ctrl, width=9); self._sd_mnc.pack(side="left", padx=4)
+        ttk.Label(sd_ctrl, text="Masters (cert):").pack(side="left")
+        self._sd_mc   = ttk.Entry(sd_ctrl, width=9); self._sd_mc.pack(side="left", padx=4)
+        ttk.Label(sd_ctrl, text="PhD (no cert):").pack(side="left")
+        self._sd_pnc  = ttk.Entry(sd_ctrl, width=9); self._sd_pnc.pack(side="left", padx=4)
+        ttk.Label(sd_ctrl, text="PhD (cert):").pack(side="left")
+        self._sd_pc   = ttk.Entry(sd_ctrl, width=9); self._sd_pc.pack(side="left", padx=4)
+        ttk.Button(sd_ctrl, text="Add / Update",
+                   command=self._sd_upsert).pack(side="left", padx=(8, 4))
+        ttk.Button(sd_ctrl, text="Delete Selected",
+                   command=self._sd_delete).pack(side="left")
+
+        sd_cols = ("year", "masters_no_cert", "masters_cert", "phd_no_cert", "phd_cert")
+        self._sd_tree = ttk.Treeview(sd_lower, columns=sd_cols, show="headings", height=6)
+        for col, hdr, w in zip(sd_cols,
+                                ("Year", "Masters (no cert)", "Masters (cert)",
+                                 "PhD (no cert)", "PhD (cert)"),
+                                (60, 140, 120, 120, 110)):
+            self._sd_tree.heading(col, text=hdr)
+            self._sd_tree.column(col, width=w, anchor="center")
+        self._sd_tree.grid(row=1, column=0, sticky="nsew")
+        self._sd_tree.bind("<<TreeviewSelect>>", self._sd_on_select)
+        sd_sb = ttk.Scrollbar(sd_lower, orient="vertical", command=self._sd_tree.yview)
+        sd_sb.grid(row=1, column=1, sticky="ns")
+        self._sd_tree.configure(yscrollcommand=sd_sb.set)
+
+        # CPI Data tab
+        cpi_tab = ttk.Frame(nb, padding=4)
+        nb.add(cpi_tab, text="CPI Data")
+        cpi_tab.rowconfigure(0, weight=2)
+        cpi_tab.rowconfigure(1, weight=1)
+        cpi_tab.columnconfigure(0, weight=1)
+
+        if _HAS_CHARTS:
+            self._cpi_fig = Figure(figsize=(10, 4), dpi=96, tight_layout=True)
+            cpi_canvas = FigureCanvasTkAgg(self._cpi_fig, master=cpi_tab)
+            cpi_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+            self._cpi_canvas = cpi_canvas
+        else:
+            ttk.Label(cpi_tab, text="Charts unavailable",
+                      foreground="gray").grid(row=0, column=0)
+
+        cpi_lower = ttk.Frame(cpi_tab)
+        cpi_lower.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+        cpi_lower.rowconfigure(1, weight=1)
+        cpi_lower.columnconfigure(0, weight=1)
+
+        cpi_ctrl = ttk.Frame(cpi_lower)
+        cpi_ctrl.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(cpi_ctrl, text="Year:").pack(side="left")
+        self._cpi_year = ttk.Entry(cpi_ctrl, width=6); self._cpi_year.pack(side="left", padx=4)
+        ttk.Label(cpi_ctrl, text="CPI-U (annual avg):").pack(side="left")
+        self._cpi_val  = ttk.Entry(cpi_ctrl, width=10); self._cpi_val.pack(side="left", padx=4)
+        ttk.Button(cpi_ctrl, text="Add / Update",
+                   command=self._cpi_upsert).pack(side="left", padx=(8, 4))
+        ttk.Button(cpi_ctrl, text="Delete Selected",
+                   command=self._cpi_delete).pack(side="left")
+
+        cpi_cols = ("year", "cpi_value")
+        self._cpi_tree = ttk.Treeview(cpi_lower, columns=cpi_cols, show="headings", height=6)
+        for col, hdr, w in zip(cpi_cols, ("Year", "CPI-U (annual avg)"), (80, 160)):
+            self._cpi_tree.heading(col, text=hdr)
+            self._cpi_tree.column(col, width=w, anchor="center")
+        self._cpi_tree.grid(row=1, column=0, sticky="nsew")
+        self._cpi_tree.bind("<<TreeviewSelect>>", self._cpi_on_select)
+        cpi_sb = ttk.Scrollbar(cpi_lower, orient="vertical", command=self._cpi_tree.yview)
+        cpi_sb.grid(row=1, column=1, sticky="ns")
+        self._cpi_tree.configure(yscrollcommand=cpi_sb.set)
+
+        # Medical CPI Data tab
+        mcpi_tab = ttk.Frame(nb, padding=4)
+        nb.add(mcpi_tab, text="Medical CPI")
+        mcpi_tab.rowconfigure(0, weight=2)
+        mcpi_tab.rowconfigure(1, weight=1)
+        mcpi_tab.columnconfigure(0, weight=1)
+
+        if _HAS_CHARTS:
+            self._mcpi_fig = Figure(figsize=(10, 4), dpi=96, tight_layout=True)
+            mcpi_canvas = FigureCanvasTkAgg(self._mcpi_fig, master=mcpi_tab)
+            mcpi_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+            self._mcpi_canvas = mcpi_canvas
+        else:
+            ttk.Label(mcpi_tab, text="Charts unavailable",
+                      foreground="gray").grid(row=0, column=0)
+
+        mcpi_lower = ttk.Frame(mcpi_tab)
+        mcpi_lower.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+        mcpi_lower.rowconfigure(1, weight=1)
+        mcpi_lower.columnconfigure(0, weight=1)
+
+        mcpi_ctrl = ttk.Frame(mcpi_lower)
+        mcpi_ctrl.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(mcpi_ctrl, text="Year:").pack(side="left")
+        self._mcpi_year = ttk.Entry(mcpi_ctrl, width=6); self._mcpi_year.pack(side="left", padx=4)
+        ttk.Label(mcpi_ctrl, text="Medical CPI-U (annual avg):").pack(side="left")
+        self._mcpi_val  = ttk.Entry(mcpi_ctrl, width=10); self._mcpi_val.pack(side="left", padx=4)
+        ttk.Button(mcpi_ctrl, text="Add / Update",
+                   command=self._mcpi_upsert).pack(side="left", padx=(8, 4))
+        ttk.Button(mcpi_ctrl, text="Delete Selected",
+                   command=self._mcpi_delete).pack(side="left")
+
+        mcpi_cols = ("year", "cpi_value")
+        self._mcpi_tree = ttk.Treeview(mcpi_lower, columns=mcpi_cols, show="headings", height=6)
+        for col, hdr, w in zip(mcpi_cols, ("Year", "Medical CPI-U (annual avg)"), (80, 200)):
+            self._mcpi_tree.heading(col, text=hdr)
+            self._mcpi_tree.column(col, width=w, anchor="center")
+        self._mcpi_tree.grid(row=1, column=0, sticky="nsew")
+        self._mcpi_tree.bind("<<TreeviewSelect>>", self._mcpi_on_select)
+        mcpi_sb = ttk.Scrollbar(mcpi_lower, orient="vertical", command=self._mcpi_tree.yview)
+        mcpi_sb.grid(row=1, column=1, sticky="ns")
+        self._mcpi_tree.configure(yscrollcommand=mcpi_sb.set)
 
         # Database tab
         db_tab = ttk.Frame(nb, padding=4)
@@ -1334,6 +1553,18 @@ class App:
                 "SELECT year, positions_offered, matches_filled, registered_applicants, unmatched_applicants FROM match_stats ORDER BY year",
                 conn,
             )
+            sal_df = pd.read_sql(
+                "SELECT year, masters_no_cert, masters_cert, phd_no_cert, phd_cert FROM salary_data ORDER BY year",
+                conn,
+            )
+            cpi_df = pd.read_sql(
+                "SELECT year, cpi_value FROM cpi_data ORDER BY year",
+                conn,
+            )
+            med_cpi_df = pd.read_sql(
+                "SELECT year, cpi_value FROM medical_cpi_data ORDER BY year",
+                conn,
+            )
         if log_df.empty:
             return
 
@@ -1404,6 +1635,119 @@ class App:
         ax.set_axisbelow(True)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
         ax.xaxis.set_major_locator(mdates.YearLocator())
+
+        # Salary series on same axis, values in $1k units
+        CS1 = "#D4AC0D"   # gold  — Masters no cert
+        CS2 = "#5D8AA8"   # steel — Masters cert
+        CS3 = "#EC407A"   # pink  — PhD no cert
+        CS4 = "#1A5276"   # navy  — PhD cert
+        sal_series = [
+            ("masters_no_cert", CS1, "Masters no cert ($1k)", self.var_show_sal_mnc),
+            ("masters_cert",    CS2, "Masters cert ($1k)",    self.var_show_sal_mc),
+            ("phd_no_cert",     CS3, "PhD no cert ($1k)",     self.var_show_sal_pnc),
+            ("phd_cert",        CS4, "PhD cert ($1k)",        self.var_show_sal_pc),
+        ]
+        if not sal_df.empty:
+            sal_dates = pd.to_datetime(sal_df["year"].astype(str) + "-03-01")
+            for col, color, label, var in sal_series:
+                if var.get() and col in sal_df.columns:
+                    ax.plot(sal_dates, sal_df[col] / 1000, color=color, linewidth=1.5,
+                            linestyle=":", marker="D", markersize=5, zorder=3,
+                            label=label)
+            # Lag-adjusted: same values shifted back 1 year
+            if self.var_show_sal_proj.get():
+                lag_dates = pd.to_datetime((sal_df["year"] - 1).astype(str) + "-03-01")
+                for col, color, label, var in sal_series:
+                    if var.get() and col in sal_df.columns:
+                        ax.plot(lag_dates, sal_df[col] / 1000, color=color, linewidth=1,
+                                linestyle="--", marker="", alpha=0.5, zorder=2,
+                                label=f"{label} lag-adj.")
+
+            # CPI-based forward projection — extends from both regular and lag-adjusted endpoints
+            if self.var_show_sal_fwd.get() and not cpi_df.empty:
+                cpi_map = dict(zip(cpi_df["year"], cpi_df["cpi_value"]))
+                last_year = int(sal_df["year"].max())
+
+                # Use the most recent available year-over-year CPI growth rate
+                sorted_cpi_yrs = sorted(cpi_map)
+                if len(sorted_cpi_yrs) >= 2:
+                    cy1, cy2  = sorted_cpi_yrs[-2], sorted_cpi_yrs[-1]
+                    cpi_ratio = cpi_map[cy2] / cpi_map[cy1]
+
+                    for col, color, label, var in sal_series:
+                        if not var.get() or col not in sal_df.columns:
+                            continue
+                        last_val = float(sal_df.loc[sal_df["year"] == last_year, col].iloc[0]) / 1000
+                        proj_val = last_val * cpi_ratio
+                        # From end of regular salary line → +1 year
+                        reg_date  = pd.to_datetime(f"{last_year}-03-01")
+                        fwd_date  = pd.to_datetime(f"{last_year + 1}-03-01")
+                        ax.plot([reg_date, fwd_date], [last_val, proj_val],
+                                color=color, linewidth=1.5, linestyle=":",
+                                alpha=0.8, zorder=2)
+                        ax.plot(fwd_date, proj_val, color=color,
+                                marker="*", markersize=10, zorder=4,
+                                label=f"{label} proj. ({cpi_ratio-1:+.1%} CPI)")
+
+                        # From end of lag-adjusted line → +1 year (if lag is shown)
+                        if self.var_show_sal_proj.get():
+                            lag_date  = pd.to_datetime(f"{last_year - 1}-03-01")
+                            lagp_date = pd.to_datetime(f"{last_year}-03-01")
+                            ax.plot([lag_date, lagp_date], [last_val, proj_val],
+                                    color=color, linewidth=1.5, linestyle=":",
+                                    alpha=0.8, zorder=2)
+                            ax.plot(lagp_date, proj_val, color=color,
+                                    marker="*", markersize=10, zorder=4)
+
+        # CPI-U overlay — normalized to salary scale at earliest common year
+        show_cpi = self.var_show_cpi.get()
+        if show_cpi and not cpi_df.empty and not sal_df.empty:
+            # Find scale: CPI at base year → same $1k level as active salary series
+            active_sal_cols = [c for c, _, _, v in sal_series if v.get() and c in sal_df.columns]
+            common_years = set(cpi_df["year"]) & set(sal_df["year"])
+            if active_sal_cols and common_years:
+                base_year = min(common_years)
+                cpi_base = cpi_df.loc[cpi_df["year"] == base_year, "cpi_value"].iloc[0]
+                sal_base_vals = [
+                    sal_df.loc[sal_df["year"] == base_year, c].iloc[0] / 1000
+                    for c in active_sal_cols
+                    if not sal_df.loc[sal_df["year"] == base_year, c].empty
+                ]
+                sal_base = sum(sal_base_vals) / len(sal_base_vals) if sal_base_vals else 1.0
+                scale = sal_base / cpi_base
+
+                cpi_map = dict(zip(cpi_df["year"], cpi_df["cpi_value"]))
+
+                if show_cpi:
+                    cpi_years = sorted(cpi_map)
+                    cpi_dates = pd.to_datetime([str(y) + "-03-01" for y in cpi_years])
+                    cpi_vals  = [cpi_map[y] * scale for y in cpi_years]
+                    ax.plot(cpi_dates, cpi_vals, color="#888888", linewidth=1.5,
+                            linestyle="-.", marker="o", markersize=4, zorder=2,
+                            label="CPI-U ($1k scale)")
+
+        # Medical CPI-U overlay — same normalization approach as general CPI
+        if self.var_show_med_cpi.get() and not med_cpi_df.empty and not sal_df.empty:
+            active_sal_cols = [c for c, _, _, v in sal_series if v.get() and c in sal_df.columns]
+            common_years = set(med_cpi_df["year"]) & set(sal_df["year"])
+            if active_sal_cols and common_years:
+                base_year = min(common_years)
+                mcpi_base = med_cpi_df.loc[med_cpi_df["year"] == base_year, "cpi_value"].iloc[0]
+                sal_base_vals = [
+                    sal_df.loc[sal_df["year"] == base_year, c].iloc[0] / 1000
+                    for c in active_sal_cols
+                    if not sal_df.loc[sal_df["year"] == base_year, c].empty
+                ]
+                sal_base  = sum(sal_base_vals) / len(sal_base_vals) if sal_base_vals else 1.0
+                med_scale = sal_base / mcpi_base
+                mcpi_map  = dict(zip(med_cpi_df["year"], med_cpi_df["cpi_value"]))
+                mcpi_years = sorted(mcpi_map)
+                mcpi_dates = pd.to_datetime([str(y) + "-03-01" for y in mcpi_years])
+                mcpi_vals  = [mcpi_map[y] * med_scale for y in mcpi_years]
+                ax.plot(mcpi_dates, mcpi_vals, color="#CC6600", linewidth=1.5,
+                        linestyle="-.", marker="o", markersize=4, zorder=2,
+                        label="Medical CPI-U ($1k scale)")
+
         ax.legend(fontsize=8, framealpha=0.7)
 
         self._trend_canvas.draw()
@@ -1807,6 +2151,210 @@ class App:
         with _conn() as conn:
             conn.execute("DELETE FROM match_stats WHERE year=?", (year,))
         self._refresh_match_stats()
+
+    # ── Salary Data ───────────────────────────────────────────────────────────
+
+    def _refresh_salary_data(self):
+        with _conn() as conn:
+            rows = conn.execute(
+                "SELECT year, masters_no_cert, masters_cert, phd_no_cert, phd_cert"
+                " FROM salary_data ORDER BY year"
+            ).fetchall()
+
+        self._sd_tree.delete(*self._sd_tree.get_children())
+        for row in rows:
+            self._sd_tree.insert("", "end", values=[
+                row[0],
+                f"{row[1]:,.0f}" if row[1] is not None else "",
+                f"{row[2]:,.0f}" if row[2] is not None else "",
+                f"{row[3]:,.0f}" if row[3] is not None else "",
+                f"{row[4]:,.0f}" if row[4] is not None else "",
+            ])
+
+        if not _HAS_CHARTS or not rows:
+            return
+
+        years = [r[0] for r in rows]
+        mnc   = [r[1] for r in rows]
+        mc    = [r[2] for r in rows]
+        pnc   = [r[3] for r in rows]
+        pc    = [r[4] for r in rows]
+
+        self._sd_fig.clear()
+        ax = self._sd_fig.add_subplot(111)
+        ax.plot(years, mnc, "o-", color="#1f77b4", label="Masters (no cert)")
+        ax.plot(years, mc,  "o-", color="#aec7e8", label="Masters (cert)")
+        ax.plot(years, pnc, "o-", color="#d62728", label="PhD (no cert)")
+        ax.plot(years, pc,  "o-", color="#ff9896", label="PhD (cert)")
+        ax.set_title("AAPM Median Salary by Degree & Certification")
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Median Salary ($)")
+        ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(
+            lambda x, _: f"${x:,.0f}"))
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+        self._sd_canvas.draw()
+
+    def _sd_on_select(self, _=None):
+        sel = self._sd_tree.selection()
+        if not sel:
+            return
+        vals = self._sd_tree.item(sel[0])["values"]
+        for entry, val in zip(
+            (self._sd_year, self._sd_mnc, self._sd_mc, self._sd_pnc, self._sd_pc), vals
+        ):
+            entry.delete(0, "end")
+            entry.insert(0, str(val).replace(",", ""))
+
+    def _sd_upsert(self):
+        try:
+            year = int(self._sd_year.get())
+            mnc  = float(self._sd_mnc.get().replace(",", ""))
+            mc   = float(self._sd_mc.get().replace(",", ""))
+            pnc  = float(self._sd_pnc.get().replace(",", ""))
+            pc   = float(self._sd_pc.get().replace(",", ""))
+        except ValueError:
+            messagebox.showerror("Salary Data", "Year must be an integer; salary fields must be numbers.")
+            return
+        with _conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO salary_data"
+                " (year, masters_no_cert, masters_cert, phd_no_cert, phd_cert)"
+                " VALUES (?,?,?,?,?)",
+                (year, mnc, mc, pnc, pc)
+            )
+        self._refresh_salary_data()
+
+    def _sd_delete(self):
+        sel = self._sd_tree.selection()
+        if not sel:
+            return
+        year = self._sd_tree.item(sel[0])["values"][0]
+        if not messagebox.askyesno("Delete", f"Delete salary data for {year}?"):
+            return
+        with _conn() as conn:
+            conn.execute("DELETE FROM salary_data WHERE year=?", (year,))
+        self._refresh_salary_data()
+
+    def _refresh_cpi_data(self):
+        with _conn() as conn:
+            rows = conn.execute(
+                "SELECT year, cpi_value FROM cpi_data ORDER BY year"
+            ).fetchall()
+        self._cpi_tree.delete(*self._cpi_tree.get_children())
+        for row in rows:
+            self._cpi_tree.insert("", "end", values=[row[0], f"{row[1]:.3f}"])
+
+        if not _HAS_CHARTS or not rows:
+            return
+        years = [r[0] for r in rows]
+        vals  = [r[1] for r in rows]
+        self._cpi_fig.clear()
+        ax = self._cpi_fig.add_subplot(111)
+        ax.plot(years, vals, "o-", color="#888888", linewidth=2)
+        ax.set_title("CPI-U Annual Average")
+        ax.set_xlabel("Year")
+        ax.set_ylabel("CPI-U Index Value")
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+        self._cpi_canvas.draw()
+
+    def _cpi_on_select(self, _=None):
+        sel = self._cpi_tree.selection()
+        if not sel:
+            return
+        vals = self._cpi_tree.item(sel[0])["values"]
+        for entry, val in zip((self._cpi_year, self._cpi_val), vals):
+            entry.delete(0, "end")
+            entry.insert(0, str(val))
+
+    def _cpi_upsert(self):
+        try:
+            year = int(self._cpi_year.get())
+            val  = float(self._cpi_val.get())
+        except ValueError:
+            messagebox.showerror("CPI Data", "Year must be an integer; CPI value must be a number.")
+            return
+        with _conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO cpi_data (year, cpi_value) VALUES (?,?)",
+                (year, val)
+            )
+        self._refresh_cpi_data()
+        self._refresh_trending()
+
+    def _cpi_delete(self):
+        sel = self._cpi_tree.selection()
+        if not sel:
+            return
+        year = self._cpi_tree.item(sel[0])["values"][0]
+        if not messagebox.askyesno("Delete", f"Delete CPI data for {year}?"):
+            return
+        with _conn() as conn:
+            conn.execute("DELETE FROM cpi_data WHERE year=?", (year,))
+        self._refresh_cpi_data()
+        self._refresh_trending()
+
+
+    def _refresh_medical_cpi_data(self):
+        with _conn() as conn:
+            rows = conn.execute(
+                "SELECT year, cpi_value FROM medical_cpi_data ORDER BY year"
+            ).fetchall()
+        self._mcpi_tree.delete(*self._mcpi_tree.get_children())
+        for row in rows:
+            self._mcpi_tree.insert("", "end", values=[row[0], f"{row[1]:.3f}"])
+
+        if not _HAS_CHARTS or not rows:
+            return
+        years = [r[0] for r in rows]
+        vals  = [r[1] for r in rows]
+        self._mcpi_fig.clear()
+        ax = self._mcpi_fig.add_subplot(111)
+        ax.plot(years, vals, "o-", color="#CC6600", linewidth=2)
+        ax.set_title("Medical CPI-U Annual Average")
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Medical CPI-U Index Value")
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+        self._mcpi_canvas.draw()
+
+    def _mcpi_on_select(self, _=None):
+        sel = self._mcpi_tree.selection()
+        if not sel:
+            return
+        vals = self._mcpi_tree.item(sel[0])["values"]
+        for entry, val in zip((self._mcpi_year, self._mcpi_val), vals):
+            entry.delete(0, "end")
+            entry.insert(0, str(val))
+
+    def _mcpi_upsert(self):
+        try:
+            year = int(self._mcpi_year.get())
+            val  = float(self._mcpi_val.get())
+        except ValueError:
+            messagebox.showerror("Medical CPI", "Year must be an integer; value must be a number.")
+            return
+        with _conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO medical_cpi_data (year, cpi_value) VALUES (?,?)",
+                (year, val)
+            )
+        self._refresh_medical_cpi_data()
+        self._refresh_trending()
+
+    def _mcpi_delete(self):
+        sel = self._mcpi_tree.selection()
+        if not sel:
+            return
+        year = self._mcpi_tree.item(sel[0])["values"][0]
+        if not messagebox.askyesno("Delete", f"Delete Medical CPI data for {year}?"):
+            return
+        with _conn() as conn:
+            conn.execute("DELETE FROM medical_cpi_data WHERE year=?", (year,))
+        self._refresh_medical_cpi_data()
+        self._refresh_trending()
 
     def _compare_fetchers(self):
         api = {j["job_id"]: j for j in self._last_api_jobs}

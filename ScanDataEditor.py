@@ -29,6 +29,13 @@ import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    _HAS_MPL = True
+except ImportError:
+    _HAS_MPL = False
+
 
 CHECKED   = '☑'
 UNCHECKED = '☐'
@@ -306,12 +313,32 @@ class App(tk.Tk):
         self.summary_lbl = ttk.Label(main, text="")
         self.summary_lbl.grid(row=4, column=0, columnspan=3, sticky='w', padx=8, pady=(2, 0))
 
-        # Row 5: treeview
+        # Row 5: split pane — treeview (left) + preview plot (right)
         col_ids = [c for c, _, _ in TREE_COLS]
-        tf = ttk.Frame(main)
-        tf.grid(row=5, column=0, columnspan=3, sticky='nsew', padx=8, pady=4)
+        paned = ttk.PanedWindow(main, orient='horizontal')
+        paned.grid(row=5, column=0, columnspan=3, sticky='nsew', padx=8, pady=4)
+
+        tf = ttk.Frame(paned)
+        paned.add(tf, weight=3)
         tf.rowconfigure(0, weight=1)
         tf.columnconfigure(0, weight=1)
+
+        pf = ttk.Frame(paned)
+        paned.add(pf, weight=2)
+        pf.rowconfigure(0, weight=1)
+        pf.columnconfigure(0, weight=1)
+
+        if _HAS_MPL:
+            self._plot_fig = Figure(figsize=(5, 4), dpi=96)
+            self._plot_ax  = self._plot_fig.add_subplot(111)
+            self._plot_ax.set_visible(False)
+            self._plot_canvas = FigureCanvasTkAgg(self._plot_fig, master=pf)
+            self._plot_canvas.get_tk_widget().grid(row=0, column=0, sticky='nsew')
+            self._plot_canvas.draw()
+        else:
+            ttk.Label(pf, text="matplotlib not available\nInstall it for scan previews.",
+                      anchor='center').grid(row=0, column=0, sticky='nsew')
+            self._plot_fig = self._plot_canvas = None
 
         self.tree = ttk.Treeview(tf, columns=col_ids, show='headings',
                                  height=20, selectmode='none')
@@ -509,16 +536,108 @@ class App(tk.Tk):
     def _on_click(self, event):
         if self.tree.identify_region(event.x, event.y) != 'cell':
             return
-        if self.tree.identify_column(event.x) != '#1':
-            return
         iid = self.tree.identify_row(event.y)
         if not iid:
             return
-        pos  = list(self.tree.get_children()).index(iid)
-        scan = self._scans[self._visible_idx[pos]]
-        scan['delete'] = not scan['delete']
-        self.tree.set(iid, 'check', self._check_display(scan))
-        self._update_summary()
+        pos      = list(self.tree.get_children()).index(iid)
+        scan_idx = self._visible_idx[pos]
+
+        if self.tree.identify_column(event.x) == '#1':
+            scan = self._scans[scan_idx]
+            scan['delete'] = not scan['delete']
+            self.tree.set(iid, 'check', self._check_display(scan))
+            self._update_summary()
+        elif event.state & 0x4:  # Ctrl held — toggle this row
+            self.tree.selection_toggle(iid)
+            self._plot_selected()
+        else:  # plain click — select the whole duplicate group
+            self.tree.selection_set(*self._iids_for_group(scan_idx))
+            self._plot_selected()
+
+    def _iids_for_group(self, scan_idx):
+        """Return tree iids for all visible scans sharing the same group key."""
+        s0 = self._scans[scan_idx]
+        gk = (s0['energy'], s0['ssd'], s0['fs'], s0['axis'], s0['depth'])
+        children = list(self.tree.get_children())
+        return [iid for pos, iid in enumerate(children)
+                if (self._scans[self._visible_idx[pos]]['energy'],
+                    self._scans[self._visible_idx[pos]]['ssd'],
+                    self._scans[self._visible_idx[pos]]['fs'],
+                    self._scans[self._visible_idx[pos]]['axis'],
+                    self._scans[self._visible_idx[pos]]['depth']) == gk]
+
+    def _plot_selected(self):
+        if not _HAS_MPL or self._plot_canvas is None or self._source_df is None:
+            return
+        selected = self.tree.selection()
+        if not selected:
+            return
+
+        children = list(self.tree.get_children())
+        scan_indices = []
+        for iid in selected:
+            try:
+                scan_indices.append(self._visible_idx[children.index(iid)])
+            except ValueError:
+                continue
+        if not scan_indices:
+            return
+
+        ax = self._plot_ax
+        ax.clear()
+        ax.set_visible(True)
+
+        pos_col     = _pos_col(self._source_df)
+        colors      = ['#2B5DA8', '#E07B39', '#2E9E6B', '#9B59B6', '#C0392B']
+        scans_sel   = [self._scans[i] for i in scan_indices]
+
+        # Fields that vary across the selection — used to build compact labels
+        def varies(key):
+            return len({s[key] for s in scans_sel}) > 1
+
+        for j, scan_idx in enumerate(scan_indices):
+            s     = self._scans[scan_idx]
+            rows  = self._source_df.loc[s['row_indices']]
+            x     = pd.to_numeric(rows[pos_col], errors='coerce')
+            y     = pd.to_numeric(rows['Dose'],  errors='coerce')
+            mask  = x.notna() & y.notna()
+            x_arr = x[mask].to_numpy()
+            y_arr = y[mask].to_numpy()
+            if len(x_arr) == 0:
+                continue
+            order = np.argsort(x_arr)
+            color = colors[j % len(colors)]
+
+            parts = [s['energy']]
+            if varies('axis'):     parts.append(s['axis'])
+            if varies('ssd'):      parts.append(f"SSD{s['ssd']}")
+            if varies('fs'):       parts.append(f"FS{s['fs']}")
+            if varies('depth') and s['depth'] != '':
+                parts.append(f"d{s['depth']}")
+            if varies('detector'): parts.append(s['detector'])
+            if s['n_segs'] > 1:   parts.append(f"copy{s['seg_num']}")
+            label = ' '.join(str(p) for p in parts)
+
+            ax.plot(x_arr[order], y_arr[order], color=color, linewidth=2,
+                    marker='o', markersize=2, label=label, zorder=2)
+
+        first  = self._scans[scan_indices[0]]
+        xlabel = 'Depth (cm)' if str(first['axis']).upper() == 'Z' else 'Position (cm)'
+        ax.set_xlabel(xlabel, fontsize=9)
+        ax.set_ylabel('Dose', fontsize=9)
+
+        if len(scan_indices) == 1:
+            t = [first['energy'], f"SSD {first['ssd']}", f"FS {first['fs']}"]
+            if first['depth'] != '':
+                t.append(f"Depth {first['depth']}")
+            ax.set_title('  '.join(str(p) for p in t), fontsize=9)
+        else:
+            ax.set_title(f"{len(scan_indices)} scans selected", fontsize=9)
+
+        ax.legend(fontsize=7, loc='best')
+        ax.grid(True, alpha=0.3)
+        self._plot_fig.tight_layout()
+        self._plot_canvas.draw()
 
     # ── Mark buttons (operate on visible rows) ────────────────────────────────
 

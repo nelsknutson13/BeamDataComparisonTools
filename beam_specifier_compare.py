@@ -54,8 +54,8 @@ def metric_pdd_at_depth(df, fs, depth_cm):
     return val / dmax * 100.0
 
 
-def metric_dmax_depth(df, fs, depth_cm):
-    """Depth of dmax [cm] via pchip interpolation on a fine grid."""
+def metric_dmax_depth(df, fs, _depth_cm):
+    """Depth of dmax [cm] via pchip on a fine grid."""
     y, d = _z_axis_sorted(df, fs)
     if y is None:
         return float('nan')
@@ -63,9 +63,8 @@ def metric_dmax_depth(df, fs, depth_cm):
         pchip = interp.pchip(y, d)
     except Exception:
         return float('nan')
-    # Search on a fine grid over the shallow half of the scan where dmax should live.
     y_lo = float(y.min())
-    y_hi = min(float(y.max()), y_lo + 5.0)   # dmax is always within top ~5 cm of clinical beams
+    y_hi = min(float(y.max()), y_lo + 5.0)
     fine = np.linspace(y_lo, y_hi, 2001)
     vals = pchip(fine)
     return float(fine[int(np.argmax(vals))])
@@ -106,6 +105,38 @@ def _fwhm(pos, dose):
     if len(up_x) == 0 or len(down_x) == 0:
         return float('nan')
     return float(fine[down_x[-1]]) - float(fine[up_x[0]])
+
+
+def _inflection_field_size(pos, dose):
+    """Field size [same units as pos] via inflection points (peak |derivative|) on each side.
+    Works for both FF and FFF profiles since it finds the steepest fall-off edge
+    regardless of absolute dose level at the field edge."""
+    try:
+        pchip = interp.pchip(pos, dose)
+    except Exception:
+        return float('nan')
+    dpchip = pchip.derivative()
+    fine = np.linspace(float(pos.min()), float(pos.max()), 10001)
+    deriv = dpchip(fine)
+    mid = len(fine) // 2
+    # Left penumbra: derivative is positive (dose rising); pick its maximum
+    left_idx = int(np.argmax(deriv[:mid]))
+    # Right penumbra: derivative is negative (dose falling); pick its minimum
+    right_idx = mid + int(np.argmin(deriv[mid:]))
+    return float(fine[right_idx]) - float(fine[left_idx])
+
+
+def metric_field_size_inflection(df, fs, depth_cm, axis='X'):
+    """Measured field size (inflection-point method) for axis='X', 'Y', or 'Both'."""
+    if axis == 'Both':
+        fx = metric_field_size_inflection(df, fs, depth_cm, 'X')
+        fy = metric_field_size_inflection(df, fs, depth_cm, 'Y')
+        valid = [v for v in (fx, fy) if not np.isnan(v)]
+        return float(np.mean(valid)) if valid else float('nan')
+    pos, dose = _profile_sorted(df, fs, depth_cm, axis)
+    if pos is None:
+        return float('nan')
+    return _inflection_field_size(pos, dose)
 
 
 def _flatness(pos, dose):
@@ -195,6 +226,69 @@ def _penumbra_side(pos, dose, side):
     return abs(float(f[down_20[0]]) - float(f[down_80[0]]))
 
 
+def _penumbra_inflection_side(pos, dose, side, geo_half=None):
+    """Penumbra width via inflection-point-referenced 80/20 surrogates.
+    D_inf (dose at steepest gradient) ≈ 50% of the penumbra transition.
+    Upper threshold = 1.6 × D_inf, lower = 0.4 × D_inf.
+    geo_half: geometric half-field width [cm] = (FS/2)*(SSD+depth)/100.
+    When provided, inflection search is restricted to within 1 cm of the geometric edge
+    so FFF central slope can't be mistaken for the penumbra."""
+    try:
+        pchip = interp.pchip(pos, dose)
+    except Exception:
+        return float('nan')
+    fine = np.linspace(float(pos.min()), float(pos.max()), 10001)
+    fine_dose = pchip(fine)
+    deriv = pchip.derivative()(fine)
+    mid = len(fine) // 2
+
+    if side == 'left':
+        if geo_half is not None:
+            edge = -geo_half
+            search = (fine >= edge - 1.0) & (fine <= edge + 1.0) & (fine < 0)
+            if not search.any():
+                search = fine < 0   # fallback
+            inf_idx = int(np.argmax(np.where(search, deriv, -np.inf)))
+        else:
+            inf_idx = int(np.argmax(deriv[:mid]))
+        d_inf = float(fine_dose[inf_idx])
+        upper, lower = d_inf * 1.6, d_inf * 0.4
+        seg = fine_dose[inf_idx:mid]
+        above = np.where(seg >= upper)[0]
+        if len(above) == 0:
+            return float('nan')
+        x_upper = float(fine[inf_idx + above[0]])
+        seg2 = fine_dose[:inf_idx + 1][::-1]
+        below = np.where(seg2 <= lower)[0]
+        if len(below) == 0:
+            return float('nan')
+        x_lower = float(fine[:inf_idx + 1][::-1][below[0]])
+        return float(x_upper - x_lower)
+
+    else:  # right
+        if geo_half is not None:
+            edge = geo_half
+            search = (fine >= edge - 1.0) & (fine <= edge + 1.0) & (fine > 0)
+            if not search.any():
+                search = fine > 0   # fallback
+            inf_idx = int(np.argmin(np.where(search, deriv, np.inf)))
+        else:
+            inf_idx = mid + int(np.argmin(deriv[mid:]))
+        d_inf = float(fine_dose[inf_idx])
+        upper, lower = d_inf * 1.6, d_inf * 0.4
+        seg = fine_dose[mid:inf_idx + 1][::-1]
+        above = np.where(seg >= upper)[0]
+        if len(above) == 0:
+            return float('nan')
+        x_upper = float(fine[mid:inf_idx + 1][::-1][above[0]])
+        seg2 = fine_dose[inf_idx:]
+        below = np.where(seg2 <= lower)[0]
+        if len(below) == 0:
+            return float('nan')
+        x_lower = float(fine[inf_idx + below[0]])
+        return float(x_lower - x_upper)
+
+
 def metric_penumbra(df, fs, depth_cm, axis='X', side='Both'):
     """80-20 penumbra width. axis: X/Y/Both; side: Left/Right/Both (avg of selected)."""
     if axis == 'Both':
@@ -211,6 +305,28 @@ def metric_penumbra(df, fs, depth_cm, axis='X', side='Both'):
         valid = [v for v in (pl, pr) if not np.isnan(v)]
         return float(np.mean(valid)) if valid else float('nan')
     return _penumbra_side(pos, dose, side.lower())
+
+
+def metric_penumbra_inflection(df, fs, depth_cm, axis='X', side='Both'):
+    """Inflection-referenced penumbra. axis: X/Y/Both; side: Left/Right/Both (avg of selected)."""
+    ssd_vals = df['SSD'].dropna() if 'SSD' in df.columns else []
+    ssd = float(ssd_vals.iloc[0]) if len(ssd_vals) > 0 else None
+    geo_half = (fs / 2.0) * (ssd + depth_cm) / 100.0 if ssd is not None else None
+
+    if axis == 'Both':
+        px = metric_penumbra_inflection(df, fs, depth_cm, 'X', side)
+        py = metric_penumbra_inflection(df, fs, depth_cm, 'Y', side)
+        valid = [v for v in (px, py) if not np.isnan(v)]
+        return float(np.mean(valid)) if valid else float('nan')
+    pos, dose = _profile_sorted(df, fs, depth_cm, axis)
+    if pos is None:
+        return float('nan')
+    if side == 'Both':
+        pl = _penumbra_inflection_side(pos, dose, 'left',  geo_half)
+        pr = _penumbra_inflection_side(pos, dose, 'right', geo_half)
+        valid = [v for v in (pl, pr) if not np.isnan(v)]
+        return float(np.mean(valid)) if valid else float('nan')
+    return _penumbra_inflection_side(pos, dose, side.lower(), geo_half)
 
 
 def metric_oar(df, fs, depth_cm, axis='X', side='Both', oar_pos=2.0):
@@ -286,20 +402,30 @@ METRICS = {
                          "spec": {"6X": 66.6, "10X": 73.8, "15X": 76.8,
                                   "6FFF": 63.8, "8FFF": 68.9, "10FFF": 70.9}, "tol": 0.5},
     "Depth of dmax":    {"fn": metric_dmax_depth,   "file_keyword": "PDD",     "unit": "cm",
-                         "spec": {e: None for e in _ENERGIES}, "tol": 0.5},
+                         "spec": {"6X": 1.43, "10X": 2.37, "15X": 2.70,
+                                  "6FFF": 1.36, "8FFF": 1.79, "10FFF": 2.16}, "tol": 0.15},
     "TMR 20/10":        {"fn": metric_tmr_20_10,    "file_keyword": "PDD",     "unit": "",
                          "spec": None, "tol": None},
     "Profile Flatness":   {"fn": metric_flatness,    "file_keyword": "Profile", "unit": "%",
-                           "spec": 0.0, "tol": 3.0,  "needs_axis": True},
-    "Profile Field Size": {"fn": metric_field_size,  "file_keyword": "Profile", "unit": "cm",
-                           "spec": None, "tol": 0.2,  "needs_axis": True},
+                           "spec": None, "tol": None, "needs_axis": True,
+                           "spec_type": "energy_fs", "comparison": "max"},
+    "Profile Field Size":        {"fn": metric_field_size_inflection, "file_keyword": "Profile", "unit": "cm",
+                           "spec": None,
+                           "spec_fn": lambda ssd, depth, fs: ((ssd + depth) / 100.0) * fs if ssd is not None else None,
+                           "tol": 0.2,  "needs_axis": True, "default_axis": "Both"},
+    "Profile Field Size (FWHM)": {"fn": metric_field_size,  "file_keyword": "Profile", "unit": "cm",
+                           "spec": None,
+                           "spec_fn": lambda ssd, depth, fs: ((ssd + depth) / 100.0) * fs if ssd is not None else None,
+                           "tol": 0.2,  "needs_axis": True, "default_axis": "Both"},
     "Profile Symmetry":   {"fn": metric_symmetry,   "file_keyword": "Profile", "unit": "%",
-                           "spec": 0.0,  "tol": 3.0,  "needs_axis": True},
-    "Profile Penumbra":   {"fn": metric_penumbra,  "file_keyword": "Profile", "unit": "cm",
-                           "spec": None, "tol": None, "needs_axis": True, "needs_side": True},
+                           "spec": 0.0,  "tol": 1.5,  "needs_axis": True},
+    "Profile Penumbra":        {"fn": metric_penumbra_inflection, "file_keyword": "Profile", "unit": "cm",
+                                "spec": None, "tol": None, "needs_axis": True, "needs_side": True, "default_axis": "Both"},
+    "Profile Penumbra (80-20%)": {"fn": metric_penumbra,          "file_keyword": "Profile", "unit": "cm",
+                                "spec": None, "tol": None, "needs_axis": True, "needs_side": True, "default_axis": "Both"},
     "Profile OAR":        {"fn": metric_oar,       "file_keyword": "Profile", "unit": "%",
-                           "spec": None, "tol": None, "needs_axis": True, "needs_side": True,
-                           "needs_oar_pos": True},
+                           "spec": None, "tol": 1.0, "needs_axis": True, "needs_side": True,
+                           "needs_oar_pos": True, "spec_type": "energy_fs_pos"},
 }
 
 
@@ -321,7 +447,28 @@ def parse_energy_ssd(name):
 # ── File registry: list of {'path', 'energy', 'ssd', 'sheets'} ──────────────
 
 loaded_files = []
-_user_specs  = {}   # {metric_name: {energy: float or None}}
+_user_specs  = {}   # {metric_name: varies by spec_type}
+
+# OAR seed data: {energy: {fs: {oar_pos: spec_%}}}  tol ±1%
+_OAR_SEED = {
+    "6X":    {10.5: {2.0: 100.0, 4.0: 100.0}, 40.0: {6.0: 100.0, 18.0: 100.0}},
+    "10X":   {10.5: {2.0: 100.0, 4.0: 100.0}, 40.0: {6.0: 100.0, 18.0: 100.0}},
+    "15X":   {10.5: {2.0: 100.0, 4.0: 100.0}, 40.0: {6.0: 100.0, 18.0: 100.0}},
+    "6FFF":  {10.5: {2.0: 97.8,  4.0: 91.1},  40.0: {6.0: 89.8,  18.0: 59.5}},
+    "8FFF":  {10.5: {2.0: 96.5,  4.0: 87.7},  40.0: {6.0: 83.4,  18.0: 49.6}},
+    "10FFF": {10.5: {2.0: 95.8,  4.0: 85.8},  40.0: {6.0: 80.2,  18.0: 45.6}},
+}
+_user_specs["Profile OAR"] = {e: {fs: dict(pos_map)
+                                  for fs, pos_map in fs_map.items()}
+                               for e, fs_map in _OAR_SEED.items()}
+
+# Flatness seed data: {energy: {fs: limit_%}}  — FFF beams have no spec
+_FLATNESS_SEED = {
+    "6X":  {10.5: 2.75, 40.0: 2.25},
+    "10X": {10.5: 2.75, 40.0: 2.25},
+    "15X": {10.5: 2.75, 40.0: 2.37},
+}
+_user_specs["Profile Flatness"] = {e: dict(fs_map) for e, fs_map in _FLATNESS_SEED.items()}
 
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
@@ -334,7 +481,7 @@ depth_var       = tk.StringVar(master=root, value="10")
 metric_var      = tk.StringVar(master=root, value="PDD at depth")
 highlight_var   = tk.StringVar(master=root)
 show_labels_var = tk.BooleanVar(master=root, value=False)
-axis_var        = tk.StringVar(master=root, value="X")
+axis_var        = tk.StringVar(master=root, value="Both")
 side_var        = tk.StringVar(master=root, value="Both")
 oar_pos_var     = tk.StringVar(master=root, value="2.0")
 spec_var        = tk.StringVar(master=root, value="")
@@ -478,6 +625,23 @@ spec_multi_btn = ttk.Button(spec_multi_frame, text="Per energy…")
 spec_multi_btn.pack(side='left', padx=4)
 spec_multi_frame.grid_remove()
 
+spec_2d_frame = ttk.Frame(main)
+spec_2d_frame.grid(row=6, column=2, sticky="w", padx=5)
+ttk.Label(spec_2d_frame, text="Spec:").pack(side='left')
+# Button command assigned after _open_spec_editor_2d is defined below
+spec_2d_btn = ttk.Button(spec_2d_frame, text="Per energy/FS…")
+spec_2d_btn.pack(side='left', padx=4)
+spec_2d_frame.grid_remove()
+
+spec_ef_frame = ttk.Frame(main)
+spec_ef_frame.grid(row=6, column=2, sticky="w", padx=5)
+ttk.Label(spec_ef_frame, text="Limit:").pack(side='left')
+# Button command assigned after _open_spec_editor_ef is defined below
+spec_ef_btn = ttk.Button(spec_ef_frame, text="Per energy/FS…")
+spec_ef_btn.pack(side='left', padx=4)
+spec_ef_frame.grid_remove()
+
+
 # Row 7: depth entry + Tolerance
 ttk.Label(main, text="Reference depth [cm]:").grid(row=7, column=0, sticky="w")
 ttk.Entry(main, textvariable=depth_var, width=8).grid(row=7, column=1, sticky="w", padx=5)
@@ -548,11 +712,156 @@ def _open_spec_editor():
 spec_multi_btn.configure(command=_open_spec_editor)
 
 
+def _open_spec_editor_2d():
+    """2-D spec editor: energy (rows) × FS (columns) for the current OAR position."""
+    metric  = metric_var.get()
+    try:
+        cur_pos = float(oar_pos_var.get())
+    except ValueError:
+        cur_pos = 2.0
+
+    if metric not in _user_specs:
+        _user_specs[metric] = {}
+
+    dlg = tk.Toplevel(root)
+    dlg.title(f"OAR spec at ±{cur_pos:g} cm — per energy / FS")
+    dlg.resizable(True, True)
+    dlg.grab_set()
+
+    # ── FS selector ────────────────────────────────────────────────────────────
+    top = ttk.Frame(dlg, padding=8)
+    top.pack(fill='x')
+    ttk.Label(top, text="Field sizes (comma-separated cm):").pack(side='left')
+
+    # Gather FS values already stored for this oar_pos
+    existing_fs: set[float] = set()
+    for e_dict in _user_specs[metric].values():
+        for fs, pos_map in e_dict.items():
+            if cur_pos in pos_map:
+                existing_fs.add(fs)
+    fs_var_dlg = tk.StringVar(value=', '.join(str(f) for f in sorted(existing_fs)) or '10.5, 40')
+    ttk.Entry(top, textvariable=fs_var_dlg, width=28).pack(side='left', padx=6)
+
+    grid_frame = ttk.Frame(dlg, padding=8)
+    grid_frame.pack(fill='both', expand=True)
+
+    entries: dict[tuple, tk.StringVar] = {}
+
+    def rebuild_grid():
+        for w in grid_frame.winfo_children():
+            w.destroy()
+        entries.clear()
+        try:
+            fs_vals = [float(x.strip()) for x in fs_var_dlg.get().split(',') if x.strip()]
+        except ValueError:
+            return
+        ttk.Label(grid_frame, text="Energy \\ FS", width=10).grid(row=0, column=0, padx=6, pady=3)
+        for j, fs in enumerate(fs_vals):
+            ttk.Label(grid_frame, text=f"{fs:g} cm", width=9).grid(row=0, column=j+1, padx=6, pady=3)
+        for i, energy in enumerate(_ENERGIES):
+            ttk.Label(grid_frame, text=energy, width=10).grid(row=i+1, column=0, padx=6, pady=3)
+            for j, fs in enumerate(fs_vals):
+                existing = (_user_specs[metric].get(energy, {}).get(fs, {}).get(cur_pos))
+                var = tk.StringVar(value="" if existing is None else str(existing))
+                ttk.Entry(grid_frame, textvariable=var, width=9).grid(row=i+1, column=j+1, padx=6, pady=3)
+                entries[(energy, fs)] = var
+
+    ttk.Button(top, text="Update grid", command=rebuild_grid).pack(side='left', padx=4)
+    rebuild_grid()
+
+    def _save():
+        for (energy, fs), var in entries.items():
+            txt = var.get().strip()
+            _user_specs[metric].setdefault(energy, {}).setdefault(fs, {})
+            try:
+                _user_specs[metric][energy][fs][cur_pos] = float(txt) if txt else None
+            except ValueError:
+                _user_specs[metric][energy][fs][cur_pos] = None
+        dlg.destroy()
+
+    btn_row = ttk.Frame(dlg, padding=8)
+    btn_row.pack()
+    ttk.Button(btn_row, text="OK",     command=_save      ).pack(side='left', padx=8)
+    ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side='left', padx=8)
+
+
+spec_2d_btn.configure(command=_open_spec_editor_2d)
+
+
+def _open_spec_editor_ef():
+    """2-D limit editor: energy (rows) × FS (columns) — no oar_pos dimension."""
+    metric = metric_var.get()
+    if metric not in _user_specs:
+        _user_specs[metric] = {}
+
+    dlg = tk.Toplevel(root)
+    dlg.title(f"Limit per energy / FS — {metric}")
+    dlg.resizable(True, True)
+    dlg.grab_set()
+
+    top = ttk.Frame(dlg, padding=8)
+    top.pack(fill='x')
+    ttk.Label(top, text="Field sizes (comma-separated cm):").pack(side='left')
+
+    existing_fs: set[float] = set()
+    for fs_map in _user_specs[metric].values():
+        existing_fs.update(fs_map.keys())
+    fs_var_dlg = tk.StringVar(value=', '.join(str(f) for f in sorted(existing_fs)) or '10.5, 40')
+    ttk.Entry(top, textvariable=fs_var_dlg, width=28).pack(side='left', padx=6)
+
+    grid_frame = ttk.Frame(dlg, padding=8)
+    grid_frame.pack(fill='both', expand=True)
+
+    entries: dict[tuple, tk.StringVar] = {}
+
+    def rebuild_grid():
+        for w in grid_frame.winfo_children():
+            w.destroy()
+        entries.clear()
+        try:
+            fs_vals = [float(x.strip()) for x in fs_var_dlg.get().split(',') if x.strip()]
+        except ValueError:
+            return
+        ttk.Label(grid_frame, text="Energy \\ FS", width=10).grid(row=0, column=0, padx=6, pady=3)
+        for j, fs in enumerate(fs_vals):
+            ttk.Label(grid_frame, text=f"{fs:g} cm", width=9).grid(row=0, column=j+1, padx=6, pady=3)
+        for i, energy in enumerate(_ENERGIES):
+            ttk.Label(grid_frame, text=energy, width=10).grid(row=i+1, column=0, padx=6, pady=3)
+            for j, fs in enumerate(fs_vals):
+                existing = _user_specs[metric].get(energy, {}).get(fs)
+                var = tk.StringVar(value="" if existing is None else str(existing))
+                ttk.Entry(grid_frame, textvariable=var, width=9).grid(row=i+1, column=j+1, padx=6, pady=3)
+                entries[(energy, fs)] = var
+
+    ttk.Button(top, text="Update grid", command=rebuild_grid).pack(side='left', padx=4)
+    rebuild_grid()
+
+    def _save():
+        for (energy, fs), var in entries.items():
+            txt = var.get().strip()
+            _user_specs[metric].setdefault(energy, {})
+            try:
+                _user_specs[metric][energy][fs] = float(txt) if txt else None
+            except ValueError:
+                _user_specs[metric][energy][fs] = None
+        dlg.destroy()
+
+    btn_row = ttk.Frame(dlg, padding=8)
+    btn_row.pack()
+    ttk.Button(btn_row, text="OK",     command=_save      ).pack(side='left', padx=8)
+    ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side='left', padx=8)
+
+
+spec_ef_btn.configure(command=_open_spec_editor_ef)
+
+
 def _on_metric_change(*_):
     info = METRICS.get(metric_var.get(), {})
     if info.get("needs_axis"):
         axis_label.grid()
         axis_frame.grid()
+        if "default_axis" in info:
+            axis_var.set(info["default_axis"])
     else:
         axis_label.grid_remove()
         axis_frame.grid_remove()
@@ -567,16 +876,43 @@ def _on_metric_change(*_):
     else:
         oar_pos_frame.grid_remove()
     spec_info = info.get("spec")
-    if isinstance(spec_info, dict):
-        spec_single_frame.grid_remove()
+    spec_type = info.get("spec_type")
+    for _f in [spec_single_frame, spec_multi_frame, spec_2d_frame, spec_ef_frame]:
+        _f.grid_remove()
+
+    if spec_type == "energy_fs_pos":
+        spec_2d_frame.grid()
+        spec_var.set("")
+    elif spec_type == "energy_fs":
+        spec_ef_frame.grid()
+        spec_var.set("")
+    elif info.get("spec_fn") is not None:
+        spec_single_frame.grid()
+        try:
+            _preview = info["spec_fn"](100, float(depth_var.get()), float(fs_var.get()))
+            spec_var.set(f"{_preview:.3f}")
+        except Exception:
+            spec_var.set("")
+    elif isinstance(spec_info, dict):
         spec_multi_frame.grid()
         spec_var.set("")
     else:
-        spec_multi_frame.grid_remove()
         spec_single_frame.grid()
         spec_var.set("" if spec_info is None else str(spec_info))
     tol_var.set("" if info.get("tol") is None else str(info["tol"]))
 
+
+def _update_spec_preview(*_):
+    fn = METRICS.get(metric_var.get(), {}).get("spec_fn")
+    if fn is None:
+        return
+    try:
+        spec_var.set(f"{fn(100, float(depth_var.get()), float(fs_var.get())):.3f}")
+    except Exception:
+        pass
+
+fs_var.trace_add('write', _update_spec_preview)
+depth_var.trace_add('write', _update_spec_preview)
 
 metric_combo.bind("<<ComboboxSelected>>", _on_metric_change)
 _on_metric_change()   # initialize visibility
@@ -679,11 +1015,24 @@ def run_compare():
     # results[(energy, ssd)] = { sheet: value }
     results = {}
 
-    spec_info = metric_info.get("spec")
-    use_per_energy_spec = isinstance(spec_info, dict)
-    if use_per_energy_spec:
+    spec_info      = metric_info.get("spec")
+    spec_type_key  = metric_info.get("spec_type")
+    spec_fn        = metric_info.get("spec_fn")
+    comparison     = metric_info.get("comparison", "abs")
+    use_energy_fs_pos_spec = (spec_type_key == "energy_fs_pos")
+    use_energy_fs_spec     = (spec_type_key == "energy_fs")
+    use_per_energy_spec    = isinstance(spec_info, dict) and not use_energy_fs_pos_spec and not use_energy_fs_spec
+    if use_energy_fs_pos_spec:
+        energy_fs_pos_data = _user_specs.get(metric_name, {})
+        spec_val = None
+    elif use_energy_fs_spec:
+        energy_fs_data = _user_specs.get(metric_name, {})
+        spec_val = None
+    elif use_per_energy_spec:
         energy_specs = _user_specs.get(metric_name, spec_info)
-        spec_val = None   # resolved per group below
+        spec_val = None
+    elif spec_fn is not None:
+        spec_val = None   # computed per group
     else:
         try:
             spec_val = float(spec_var.get()) if spec_var.get().strip() else None
@@ -700,8 +1049,15 @@ def run_compare():
 
     for entry in loaded_files:
         energy = entry['energy']; ssd = entry['ssd']
-        if use_per_energy_spec:
+        if use_energy_fs_pos_spec:
+            spec_val = (energy_fs_pos_data.get(energy, {}).get(fs_ref, {}).get(oar_p)
+                        if oar_p is not None else None)
+        elif use_energy_fs_spec:
+            spec_val = energy_fs_data.get(energy, {}).get(fs_ref)
+        elif use_per_energy_spec:
             spec_val = energy_specs.get(energy)
+        elif spec_fn is not None:
+            spec_val = spec_fn(ssd, depth_ref, fs_ref)
         if has_energy_filter and energy is not None and energy not in allowed_energies:
             continue
         if has_ssd_filter and ssd is not None and ssd not in allowed_ssds:
@@ -736,13 +1092,24 @@ def run_compare():
             except Exception:
                 pass
             for suffix, combo_fn in combos:
-                val = combo_fn(df, fs_ref, depth_ref)
+                d_arg = (spec_val if metric_name == "Depth of dmax" and spec_val is not None
+                         else depth_ref)
+                val = combo_fn(df, fs_ref, d_arg)
                 key = f"{s}{suffix}"
                 results[group_key][key] = val
                 flag = ""
-                if show_spec_var.get() and spec_val is not None and tol_val is not None and not np.isnan(val):
-                    if abs(val - spec_val) > tol_val:
-                        flag = "  ***"
+                if show_spec_var.get() and spec_val is not None and not np.isnan(val):
+                    if comparison == "max":
+                        out_of_tol = val > spec_val
+                    else:
+                        out_of_tol = tol_val is not None and abs(val - spec_val) > tol_val
+                    if out_of_tol:
+                        if metric_name == "Depth of dmax":
+                            pdd_at_spec = metric_pdd_at_depth(df, fs_ref, spec_val)
+                            flag = (f"  ***  (PDD at spec dmax {spec_val:.2f} cm: {pdd_at_spec:.1f}%)"
+                                    if not np.isnan(pdd_at_spec) else "  ***")
+                        else:
+                            flag = "  ***"
                 w = 18 if expand else 15
                 output_text.insert(tk.END, f"  {key:<{w}}  {val:.3f}{flag}\n")
 
@@ -829,8 +1196,15 @@ def run_compare():
         r, col_ = divmod(i, ncols)
         ax = axes[r][col_]
         e, s = k
-        if use_per_energy_spec:
+        if use_energy_fs_pos_spec:
+            spec_val = (energy_fs_pos_data.get(e, {}).get(fs_ref, {}).get(oar_p)
+                        if oar_p is not None else None)
+        elif use_energy_fs_spec:
+            spec_val = energy_fs_data.get(e, {}).get(fs_ref)
+        elif use_per_energy_spec:
             spec_val = energy_specs.get(e)
+        elif spec_fn is not None:
+            spec_val = spec_fn(s, depth_ref, fs_ref)
         sheet_items = [(sh, v) for sh, v in results[k].items() if not np.isnan(v)]
         vals = [v for _, v in sheet_items]
 
@@ -856,15 +1230,22 @@ def run_compare():
         # Pad y-range a bit around the data so the box isn't hugging the edges.
         # Floor scales with the value magnitude (not an absolute 0.05) so small
         # dimensionless metrics like TMR 20/10 (~0.7) aren't dwarfed by the pad.
+        # Include spec/tol values in the range so lines are always visible.
+        y_range = list(vals)
+        if show_spec_var.get() and spec_val is not None:
+            y_range.append(spec_val)
+            if tol_val is not None:
+                y_range.extend([spec_val + tol_val, spec_val - tol_val])
+
+        vmin, vmax = min(y_range), max(y_range)
+        pad = max((vmax - vmin) * 0.3, abs(vmax) * 0.01)
+        ax.set_ylim(vmin - pad, vmax + pad)
+
         if show_spec_var.get() and spec_val is not None:
             ax.axhline(spec_val, color='green', linewidth=1.2, alpha=0.8, label='Spec')
             if tol_val is not None:
                 ax.axhline(spec_val + tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8, label='Tol')
                 ax.axhline(spec_val - tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8)
-
-        vmin, vmax = min(vals), max(vals)
-        pad = max((vmax - vmin) * 0.3, abs(vmax) * 0.01)
-        ax.set_ylim(vmin - pad, vmax + pad)
 
     # Hide any unused axes (when n isn't a multiple of ncols)
     for j in range(n, nrows * ncols):

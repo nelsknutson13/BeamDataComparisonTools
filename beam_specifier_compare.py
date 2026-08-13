@@ -232,7 +232,9 @@ def _penumbra_inflection_side(pos, dose, side, geo_half=None):
     Upper threshold = 1.6 × D_inf, lower = 0.4 × D_inf.
     geo_half: geometric half-field width [cm] = (FS/2)*(SSD+depth)/100.
     When provided, inflection search is restricted to within 1 cm of the geometric edge
-    so FFF central slope can't be mistaken for the penumbra."""
+    so FFF central slope can't be mistaken for the penumbra.
+    The 80/20 crossing search is capped at 2.5 cm from the inflection to prevent
+    far-field artifacts from producing spuriously large values."""
     try:
         pchip = interp.pchip(pos, dose)
     except Exception:
@@ -241,6 +243,8 @@ def _penumbra_inflection_side(pos, dose, side, geo_half=None):
     fine_dose = pchip(fine)
     deriv = pchip.derivative()(fine)
     mid = len(fine) // 2
+    step = float(fine[1] - fine[0])
+    n_search = max(1, int(2.5 / step))   # 2.5 cm cap on crossing search
 
     if side == 'left':
         if geo_half is not None:
@@ -253,17 +257,17 @@ def _penumbra_inflection_side(pos, dose, side, geo_half=None):
             inf_idx = int(np.argmax(deriv[:mid]))
         d_inf = float(fine_dose[inf_idx])
         upper, lower = d_inf * 1.6, d_inf * 0.4
-        seg = fine_dose[inf_idx:mid]
+        seg = fine_dose[inf_idx : min(inf_idx + n_search, mid)]
         above = np.where(seg >= upper)[0]
         if len(above) == 0:
             return float('nan')
         x_upper = float(fine[inf_idx + above[0]])
-        seg2 = fine_dose[:inf_idx + 1][::-1]
+        seg2 = fine_dose[max(0, inf_idx - n_search) : inf_idx + 1][::-1]
         below = np.where(seg2 <= lower)[0]
         if len(below) == 0:
             return float('nan')
-        x_lower = float(fine[:inf_idx + 1][::-1][below[0]])
-        return float(x_upper - x_lower)
+        x_lower = float(fine[inf_idx - below[0]])
+        result = float(x_upper - x_lower)
 
     else:  # right
         if geo_half is not None:
@@ -276,17 +280,19 @@ def _penumbra_inflection_side(pos, dose, side, geo_half=None):
             inf_idx = mid + int(np.argmin(deriv[mid:]))
         d_inf = float(fine_dose[inf_idx])
         upper, lower = d_inf * 1.6, d_inf * 0.4
-        seg = fine_dose[mid:inf_idx + 1][::-1]
+        seg = fine_dose[max(mid, inf_idx - n_search) : inf_idx + 1][::-1]
         above = np.where(seg >= upper)[0]
         if len(above) == 0:
             return float('nan')
-        x_upper = float(fine[mid:inf_idx + 1][::-1][above[0]])
-        seg2 = fine_dose[inf_idx:]
+        x_upper = float(fine[inf_idx - above[0]])
+        seg2 = fine_dose[inf_idx : min(inf_idx + n_search, len(fine))]
         below = np.where(seg2 <= lower)[0]
         if len(below) == 0:
             return float('nan')
         x_lower = float(fine[inf_idx + below[0]])
-        return float(x_lower - x_upper)
+        result = float(x_lower - x_upper)
+
+    return result if 0 < result < 3.0 else float('nan')
 
 
 def metric_penumbra(df, fs, depth_cm, axis='X', side='Both'):
@@ -407,7 +413,7 @@ METRICS = {
     "TMR 20/10":        {"fn": metric_tmr_20_10,    "file_keyword": "PDD",     "unit": "",
                          "spec": None, "tol": None},
     "Profile Flatness":   {"fn": metric_flatness,    "file_keyword": "Profile", "unit": "%",
-                           "spec": None, "tol": None, "needs_axis": True,
+                           "spec": None, "tol": None, "target": 0.0, "needs_axis": True,
                            "spec_type": "energy_fs", "comparison": "max"},
     "Profile Field Size":        {"fn": metric_field_size_inflection, "file_keyword": "Profile", "unit": "cm",
                            "spec": None,
@@ -448,6 +454,7 @@ def parse_energy_ssd(name):
 
 loaded_files = []
 _user_specs  = {}   # {metric_name: varies by spec_type}
+_tps_values  = {}   # {metric_name: {energy: value}}
 
 # OAR seed data: {energy: {fs: {oar_pos: spec_%}}}  tol ±1%
 _OAR_SEED = {
@@ -470,6 +477,16 @@ _FLATNESS_SEED = {
 }
 _user_specs["Profile Flatness"] = {e: dict(fs_map) for e, fs_map in _FLATNESS_SEED.items()}
 
+# TPS reference values for PDD at depth — 100 SSD, 10.5×10.5 cm field, 10 cm depth
+_tps_values["PDD at depth"] = {
+    "6X":    66.5,
+    "10X":   73.6,
+    "15X":   76.5,
+    "6FFF":  63.4,
+    "8FFF":  68.2,
+    "10FFF": 70.1,
+}
+
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
 
@@ -487,6 +504,7 @@ oar_pos_var     = tk.StringVar(master=root, value="2.0")
 spec_var        = tk.StringVar(master=root, value="")
 tol_var         = tk.StringVar(master=root, value="")
 show_spec_var   = tk.BooleanVar(master=root, value=True)
+show_tps_var    = tk.BooleanVar(master=root, value=False)
 
 main = ttk.Frame(root, padding=10)
 main.grid(row=0, column=0, sticky="nsew")
@@ -635,7 +653,7 @@ spec_2d_frame.grid_remove()
 
 spec_ef_frame = ttk.Frame(main)
 spec_ef_frame.grid(row=6, column=2, sticky="w", padx=5)
-ttk.Label(spec_ef_frame, text="Limit:").pack(side='left')
+ttk.Label(spec_ef_frame, text="Tolerance:").pack(side='left')
 # Button command assigned after _open_spec_editor_ef is defined below
 spec_ef_btn = ttk.Button(spec_ef_frame, text="Per energy/FS…")
 spec_ef_btn.pack(side='left', padx=4)
@@ -647,9 +665,17 @@ ttk.Label(main, text="Reference depth [cm]:").grid(row=7, column=0, sticky="w")
 ttk.Entry(main, textvariable=depth_var, width=8).grid(row=7, column=1, sticky="w", padx=5)
 tol_frame = ttk.Frame(main)
 tol_frame.grid(row=7, column=2, sticky="w", padx=5)
-ttk.Label(tol_frame, text="Tolerance ±:").pack(side='left')
-ttk.Entry(tol_frame, textvariable=tol_var, width=8).pack(side='left', padx=4)
-ttk.Checkbutton(tol_frame, text="Show spec/tol lines", variable=show_spec_var).pack(side='left', padx=10)
+tol_label_w  = ttk.Label(tol_frame, text="Tolerance ±:")
+tol_label_w.pack(side='left')
+tol_entry_w  = ttk.Entry(tol_frame, textvariable=tol_var, width=8)
+tol_entry_w.pack(side='left', padx=4)
+tol_spec_lbl = ttk.Label(tol_frame, text="")   # "Spec: 0 %" shown for limit-type metrics
+show_spec_chk = ttk.Checkbutton(tol_frame, text="Show spec/tol lines", variable=show_spec_var)
+show_spec_chk.pack(side='left', padx=10)
+show_tps_chk  = ttk.Checkbutton(tol_frame, text="Show TPS", variable=show_tps_var)
+show_tps_chk.pack(side='left', padx=10)
+tps_btn = ttk.Button(tol_frame, text="TPS per energy…")
+tps_btn.pack(side='left', padx=4)
 
 # Row 8: profile axis selector (shown only for axis-aware metrics)
 axis_label = ttk.Label(main, text="Profile axis:")
@@ -710,6 +736,67 @@ def _open_spec_editor():
     ttk.Button(dlg, text="Cancel", command=dlg.destroy ).grid(row=n, column=1, pady=8)
 
 spec_multi_btn.configure(command=_open_spec_editor)
+
+
+def _open_tps_editor():
+    metric = metric_var.get()
+    if metric not in _tps_values:
+        _tps_values[metric] = {}
+
+    dlg = tk.Toplevel(root)
+    dlg.title(f"TPS values per energy — {metric}")
+    dlg.resizable(False, False)
+    dlg.grab_set()
+
+    # For PDD metrics show a derived column: D(SAD=100, d=10) = %dd(10)/100 × (110/100)²
+    _is_pdd = "PDD" in metric or "pdd" in metric
+    _ISF = (110 / 100) ** 2   # SSD=100, d=10 → SAD=100, d=10
+
+    unit = METRICS.get(metric, {}).get("unit", "")
+    header = f"TPS %dd(10)" if _is_pdd else (f"TPS value [{unit}]" if unit else "TPS value")
+    ttk.Label(dlg, text="Energy",  width=8 ).grid(row=0, column=0, padx=12, pady=4, sticky='w')
+    ttk.Label(dlg, text=header,    width=14).grid(row=0, column=1, padx=12, pady=4, sticky='w')
+    if _is_pdd:
+        ttk.Label(dlg, text="D(SAD=100, d=10)\n[cGy/MU @ 1cGy/MU cal]",
+                  width=22).grid(row=0, column=2, padx=12, pady=4, sticky='w')
+
+    entries = {}
+    sad_labels = {}
+    for i, energy in enumerate(_ENERGIES):
+        ttk.Label(dlg, text=energy, width=8).grid(row=i + 1, column=0, padx=12, pady=4, sticky='w')
+        val = _tps_values[metric].get(energy)
+        var = tk.StringVar(value="" if val is None else str(val))
+        ttk.Entry(dlg, textvariable=var, width=12).grid(row=i + 1, column=1, padx=12, pady=4)
+        entries[energy] = var
+
+        if _is_pdd:
+            sad_lbl = ttk.Label(dlg, text="", width=22, foreground='steelblue')
+            sad_lbl.grid(row=i + 1, column=2, padx=12, pady=4, sticky='w')
+            sad_labels[energy] = sad_lbl
+
+            def _update_sad(_, v=var, lbl=sad_lbl):
+                try:
+                    pdd = float(v.get())
+                    lbl.config(text=f"{pdd / 100 * _ISF:.4f}")
+                except (ValueError, ZeroDivisionError):
+                    lbl.config(text="")
+            var.trace_add('write', _update_sad)
+            _update_sad(None)   # populate on open
+
+    def _save():
+        for e, v in entries.items():
+            txt = v.get().strip()
+            try:
+                _tps_values[metric][e] = float(txt) if txt else None
+            except ValueError:
+                _tps_values[metric][e] = None
+        dlg.destroy()
+
+    n = len(_ENERGIES)
+    ttk.Button(dlg, text="OK",     command=_save       ).grid(row=n + 1, column=0, pady=8)
+    ttk.Button(dlg, text="Cancel", command=dlg.destroy ).grid(row=n + 1, column=1, pady=8)
+
+tps_btn.configure(command=_open_tps_editor)
 
 
 def _open_spec_editor_2d():
@@ -795,7 +882,7 @@ def _open_spec_editor_ef():
         _user_specs[metric] = {}
 
     dlg = tk.Toplevel(root)
-    dlg.title(f"Limit per energy / FS — {metric}")
+    dlg.title(f"Tolerance per energy / FS — {metric}")
     dlg.resizable(True, True)
     dlg.grab_set()
 
@@ -899,7 +986,23 @@ def _on_metric_change(*_):
     else:
         spec_single_frame.grid()
         spec_var.set("" if spec_info is None else str(spec_info))
-    tol_var.set("" if info.get("tol") is None else str(info["tol"]))
+    # Tol row: limit-type metrics show target; abs-type metrics show scalar tolerance entry
+    for _w in (tol_label_w, tol_entry_w, tol_spec_lbl, show_spec_chk):
+        _w.pack_forget()
+    if info.get("comparison") == "max":
+        _target = info.get("target")
+        tol_spec_lbl.config(
+            text=f"Spec: {_target:g} {info.get('unit', '')}" if _target is not None else "Spec: —"
+        )
+        tol_spec_lbl.pack(side='left', padx=4)
+        show_spec_chk.config(text="Show tol lines")
+        tol_var.set("")
+    else:
+        tol_label_w.pack(side='left')
+        tol_entry_w.pack(side='left', padx=4)
+        show_spec_chk.config(text="Show spec/tol lines")
+        tol_var.set("" if info.get("tol") is None else str(info["tol"]))
+    show_spec_chk.pack(side='left', padx=10)
 
 
 def _update_spec_preview(*_):
@@ -1111,7 +1214,12 @@ def run_compare():
                         else:
                             flag = "  ***"
                 w = 18 if expand else 15
-                output_text.insert(tk.END, f"  {key:<{w}}  {val:.3f}{flag}\n")
+                tps_str = ""
+                if show_tps_var.get() and not np.isnan(val):
+                    _tv = _tps_values.get(metric_name, {}).get(energy)
+                    if _tv is not None and _tv != 0:
+                        tps_str = f"  Δ TPS: {(val - _tv) / _tv * 100:+.2f}%"
+                output_text.insert(tk.END, f"  {key:<{w}}  {val:.3f}{tps_str}{flag}\n")
 
     # Keep a stable order
     def _group_sort_key(k):
@@ -1131,10 +1239,13 @@ def run_compare():
     output_text.insert(tk.END, "\n" + "=" * 104 + "\n")
     output_text.insert(tk.END, "Summary statistics\n")
     output_text.insert(tk.END, "=" * 104 + "\n")
+    _show_tps_summary = show_tps_var.get() and bool(_tps_values.get(metric_name))
+    _tps_col = f" {'Δ TPS%':>8}" if _show_tps_summary else ""
+    _sep_w = 104 + (9 if _show_tps_summary else 0)
     hdr = (f"{'Group':<18} {'n':>3} {'mean':>8} {'median':>8} {'std':>7} "
-           f"{'P25':>8} {'P75':>8} {'min':>8} {'max':>8} {'range':>7} {'CoV%':>6}")
+           f"{'P25':>8} {'P75':>8} {'min':>8} {'max':>8} {'range':>7} {'CoV%':>6}{_tps_col}")
     output_text.insert(tk.END, hdr + "\n")
-    output_text.insert(tk.END, "-" * 104 + "\n")
+    output_text.insert(tk.END, "-" * _sep_w + "\n")
     for k in group_keys:
         e, s = k
         label = f"{e or '?'} {s or '?'} SSD"
@@ -1149,14 +1260,22 @@ def run_compare():
         vmin   = float(vals.min()); vmax = float(vals.max())
         rng_v  = vmax - vmin
         cov    = (std / mean * 100) if mean != 0 else float('nan')
+        tps_summary_str = ""
+        if _show_tps_summary:
+            _tv = _tps_values.get(metric_name, {}).get(e)
+            if _tv is not None and _tv != 0:
+                tps_summary_str = f" {(mean - _tv) / _tv * 100:>+8.2f}"
+            else:
+                tps_summary_str = f" {'—':>8}"
         output_text.insert(tk.END,
             f"{label:<18} {vals.size:>3d} {mean:>8.3f} {median:>8.3f} {std:>7.3f} "
-            f"{p25:>8.3f} {p75:>8.3f} {vmin:>8.3f} {vmax:>8.3f} {rng_v:>7.3f} {cov:>6.2f}\n"
+            f"{p25:>8.3f} {p75:>8.3f} {vmin:>8.3f} {vmax:>8.3f} {rng_v:>7.3f} {cov:>6.2f}"
+            f"{tps_summary_str}\n"
         )
 
     # Highlighted sheet position within each group
     if highlight:
-        output_text.insert(tk.END, "\n" + "-" * 104 + "\n")
+        output_text.insert(tk.END, "\n" + "-" * _sep_w + "\n")
         output_text.insert(tk.END, f"Position of '{highlight}' within each group:\n")
         for k in group_keys:
             vals_all = results[k]
@@ -1231,21 +1350,28 @@ def run_compare():
         # Floor scales with the value magnitude (not an absolute 0.05) so small
         # dimensionless metrics like TMR 20/10 (~0.7) aren't dwarfed by the pad.
         # Include spec/tol values in the range so lines are always visible.
+        tps_val = _tps_values.get(metric_name, {}).get(e) if show_tps_var.get() else None
+
         y_range = list(vals)
         if show_spec_var.get() and spec_val is not None:
             y_range.append(spec_val)
             if tol_val is not None:
                 y_range.extend([spec_val + tol_val, spec_val - tol_val])
+        if tps_val is not None:
+            y_range.append(tps_val)
 
         vmin, vmax = min(y_range), max(y_range)
         pad = max((vmax - vmin) * 0.3, abs(vmax) * 0.01)
         ax.set_ylim(vmin - pad, vmax + pad)
 
         if show_spec_var.get() and spec_val is not None:
-            ax.axhline(spec_val, color='green', linewidth=1.2, alpha=0.8, label='Spec')
+            _line_lbl = 'Tol. limit' if comparison == "max" else 'Spec'
+            ax.axhline(spec_val, color='green', linewidth=1.2, alpha=0.8, label=_line_lbl)
             if tol_val is not None:
                 ax.axhline(spec_val + tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8, label='Tol')
                 ax.axhline(spec_val - tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8)
+        if tps_val is not None:
+            ax.axhline(tps_val, color='steelblue', linestyle='--', linewidth=1.4, alpha=0.9, label='TPS')
 
     # Hide any unused axes (when n isn't a multiple of ncols)
     for j in range(n, nrows * ncols):

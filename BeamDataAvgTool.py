@@ -140,67 +140,80 @@ def populate_dl():
 def save_average():
     global avg_dose_global, fixed_pos_global, fsl, scl, dl
 
-    # Ensure required data is available
     if 'avg_dose_global' not in globals() or not avg_dose_global:
         print("Average data does not exist. Run make_avg first to calculate averages.")
         return
-    if 'fsl' not in globals() or not fsl:
-        print("Field sizes are not defined. Run make_avg first to define them.")
-        return
-    if 'scl' not in globals() or not scl:
-        print("Scan types are not defined. Run make_avg first to define them.")
-        return
-    if 'dl' not in globals():
-        print("Depths are not defined. Run make_avg first to define them.")
-        return
 
-    # Create a list to store all average data
-    avg_data_list = []
+    selected_sheets = [sheet_listbox.get(i) for i in sheet_listbox.curselection()]
 
-    # Store metadata information
-    metadata = {
-        'Date Created': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'Sheets Used': ', '.join([sheet_listbox.get(i) for i in sheet_listbox.curselection()]),
-        'Field Sizes': ', '.join(map(str, fsl)),
-        'Scan Types': ', '.join(scl),
-        'Depths': ', '.join(map(str, dl)) if dl else 'All Depths'
-    }
-
-    # Loop through each field size, axis, and depth combination in the average data
+    rows = []
     for combination_key, avg_dose in avg_dose_global.items():
         fs, axis, depth = combination_key
         fixed_pos = fixed_pos_global[combination_key]
 
-        # Create a dictionary to store the average data in the same format as the input data
-        avg_data = {
-            'FS': fs,
-            'Axis': axis,
-            'Depth': depth if depth is not None and axis != 'Z' else '',
-            'Pos': fixed_pos,
-            'Dose': avg_dose
-        }
-        avg_data_list.append(pd.DataFrame(avg_data))
+        # Pull Energy and SSD from the first source sheet that has data for this combination
+        energy, ssd = '', None
+        for sheet in selected_sheets:
+            df_src = excel_data.get(sheet)
+            if df_src is None:
+                continue
+            sub = df_src[(df_src['FS'] == fs) & (df_src['Axis'] == axis)]
+            if axis != 'Z' and depth is not None:
+                sub = sub[sub['Depth'] == depth]
+            if sub.empty:
+                continue
+            if 'Energy' in sub.columns:
+                vals = sub['Energy'].dropna()
+                energy = str(vals.iloc[0]) if len(vals) else ''
+            if 'SSD' in sub.columns:
+                vals = sub['SSD'].dropna()
+                ssd = float(vals.mean()) if len(vals) else None
+            break
 
-    # Concatenate all average data into a single DataFrame
-    df_avg_all = pd.concat(avg_data_list, ignore_index=True)
+        detector_label = 'AVG: ' + ', '.join(selected_sheets)
+        row_depth = float(depth) if (depth is not None and axis != 'Z') else 0.0
+        for pos_val, dose_val in zip(fixed_pos, avg_dose):
+            rows.append({
+                'Depth':    row_depth,
+                'Pos':      round(float(pos_val),  4),
+                'Dose':     round(float(dose_val), 4),
+                'FS':       fs,
+                'Axis':     axis,
+                'Energy':   energy,
+                'Detector': detector_label,
+                'SSD':      ssd,
+            })
 
-    # Create a new DataFrame for metadata
+    if not rows:
+        print("No average data to save.")
+        return
+
+    COLS = ['Depth', 'Pos', 'Dose', 'FS', 'Axis', 'Energy', 'Detector', 'SSD']
+    df_all      = pd.DataFrame(rows, columns=COLS)
+    df_depth    = df_all[df_all['Axis'] == 'Z'].copy()
+    df_profiles = df_all[df_all['Axis'] != 'Z'].copy()
+
+    metadata = {
+        'Date Created': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'Sheets Used':  ', '.join(selected_sheets),
+        'Min Datasets': min_datasets_var.get(),
+        'Field Sizes':  ', '.join(map(str, fsl)) if 'fsl' in globals() else '',
+        'Scan Types':   ', '.join(scl)           if 'scl' in globals() else '',
+        'Depths':       ', '.join(map(str, dl))  if ('dl' in globals() and dl) else 'All Depths',
+    }
     df_metadata = pd.DataFrame(list(metadata.items()), columns=['Description', 'Value'])
 
-    # Prompt user for save location
     output_file = filedialog.asksaveasfilename(
         defaultextension=".xlsx",
         filetypes=[("Excel Files", "*.xlsx")],
         title="Save Average Data As")
     if not output_file:
-        return  # User cancelled
+        return
 
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-        # Write the average data to a single sheet named 'Average Data'
-        df_avg_all.to_excel(writer, sheet_name='Average Data', index=False)
-
-        # Write the metadata to a separate sheet named 'Metadata'
-        df_metadata.to_excel(writer, sheet_name='Metadata', index=False)
+        df_depth.to_excel(   writer, sheet_name='Depth Scans', index=False)
+        df_profiles.to_excel(writer, sheet_name='Profiles',    index=False)
+        df_metadata.to_excel(writer, sheet_name='Metadata',    index=False)
 
     print(f"Average data saved to {output_file}")
 
@@ -374,122 +387,79 @@ def plot_data():
 
     
 def make_avg():
-    # Get clinical criteria from user input (or use defaults)
     dose_tolerance, pos_tolerance = get_clinical_criteria()
-    global avg_dose_global, fixed_pos_global, fsl, scl, dl  # Store the global average and position data
+    global avg_dose_global, fixed_pos_global, fsl, scl, dl
 
-
-    # Retrieve selected field sizes, scan types, and depths from the GUI
     selected_fsl_indices = fsl_listbox.curselection()
     selected_scl_indices = scl_listbox.curselection()
     selected_depth_indices = depth_listbox.curselection()
 
-    # Ensure field size, scan type, and depth are selected
-    fsl = [float(fsl_listbox.get(i)) for i in selected_fsl_indices]  
-    scl = [scl_listbox.get(i) for i in selected_scl_indices]  
-    dl = [float(depth_listbox.get(i)) for i in selected_depth_indices]  
+    fsl = [float(fsl_listbox.get(i)) for i in selected_fsl_indices]
+    scl = [scl_listbox.get(i) for i in selected_scl_indices]
+    dl = [float(depth_listbox.get(i)) for i in selected_depth_indices]
 
     if not fsl or not scl:
         print("Field size or scan types not selected!")
         return
 
-    # Set up fixed position grids for Z profiles and other profiles
-    fixed_pos_z = np.arange(0, 30.05, 0.05)  # Z profiles (0 to 30 cm)
-    max_field_size = max([int(fs) for fs in fsl]) if fsl else 0
-    fixed_pos_profiles = np.arange(-max_field_size / 2 - 20, max_field_size / 2 + 20, 0.05)  # Profile grids
-
-    resampled_doses_by_combination = {}  # Store resampled doses by FS, Axis, and Depth
-    profile_ranges_by_combination = {}  # Store the minimum profile range for each combination
-
-    # Get selected sheets from the GUI
     selected_sheets = [sheet_listbox.get(i) for i in sheet_listbox.curselection()]
     if not selected_sheets:
         print("No sheets selected!")
         return
 
-    # Loop over selected sheets and resample data
+    # Minimum number of datasets required at each position to include in average
+    min_n_str = min_datasets_var.get()
+    min_n = len(selected_sheets) if min_n_str == 'All' else max(1, int(min_n_str))
+
+    fixed_pos_z = np.arange(0, 30.05, 0.05)
+    max_field_size = max([int(fs) for fs in fsl]) if fsl else 0
+    fixed_pos_profiles = np.arange(-max_field_size / 2 - 20, max_field_size / 2 + 20, 0.05)
+
+    resampled_doses_by_combination = {}
+
     for sheet in selected_sheets:
         df = excel_data[sheet].sort_values(by=['FS', 'Axis', 'Pos'])
-
-        # Resample doses for each FS, Axis, and Depth combination
         for fs in fsl:
             for axis in scl:
                 if axis in ['X', 'Y', 'XY', 'YX']:
                     for depth in dl:
-                        # Resample for profiles
-                        if not df[(df['FS'] == fs) & (df['Axis'] == axis) & (df['Depth'] == depth)].empty:
-                            pos = df.loc[(df['FS'] == fs) & (df['Axis'] == axis) & (df['Depth'] == depth), 'Pos'].values
-                            dose = df.loc[(df['FS'] == fs) & (df['Axis'] == axis) & (df['Depth'] == depth), 'Dose'].values
-                            dose = dose / dose.max() * 100  # Normalize dose
-
-                            interpolator = interp1d(pos, dose, bounds_error=False, fill_value="extrapolate")
-                            resampled_dose = interpolator(fixed_pos_profiles)
-
-                            # Store resampled data
-                            combination_key = (fs, axis, depth)
-                            if combination_key not in resampled_doses_by_combination:
-                                resampled_doses_by_combination[combination_key] = []
-                            resampled_doses_by_combination[combination_key].append(resampled_dose)
-
-                            # Update the minimum profile range for this specific combination
-                            profile_range = pos[-1] - pos[0]
-                            if combination_key not in profile_ranges_by_combination:
-                                profile_ranges_by_combination[combination_key] = profile_range
-                            else:
-                                profile_ranges_by_combination[combination_key] = min(profile_ranges_by_combination[combination_key], profile_range)
-
+                        subset = df[(df['FS'] == fs) & (df['Axis'] == axis) & (df['Depth'] == depth)]
+                        if not subset.empty:
+                            pos  = subset['Pos'].values
+                            dose = subset['Dose'].values / subset['Dose'].max() * 100
+                            interpolator = interp1d(pos, dose, bounds_error=False, fill_value=np.nan)
+                            resampled_doses_by_combination.setdefault((fs, axis, depth), []).append(
+                                interpolator(fixed_pos_profiles))
                 elif axis == 'Z':
-                    # Resample for Z profiles
-                    if not df[(df['FS'] == fs) & (df['Axis'] == axis)].empty:
-                        pos = df.loc[(df['FS'] == fs) & (df['Axis'] == axis), 'Pos'].values
-                        dose = df.loc[(df['FS'] == fs) & (df['Axis'] == axis), 'Dose'].values
-                        dose = dose / dose.max() * 100  # Normalize dose
+                    subset = df[(df['FS'] == fs) & (df['Axis'] == axis)]
+                    if not subset.empty:
+                        pos  = subset['Pos'].values
+                        dose = subset['Dose'].values / subset['Dose'].max() * 100
+                        interpolator = interp1d(pos, dose, bounds_error=False, fill_value=np.nan)
+                        resampled_doses_by_combination.setdefault((fs, axis, None), []).append(
+                            interpolator(fixed_pos_z))
 
-                        interpolator = interp1d(pos, dose, bounds_error=False, fill_value="extrapolate")
-                        resampled_dose = interpolator(fixed_pos_z)
-
-                        # Store resampled data
-                        combination_key = (fs, axis, None)  # No depth for Z profiles
-                        if combination_key not in resampled_doses_by_combination:
-                            resampled_doses_by_combination[combination_key] = []
-                        resampled_doses_by_combination[combination_key].append(resampled_dose)
-
-    # Calculate averages and store them globally
-    avg_dose_global = {}
-    fixed_pos_global = {}  # Store corresponding fixed positions
+    avg_dose_global  = {}
+    fixed_pos_global = {}
 
     for combination, doses in resampled_doses_by_combination.items():
-        avg_dose = np.mean(doses, axis=0)  # Average resampled doses
-        avg_dose_global[combination] = avg_dose
-
-        # Store corresponding fixed positions for profiles and Z
         fs, axis, depth = combination
-        if axis in ['X', 'Y', 'XY', 'YX']:
-            fixed_pos_global[combination] = fixed_pos_profiles
-        elif axis == 'Z':
-            fixed_pos_global[combination] = fixed_pos_z
+        fixed_pos = fixed_pos_profiles if axis in ['X', 'Y', 'XY', 'YX'] else fixed_pos_z
 
-    # Post-process to remove data beyond the shortest profile range for each combination
-    for combination in avg_dose_global.keys():
-        fs, axis, depth = combination
-        if axis in ['X', 'Y', 'XY', 'YX']:
-            # Get the current positions and average dose values
-            positions = fixed_pos_global[combination]
-            avg_dose = avg_dose_global[combination]
+        stack  = np.array(doses)                          # (n_sheets, n_pos)
+        counts = np.sum(~np.isnan(stack), axis=0)         # how many datasets at each point
+        avg    = np.nanmean(stack, axis=0)
+        avg[counts < min_n] = np.nan                      # blank positions below threshold
 
-            # Determine the valid range based on the shortest profile range for this combination
-            min_profile_range = profile_ranges_by_combination[combination]
-            valid_indices = np.where((positions >= -min_profile_range / 2) & (positions <= min_profile_range / 2))[0]
+        # Trim to the contiguous valid extent
+        valid = ~np.isnan(avg)
+        if valid.any():
+            start = int(np.argmax(valid))
+            end   = int(len(valid) - np.argmax(valid[::-1]))
+            fixed_pos_global[combination] = fixed_pos[start:end]
+            avg_dose_global[combination]  = avg[start:end]
 
-            if len(valid_indices) > 0:
-                start_index = valid_indices[0]
-                end_index = valid_indices[-1]
-
-                # Keep only the valid portion of the profile
-                fixed_pos_global[combination] = positions[start_index:end_index + 1]
-                avg_dose_global[combination] = avg_dose[start_index:end_index + 1]
-
-    print("Average calculation and refined post-processing completed!")
+    print(f"Average calculation completed! (min datasets = {min_n})")
 
 
 
@@ -582,16 +552,25 @@ depth_toggle_btn = ttk.Button(data_selection_frame, text="Select All", command=t
 depth_toggle_btn.grid(row=2, column=2, pady=2)
 
 
-# Add input fields for dose and position tolerance
-ttk.Label(root, text="Dose Tolerance [%]:").grid(row=6, column=0, sticky="w")
-dose_entry = ttk.Entry(root)
-dose_entry.insert(0, "1")  # Default value of 1%
-dose_entry.grid(row=6, column=0)
+# Averaging threshold + tolerance controls in one frame
+controls_frame = ttk.Frame(root, padding="5")
+controls_frame.grid(row=5, column=0, sticky="w", padx=10)
 
-ttk.Label(root, text="Position Tolerance [mm]:").grid(row=7, column=0, sticky="w")
-pos_entry = ttk.Entry(root)
-pos_entry.insert(0, "1")  # Default value of 1 mm
-pos_entry.grid(row=7, column=0)
+ttk.Label(controls_frame, text="Min. datasets for avg:").grid(row=0, column=0, sticky="w", padx=(0, 5))
+min_datasets_var = tk.StringVar(value="All")
+min_ds_combo = ttk.Combobox(controls_frame, textvariable=min_datasets_var, width=6, state="readonly")
+min_ds_combo['values'] = ['All'] + [str(i) for i in range(1, 21)]
+min_ds_combo.grid(row=0, column=1, sticky="w", padx=(0, 20))
+
+ttk.Label(controls_frame, text="Dose Tolerance [%]:").grid(row=0, column=2, sticky="w", padx=(0, 5))
+dose_entry = ttk.Entry(controls_frame, width=6)
+dose_entry.insert(0, "1")
+dose_entry.grid(row=0, column=3, sticky="w", padx=(0, 20))
+
+ttk.Label(controls_frame, text="Position Tolerance [mm]:").grid(row=0, column=4, sticky="w", padx=(0, 5))
+pos_entry = ttk.Entry(controls_frame, width=6)
+pos_entry.insert(0, "1")
+pos_entry.grid(row=0, column=5, sticky="w")
 
 # Adding the buttons to the GUI
 

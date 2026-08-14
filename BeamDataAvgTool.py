@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, ttk
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d, PchipInterpolator
 
 # Function to handle file selection and populate sheet names
 
@@ -35,7 +35,7 @@ def select_file():
             excel_data = pd.read_excel(file_path, sheet_name=None)  # Read all sheets at once
             
             # Extract sheet names and populate the listbox
-            sheets = list(excel_data.keys())
+            sheets = sorted(excel_data.keys())
             sheet_listbox.delete(0, tk.END)
             for sheet in sheets:
                 sheet_listbox.insert(tk.END, sheet)
@@ -217,6 +217,111 @@ def save_average():
 
     print(f"Average data saved to {output_file}")
 
+_manual_shifts = {}   # {sheet_name: x_shift_cm}
+
+
+def _preprocess(pos, dose, axis, sheet):
+    """Apply pre-processing steps to a single curve before plotting/averaging."""
+    pos  = pos.copy().astype(float)
+    dose = dose.copy().astype(float)
+    is_profile = axis in ('X', 'Y', 'XY', 'YX')
+
+    if is_profile:
+        # 1. Manual X shift
+        print(f"  _preprocess: sheet={repr(sheet)}, axis={repr(axis)}, _manual_shifts={_manual_shifts}")
+        shift = _manual_shifts.get(sheet, 0.0)
+        print(f"  _preprocess: shift={shift}")
+        if shift:
+            pos = pos + shift
+
+        # 2. Auto-center: shift so FWHM midpoint = 0
+        if auto_center_var.get():
+            try:
+                fine = np.linspace(float(pos.min()), float(pos.max()), 10000)
+                fine_dose = PchipInterpolator(pos, dose)(fine)
+                half_max = float(fine_dose.max()) / 2.0
+                above = np.where(fine_dose >= half_max)[0]
+                if len(above) >= 2:
+                    pos = pos - (fine[above[0]] + fine[above[-1]]) / 2.0
+            except Exception:
+                pass
+
+        # 3. Y normalization: CAX (x=0) or max
+        if cax_norm_var.get():
+            try:
+                d_cax = float(PchipInterpolator(pos, dose)(0.0))
+                dose = dose / d_cax * 100.0 if d_cax > 0 else dose / dose.max() * 100.0
+            except Exception:
+                dose = dose / dose.max() * 100.0
+        else:
+            dose = dose / dose.max() * 100.0
+
+    else:  # PDD (Z axis)
+        if pdd_norm_var.get() == "depth":
+            try:
+                d_ref = float(pdd_norm_depth_entry.get())
+                d_at_ref = float(PchipInterpolator(pos, dose)(d_ref))
+                dose = dose / d_at_ref * 100.0 if d_at_ref > 0 else dose / dose.max() * 100.0
+            except Exception:
+                dose = dose / dose.max() * 100.0
+        else:
+            dose = dose / dose.max() * 100.0
+
+    return pos, dose
+
+
+def _open_manual_shifts():
+    selected_sheets = [sheet_listbox.get(i) for i in sheet_listbox.curselection()]
+    if not selected_sheets:
+        from tkinter import messagebox
+        messagebox.showwarning("No sheets selected", "Select sheets in the list before opening manual shifts.")
+        return
+
+    dlg = tk.Toplevel(root)
+    dlg.title("Manual Profile X Shifts")
+    dlg.resizable(False, False)
+    dlg.grab_set()
+
+    ttk.Label(dlg, text="Sheet",        width=32).grid(row=0, column=0, padx=12, pady=4, sticky='w')
+    ttk.Label(dlg, text="X Shift [cm]", width=12).grid(row=0, column=1, padx=12, pady=4, sticky='w')
+
+    # Store Entry widgets directly (more reliable than StringVar.get() in Toplevel)
+    entry_widgets = {}
+    for i, sheet in enumerate(selected_sheets):
+        ttk.Label(dlg, text=sheet, width=32).grid(row=i + 1, column=0, padx=12, pady=3, sticky='w')
+        cur = _manual_shifts.get(sheet, 0.0)
+        ent = ttk.Entry(dlg, width=10)
+        if cur != 0.0:
+            ent.insert(0, str(cur))
+        ent.grid(row=i + 1, column=1, padx=12, pady=3)
+        entry_widgets[sheet] = ent
+
+    def _save(*_):
+        for sheet, ent in entry_widgets.items():
+            txt = ent.get().strip()
+            try:
+                _manual_shifts[sheet] = float(txt) if txt else 0.0
+            except ValueError:
+                _manual_shifts[sheet] = 0.0
+        print("Manual shifts saved:", {k: v for k, v in _manual_shifts.items() if v != 0.0})
+        dlg.destroy()
+
+    def _clear():
+        for ent in entry_widgets.values():
+            ent.delete(0, tk.END)
+
+    # Bind Enter key and window-close to save
+    dlg.bind("<Return>", _save)
+    dlg.protocol("WM_DELETE_WINDOW", _save)
+
+    n = len(selected_sheets)
+    btn_frame = ttk.Frame(dlg)
+    btn_frame.grid(row=n + 1, column=0, columnspan=2, pady=8)
+    ttk.Button(btn_frame, text="OK",       command=_save        ).pack(side='left', padx=6)
+    ttk.Button(btn_frame, text="Clear All", command=_clear      ).pack(side='left', padx=6)
+    ttk.Button(btn_frame, text="Cancel",   command=dlg.destroy  ).pack(side='left', padx=6)
+
+
 def plot_data():
     global dl, fsl, scl, avg_dose_global, fixed_pos_global
 
@@ -228,6 +333,11 @@ def plot_data():
     fsl = [float(fsl_listbox.get(i)) for i in selected_fsl_indices]
     scl = [scl_listbox.get(i) for i in selected_scl_indices]
     dl = [float(depth_listbox.get(i)) for i in selected_depth_indices] if selected_depth_indices else []
+
+    try:
+        _ms = float(marker_size_entry.get())
+    except ValueError:
+        _ms = 3.0
 
     # Define marker styles to iterate over
     markers = ['o', 's', 'D', '+', 'x', '^', '*', 'p', 'h', 'H', '|', '_']
@@ -277,23 +387,23 @@ def plot_data():
                         if not df[(df['FS'] == fs) & (df['Axis'] == axis) & (df['Depth'] == depth)].empty:
                             pos = df.loc[(df['FS'] == fs) & (df['Axis'] == axis) & (df['Depth'] == depth), 'Pos'].values
                             dose = df.loc[(df['FS'] == fs) & (df['Axis'] == axis) & (df['Depth'] == depth), 'Dose'].values
-                            dose = dose / dose.max() * 100  # Normalize dose
+                            pos, dose = _preprocess(pos, dose, axis, sheet)
                             if not sheet_labeled:
-                                ax_profiles.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=5, alpha=0.5, label=sheet)
-                                sheet_labeled = True  # Label only once
+                                ax_profiles.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=_ms, alpha=0.5, label=sheet)
+                                sheet_labeled = True
                             else:
-                                ax_profiles.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=5, alpha=0.5, label=None)  # No label after the first
+                                ax_profiles.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=_ms, alpha=0.5, label=None)
 
                 elif axis == 'Z':
                     if not df[(df['FS'] == fs) & (df['Axis'] == axis)].empty:
                         pos = df.loc[(df['FS'] == fs) & (df['Axis'] == axis), 'Pos'].values
                         dose = df.loc[(df['FS'] == fs) & (df['Axis'] == axis), 'Dose'].values
-                        dose = dose / dose.max() * 100  # Normalize dose
-                        if not sheet_labeled:  # Use the same `sheet_labeled` logic here
-                            ax_z.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=5, alpha=0.5, label=sheet)
-                            sheet_labeled = True  # Mark as labeled after the first
+                        pos, dose = _preprocess(pos, dose, axis, sheet)
+                        if not sheet_labeled:
+                            ax_z.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=_ms, alpha=0.5, label=sheet)
+                            sheet_labeled = True
                         else:
-                            ax_z.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=5, alpha=0.5, label=None)  # No label after the first
+                            ax_z.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=_ms, alpha=0.5, label=None)
 
     # Now plot the averages if they exist
     try:
@@ -426,7 +536,8 @@ def make_avg():
                         subset = df[(df['FS'] == fs) & (df['Axis'] == axis) & (df['Depth'] == depth)]
                         if not subset.empty:
                             pos  = subset['Pos'].values
-                            dose = subset['Dose'].values / subset['Dose'].max() * 100
+                            dose = subset['Dose'].values
+                            pos, dose = _preprocess(pos, dose, axis, sheet)
                             interpolator = interp1d(pos, dose, bounds_error=False, fill_value=np.nan)
                             resampled_doses_by_combination.setdefault((fs, axis, depth), []).append(
                                 interpolator(fixed_pos_profiles))
@@ -434,7 +545,8 @@ def make_avg():
                     subset = df[(df['FS'] == fs) & (df['Axis'] == axis)]
                     if not subset.empty:
                         pos  = subset['Pos'].values
-                        dose = subset['Dose'].values / subset['Dose'].max() * 100
+                        dose = subset['Dose'].values
+                        pos, dose = _preprocess(pos, dose, axis, sheet)
                         interpolator = interp1d(pos, dose, bounds_error=False, fill_value=np.nan)
                         resampled_doses_by_combination.setdefault((fs, axis, None), []).append(
                             interpolator(fixed_pos_z))
@@ -570,7 +682,38 @@ dose_entry.grid(row=0, column=3, sticky="w", padx=(0, 20))
 ttk.Label(controls_frame, text="Position Tolerance [mm]:").grid(row=0, column=4, sticky="w", padx=(0, 5))
 pos_entry = ttk.Entry(controls_frame, width=6)
 pos_entry.insert(0, "1")
-pos_entry.grid(row=0, column=5, sticky="w")
+pos_entry.grid(row=0, column=5, sticky="w", padx=(0, 20))
+
+ttk.Label(controls_frame, text="Marker size:").grid(row=0, column=6, sticky="w", padx=(0, 5))
+marker_size_entry = ttk.Entry(controls_frame, width=5)
+marker_size_entry.insert(0, "3")
+marker_size_entry.grid(row=0, column=7, sticky="w")
+
+# Pre-processing frame
+preproc_frame = ttk.LabelFrame(root, text="Pre-processing", padding="5")
+preproc_frame.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 6))
+
+auto_center_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(preproc_frame, text="Auto-center profiles (FWHM)", variable=auto_center_var).grid(
+    row=0, column=0, sticky="w", padx=(0, 16))
+
+cax_norm_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(preproc_frame, text="Normalize profiles to CAX", variable=cax_norm_var).grid(
+    row=0, column=1, sticky="w", padx=(0, 16))
+
+ttk.Label(preproc_frame, text="PDD norm:").grid(row=0, column=2, sticky="w", padx=(0, 4))
+pdd_norm_var = tk.StringVar(value="dmax")
+pdd_norm_combo = ttk.Combobox(preproc_frame, textvariable=pdd_norm_var, width=7, state="readonly")
+pdd_norm_combo['values'] = ["dmax", "depth"]
+pdd_norm_combo.grid(row=0, column=3, sticky="w", padx=(0, 4))
+
+ttk.Label(preproc_frame, text="Depth [cm]:").grid(row=0, column=4, sticky="w", padx=(0, 2))
+pdd_norm_depth_entry = ttk.Entry(preproc_frame, width=6)
+pdd_norm_depth_entry.insert(0, "10.0")
+pdd_norm_depth_entry.grid(row=0, column=5, sticky="w", padx=(0, 16))
+
+ttk.Button(preproc_frame, text="Manual Profile Shifts…", command=_open_manual_shifts).grid(
+    row=0, column=6, sticky="w", padx=(0, 4))
 
 # Adding the buttons to the GUI
 

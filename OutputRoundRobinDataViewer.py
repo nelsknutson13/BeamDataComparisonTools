@@ -641,7 +641,8 @@ def make_plots(df: pd.DataFrame,
                show_points: bool = True,
                font_size: float = DEFAULT_FONT_SIZE,
                paired_dates: bool = False,
-               show_outlier_markers: bool = True):
+               show_outlier_markers: bool = True,
+               debug_scales: dict = None):
 
     # Apply font size to all subsequently created matplotlib text
     plt.rcParams.update({
@@ -654,6 +655,14 @@ def make_plots(df: pd.DataFrame,
     })
 
     long, energies = to_long(df)
+
+    # Debug scaling — multiply Ratio for specific systems/energies (troubleshooting only)
+    if debug_scales:
+        long["System"] = long["System"].astype(str).str.strip()
+        for system, energy_map in debug_scales.items():
+            for energy, factor in energy_map.items():
+                mask = (long["System"] == system) & (long["Energy"] == energy)
+                long.loc[mask, "Ratio"] *= factor
 
     # Re-reference per Institution-anchored session BEFORE filtering, so the
     # session anchors (Institution rows) are still present even if the user
@@ -829,9 +838,17 @@ class App(tk.Tk):
         self.normalize_combo["values"] = ["None"]
         self.normalize_combo.grid(row=15, column=1, sticky="w", **pad)
 
+        # ---- Debug scaling (troubleshooting only) ----
+        self._debug_scales = {}   # {system: {energy: factor}}
+        debug_frame = ttk.Frame(self)
+        debug_frame.grid(row=16, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Button(debug_frame, text="Debug Scale…", command=self._open_debug_scale).pack(side="left")
+        self._debug_scale_lbl = ttk.Label(debug_frame, text="", foreground="darkorange")
+        self._debug_scale_lbl.pack(side="left", padx=8)
+
         # ---- Y-axis range / tick spacing (all in percent) ----
         axis_frame = ttk.Frame(self)
-        axis_frame.grid(row=16, column=0, columnspan=3, sticky="w", **pad)
+        axis_frame.grid(row=17, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(axis_frame, text="Y-axis ±(%):").pack(side="left")
         ttk.Entry(axis_frame, textvariable=self.y_range_var, width=5).pack(side="left", padx=(2, 12))
         ttk.Label(axis_frame, text="Major tick (%):").pack(side="left")
@@ -842,7 +859,7 @@ class App(tk.Tk):
         ttk.Entry(axis_frame, textvariable=self.font_size_var, width=5).pack(side="left", padx=(2, 0))
 
         # Plot button
-        ttk.Button(self, text="Plot", command=self.plot).grid(row=17, column=0, columnspan=3, **pad)
+        ttk.Button(self, text="Plot", command=self.plot).grid(row=18, column=0, columnspan=3, **pad)
 
         # populate lists from default file if possible
         self.populate_lists_from_file()
@@ -926,6 +943,67 @@ class App(tk.Tk):
             self.path_var.set(p)
             self.populate_lists_from_file()
 
+    def _open_debug_scale(self):
+        """Per-energy ratio scaling for RDS and IROC — troubleshooting only."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Debug Scale (troubleshooting only)")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        systems = ["RDS", "IROC"]
+        energies = EXPECTED_ENERGIES
+
+        # Header row
+        ttk.Label(dlg, text="System", width=10).grid(row=0, column=0, padx=8, pady=4, sticky="w")
+        for j, e in enumerate(energies):
+            ttk.Label(dlg, text=e, width=7).grid(row=0, column=j + 1, padx=4, pady=4)
+
+        entries = {}
+        for i, sys in enumerate(systems):
+            ttk.Label(dlg, text=sys, width=10).grid(row=i + 1, column=0, padx=8, pady=4, sticky="w")
+            entries[sys] = {}
+            for j, e in enumerate(energies):
+                cur = self._debug_scales.get(sys, {}).get(e, "")
+                var = tk.StringVar(value="" if cur == "" or cur == 1.0 else str(cur))
+                ttk.Entry(dlg, textvariable=var, width=7).grid(row=i + 1, column=j + 1, padx=4, pady=4)
+                entries[sys][e] = var
+
+        note = ttk.Label(dlg, text="Multiplier applied to Ratio for that system/energy. Leave blank = 1.0 (no change).",
+                         foreground="darkorange")
+        note.grid(row=len(systems) + 1, column=0, columnspan=len(energies) + 1, padx=8, pady=4)
+
+        def _save():
+            self._debug_scales = {}
+            for sys, evars in entries.items():
+                for e, var in evars.items():
+                    txt = var.get().strip()
+                    if txt:
+                        try:
+                            f = float(txt)
+                            if f != 1.0:
+                                self._debug_scales.setdefault(sys, {})[e] = f
+                        except ValueError:
+                            pass
+            # Update status label
+            if self._debug_scales:
+                parts = [f"{s}: " + ", ".join(f"{e}×{v:.4f}" for e, v in em.items())
+                         for s, em in self._debug_scales.items()]
+                self._debug_scale_lbl.config(text="[DEBUG] " + "  |  ".join(parts))
+            else:
+                self._debug_scale_lbl.config(text="")
+            dlg.destroy()
+
+        def _clear():
+            for evars in entries.values():
+                for var in evars.values():
+                    var.set("")
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.grid(row=len(systems) + 2, column=0, columnspan=len(energies) + 1, pady=8)
+        ttk.Button(btn_frame, text="OK",    command=_save ).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Clear", command=_clear).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=6)
+
     def plot(self):
         path = self.path_var.get().strip()
         if not path:
@@ -999,7 +1077,8 @@ class App(tk.Tk):
                show_points=self.show_points.get(),
                font_size=font_size,
                paired_dates=self.paired_dates.get(),
-               show_outlier_markers=self.show_outlier_markers.get())
+               show_outlier_markers=self.show_outlier_markers.get(),
+               debug_scales=self._debug_scales)
         except Exception as e:
             messagebox.showerror("Plot error", str(e))
 

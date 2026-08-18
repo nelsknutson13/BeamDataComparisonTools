@@ -226,15 +226,13 @@ def _preprocess(pos, dose, axis, sheet):
     dose = dose.copy().astype(float)
     is_profile = axis in ('X', 'Y', 'XY', 'YX')
 
-    if is_profile:
-        # 1. Manual X shift
-        print(f"  _preprocess: sheet={repr(sheet)}, axis={repr(axis)}, _manual_shifts={_manual_shifts}")
-        shift = _manual_shifts.get(sheet, 0.0)
-        print(f"  _preprocess: shift={shift}")
-        if shift:
-            pos = pos + shift
+    # Manual shift applies to all curve types
+    shift = _manual_shifts.get(sheet, 0.0)
+    if shift:
+        pos = pos + shift
 
-        # 2. Auto-center: shift so FWHM midpoint = 0
+    if is_profile:
+        # Auto-center: shift so FWHM midpoint = 0
         if auto_center_var.get():
             try:
                 fine = np.linspace(float(pos.min()), float(pos.max()), 10000)
@@ -246,7 +244,7 @@ def _preprocess(pos, dose, axis, sheet):
             except Exception:
                 pass
 
-        # 3. Y normalization: CAX (x=0) or max
+        # Y normalization: CAX (x=0) or max
         if cax_norm_var.get():
             try:
                 d_cax = float(PchipInterpolator(pos, dose)(0.0))
@@ -282,8 +280,8 @@ def _open_manual_shifts():
     dlg.resizable(False, False)
     dlg.grab_set()
 
-    ttk.Label(dlg, text="Sheet",        width=32).grid(row=0, column=0, padx=12, pady=4, sticky='w')
-    ttk.Label(dlg, text="X Shift [cm]", width=12).grid(row=0, column=1, padx=12, pady=4, sticky='w')
+    ttk.Label(dlg, text="Sheet",         width=32).grid(row=0, column=0, padx=12, pady=4, sticky='w')
+    ttk.Label(dlg, text="Shift [cm]",   width=12).grid(row=0, column=1, padx=12, pady=4, sticky='w')
 
     # Store Entry widgets directly (more reliable than StringVar.get() in Toplevel)
     entry_widgets = {}
@@ -443,7 +441,8 @@ def plot_data():
                                 lower_envelope = np.nan_to_num(lower_envelope, nan=avg_dose[0])
 
                                 # Plot the final envelope
-                                ax_profiles.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'Clinical Tolerance Envelope ({dose_tolerance}%/{pos_tolerance}mm)' if label else None)
+                                if show_band_var.get():
+                                    ax_profiles.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'Clinical Tolerance Envelope ({dose_tolerance}%/{pos_tolerance}mm)' if label else None)
 
                     elif axis == 'Z':
                         combination_key = (fs, axis, None)
@@ -477,7 +476,8 @@ def plot_data():
                             lower_envelope = np.fmin(lower_bound, lower_pos_shift_left)
 
                             # Plot the final envelope
-                            ax_z.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'Clinical Tolerance Envelope ({dose_tolerance}%/{pos_tolerance}mm)' if label else None)
+                            if show_band_var.get():
+                                ax_z.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'Clinical Tolerance Envelope ({dose_tolerance}%/{pos_tolerance}mm)' if label else None)
     except NameError:
         print("Average data does not exist. Run make_avg first to calculate averages.")
 
@@ -687,7 +687,11 @@ pos_entry.grid(row=0, column=5, sticky="w", padx=(0, 20))
 ttk.Label(controls_frame, text="Marker size:").grid(row=0, column=6, sticky="w", padx=(0, 5))
 marker_size_entry = ttk.Entry(controls_frame, width=5)
 marker_size_entry.insert(0, "3")
-marker_size_entry.grid(row=0, column=7, sticky="w")
+marker_size_entry.grid(row=0, column=7, sticky="w", padx=(0, 20))
+
+show_band_var = tk.BooleanVar(value=True)
+ttk.Checkbutton(controls_frame, text="Show uncertainty band", variable=show_band_var).grid(
+    row=0, column=8, sticky="w")
 
 # Pre-processing frame
 preproc_frame = ttk.LabelFrame(root, text="Pre-processing", padding="5")

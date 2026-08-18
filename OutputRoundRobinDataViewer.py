@@ -228,7 +228,7 @@ def _apply_yaxis(ax, range_pct=DEFAULT_YRANGE_PCT,
 
 def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution", show_tolerance: bool = True, tol: float = DEFAULT_TOL,
                     y_range: float = DEFAULT_YRANGE_PCT, major_tick: float = DEFAULT_MAJOR_PCT, minor_tick: float = DEFAULT_MINOR_PCT,
-                    show_points: bool = True, normalized: bool = False, show_outlier_markers: bool = True):
+                    show_points: bool = True, normalized: bool = False, show_outlier_markers: bool = True, show_n: bool = False):
 
 
     data = long.copy()
@@ -313,7 +313,11 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
 
     # Labels (no title)
     ax.set_xticks(positions)
-    ax.set_xticklabels(systems_present, rotation=0)
+    tick_labels = (
+        [f"{s}\n(n={len(v)})" for s, v in zip(systems_present, series)]
+        if show_n else systems_present
+    )
+    ax.set_xticklabels(tick_labels, rotation=0)
     ax.set_ylabel(f"Output (relative to {ref_label})" if normalized
                   else "Output [cGy/MU]")
     _apply_yaxis(ax, y_range, major_tick, minor_tick)
@@ -487,7 +491,72 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
     plt.show()
 
 
-def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True):
+def repeat_spread_report(long_filt: pd.DataFrame):
+    """
+    For each (System, SN, Energy) group with N > 1 observations, report
+    range (max-min) and std dev of Ratio.  Summarise per System.
+    """
+    df = long_filt.copy()
+    df["Ratio"] = pd.to_numeric(df["Ratio"], errors="coerce")
+    df["System"] = df["System"].astype(str).str.strip()
+    df = df.dropna(subset=["Ratio", "System", "SN", "Energy"])
+
+    group_cols = ["System", "SN", "Energy"]
+    agg = (
+        df.groupby(group_cols)["Ratio"]
+        .agg(N="count", Min="min", Max="max", Mean="mean", Std="std")
+        .reset_index()
+    )
+    repeats = agg[agg["N"] > 1].copy()
+
+    if repeats.empty:
+        print("\n=== Repeat Measurement Spread ===")
+        print("  No groups with more than 1 observation found.")
+        return
+
+    repeats["Range"]   = repeats["Max"] - repeats["Min"]
+    repeats["Range%"]  = repeats["Range"] * 100
+    repeats["Std%"]    = repeats["Std"].fillna(0) * 100
+
+    print("\n=== Repeat Measurement Spread (groups with N > 1) ===")
+
+    sys_col = max(16, repeats["System"].str.len().max() + 2)
+    sn_col  = max(6,  repeats["SN"].astype(str).str.len().max() + 2)
+    en_col  = max(8,  repeats["Energy"].astype(str).str.len().max() + 2)
+
+    hdr = (f"  {'System':<{sys_col}}{'SN':>{sn_col}}{'Energy':>{en_col}}"
+           f"{'N':>5}{'Min':>10}{'Max':>10}{'Range%':>10}{'Std%':>10}")
+    divider = "  " + "-" * (sys_col + sn_col + en_col + 45)
+    print(hdr)
+    print(divider)
+
+    for sys, grp in repeats.groupby("System", sort=False):
+        for _, row in grp.iterrows():
+            print(f"  {row['System']:<{sys_col}}"
+                  f"{str(row['SN']):>{sn_col}}"
+                  f"{str(row['Energy']):>{en_col}}"
+                  f"{int(row['N']):>5}"
+                  f"{row['Min']:>10.4f}"
+                  f"{row['Max']:>10.4f}"
+                  f"{row['Range%']:>9.3f}%"
+                  f"{row['Std%']:>9.3f}%")
+        print(divider)
+
+    # Summary per system
+    print("\nSummary by System (over repeat groups):")
+    hdr2 = (f"  {'System':<{sys_col}}{'Groups':>8}"
+            f"{'Mean Range%':>14}{'Max Range%':>14}{'Mean Std%':>12}")
+    print(hdr2)
+    print("  " + "-" * (sys_col + 48))
+    for sys, grp in repeats.groupby("System", sort=False):
+        print(f"  {sys:<{sys_col}}"
+              f"{len(grp):>8}"
+              f"{grp['Range%'].mean():>13.3f}%"
+              f"{grp['Range%'].max():>13.3f}%"
+              f"{grp['Std%'].mean():>11.3f}%")
+
+
+def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True, outlier_thr: str = ""):
     """
     Analysis B: Mixed-effects model on Delta = Ratio - 1.00
       Delta ~ 0 + C(System)
@@ -619,6 +688,53 @@ def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True):
         print("\nSystem-level estimated bias (vs 1.00) with 95% CI:")
         print(out.to_string(index=False))
 
+        # Pass-rate table: % of raw observations within threshold bands
+        thresholds = [0.005, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05]
+        thr_labels  = ["<=0.5%", "<=1%", "<=1.5%", "<=2%", "<=3%", "<=4%", "<=5%"]
+        print("\nPass rates -- % of observations with |Ratio-1| <= threshold:")
+        col_w   = 14   # wide enough for "123 (100.0%)"
+        n_col_w = 6
+        sys_col_w = max(16, max(len(str(s)) for s in df["System"].unique()) + 2)
+
+        def _rate_cell(n_pass, n_total):
+            return f"{n_pass} ({100 * n_pass / n_total:.1f}%)"
+
+        header = f"  {'System':<{sys_col_w}}{'N':>{n_col_w}}" + "".join(f"{lbl:>{col_w}}" for lbl in thr_labels)
+        print(header)
+        divider = "  " + "-" * (sys_col_w + n_col_w + col_w * len(thresholds))
+        print(divider)
+        for sys, grp in df.groupby("System"):
+            abs_delta = grp["Delta"].abs().round(8)
+            n_total = len(abs_delta)
+            rate_str = "".join(
+                f"{_rate_cell(int((abs_delta <= t).sum()), n_total):>{col_w}}"
+                for t in thresholds
+            )
+            print(f"  {sys:<{sys_col_w}}{n_total:>{n_col_w}}{rate_str}")
+        abs_all = df["Delta"].abs().round(8)
+        n_all = len(abs_all)
+        rate_str_all = "".join(
+            f"{_rate_cell(int((abs_all <= t).sum()), n_all):>{col_w}}"
+            for t in thresholds
+        )
+        print(divider)
+        print(f"  {'ALL (combined)':<{sys_col_w}}{n_all:>{n_col_w}}{rate_str_all}")
+
+        # Print rows outside user-specified threshold (blank = skip)
+        try:
+            _thr = float(outlier_thr) / 100.0 if outlier_thr else None
+        except ValueError:
+            _thr = None
+        if _thr is not None:
+            out_rows = df[df["Delta"].abs().round(8) > _thr][["System", "SN", "Date", "Energy", "Ratio", "Delta"]].copy()
+            if not out_rows.empty:
+                print(f"\nRows with |Ratio-1| > {outlier_thr}%:")
+                out_rows["Delta%"] = (out_rows["Delta"] * 100).round(2)
+                out_rows = out_rows.drop(columns=["Delta"]).sort_values(["System", "Energy"])
+                print(out_rows.to_string(index=False))
+            else:
+                print(f"\nNo rows with |Ratio-1| > {outlier_thr}%.")
+
     return res
 
 
@@ -642,6 +758,9 @@ def make_plots(df: pd.DataFrame,
                font_size: float = DEFAULT_FONT_SIZE,
                paired_dates: bool = False,
                show_outlier_markers: bool = True,
+               show_n: bool = False,
+               outlier_thr: str = "",
+               show_repeat_spread: bool = False,
                debug_scales: dict = None):
 
     # Apply font size to all subsequently created matplotlib text
@@ -701,9 +820,15 @@ def make_plots(df: pd.DataFrame,
 
     # Analysis B
     try:
-        analysis_B_mixed_effects(long_filt, verbose=True)
+        analysis_B_mixed_effects(long_filt, verbose=True, outlier_thr=outlier_thr)
     except Exception as e:
         print(f"Analysis B failed: {e}")
+
+    if show_repeat_spread:
+        try:
+            repeat_spread_report(long_filt)
+        except Exception as e:
+            print(f"Repeat spread report failed: {e}")
 
     # Plots
     if show_system:
@@ -711,7 +836,8 @@ def make_plots(df: pd.DataFrame,
                         show_energy_labels=show_energy_labels, ref_label=ref_label,
                         show_tolerance=show_tolerance, tol=tolerance,
                         y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
-                        show_points=show_points, normalized=normalized, show_outlier_markers=show_outlier_markers)
+                        show_points=show_points, normalized=normalized,
+                        show_outlier_markers=show_outlier_markers, show_n=show_n)
 
     if show_sn:
         _grouped_boxplot(
@@ -803,27 +929,29 @@ class App(tk.Tk):
         ttk.Checkbutton(self, text="Show all points (off = outliers only)", variable=self.show_points).grid(row=7, column=2, sticky="w", **pad)
         ttk.Checkbutton(self, text="Paired dates only (require ≥2 systems per date)", variable=self.paired_dates).grid(row=8, column=0, columnspan=2, sticky="w", **pad)
         ttk.Checkbutton(self, text="Mark outliers (★)", variable=self.show_outlier_markers).grid(row=8, column=2, sticky="w", **pad)
+        self.show_n = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self, text="Show n= counts (system plot)", variable=self.show_n).grid(row=9, column=0, columnspan=2, sticky="w", **pad)
 
         # ---- System selection ----
         ttk.Label(self, text="Select System(s) for global filter:").grid(
-            row=9, column=0, columnspan=3, sticky="w", **pad
+            row=10, column=0, columnspan=3, sticky="w", **pad
         )
         self.system_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
-        self.system_listbox.grid(row=10, column=0, columnspan=3, sticky="nsew", **pad)
+        self.system_listbox.grid(row=11, column=0, columnspan=3, sticky="nsew", **pad)
 
         # ---- SN selection ----
         ttk.Label(self, text="Select SN(s) for SN-grouped plot:").grid(
-            row=11, column=0, columnspan=3, sticky="w", **pad
+            row=12, column=0, columnspan=3, sticky="w", **pad
         )
         self.sn_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
-        self.sn_listbox.grid(row=12, column=0, columnspan=3, sticky="nsew", **pad)
+        self.sn_listbox.grid(row=13, column=0, columnspan=3, sticky="nsew", **pad)
 
         # ---- Energy selection ----
         ttk.Label(self, text="Select Energy(ies) for Energy-grouped plot:").grid(
-            row=13, column=0, columnspan=3, sticky="w", **pad
+            row=14, column=0, columnspan=3, sticky="w", **pad
         )
         self.energy_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
-        self.energy_listbox.grid(row=14, column=0, columnspan=3, sticky="nsew", **pad)
+        self.energy_listbox.grid(row=15, column=0, columnspan=3, sticky="nsew", **pad)
 
         # backing lists for listbox indices
         self.system_values = []
@@ -831,24 +959,24 @@ class App(tk.Tk):
         self.energy_values = []
 
         # ---- Normalization selection ('None' = no normalization) ----
-        ttk.Label(self, text="Normalization:").grid(row=15, column=0, sticky="w", **pad)
+        ttk.Label(self, text="Normalization:").grid(row=16, column=0, sticky="w", **pad)
         self.normalize_var = tk.StringVar(value="None")
         self.normalize_combo = ttk.Combobox(self, textvariable=self.normalize_var,
                                              state="readonly", width=40)
         self.normalize_combo["values"] = ["None"]
-        self.normalize_combo.grid(row=15, column=1, sticky="w", **pad)
+        self.normalize_combo.grid(row=16, column=1, sticky="w", **pad)
 
         # ---- Debug scaling (troubleshooting only) ----
         self._debug_scales = {}   # {system: {energy: factor}}
         debug_frame = ttk.Frame(self)
-        debug_frame.grid(row=16, column=0, columnspan=3, sticky="w", **pad)
+        debug_frame.grid(row=17, column=0, columnspan=3, sticky="w", **pad)
         ttk.Button(debug_frame, text="Debug Scale…", command=self._open_debug_scale).pack(side="left")
         self._debug_scale_lbl = ttk.Label(debug_frame, text="", foreground="darkorange")
         self._debug_scale_lbl.pack(side="left", padx=8)
 
         # ---- Y-axis range / tick spacing (all in percent) ----
         axis_frame = ttk.Frame(self)
-        axis_frame.grid(row=17, column=0, columnspan=3, sticky="w", **pad)
+        axis_frame.grid(row=18, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(axis_frame, text="Y-axis ±(%):").pack(side="left")
         ttk.Entry(axis_frame, textvariable=self.y_range_var, width=5).pack(side="left", padx=(2, 12))
         ttk.Label(axis_frame, text="Major tick (%):").pack(side="left")
@@ -858,8 +986,20 @@ class App(tk.Tk):
         ttk.Label(axis_frame, text="Font size:").pack(side="left")
         ttk.Entry(axis_frame, textvariable=self.font_size_var, width=5).pack(side="left", padx=(2, 0))
 
+        # ---- Report options ----
+        report_frame = ttk.Frame(self)
+        report_frame.grid(row=19, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(report_frame, text="Print rows with |difference| >").pack(side="left")
+        self.outlier_thr_var = tk.StringVar(value="")
+        ttk.Entry(report_frame, textvariable=self.outlier_thr_var, width=6).pack(side="left", padx=(4, 2))
+        ttk.Label(report_frame, text="% (blank = off)").pack(side="left", padx=(0, 20))
+
+        self.show_repeat_spread = tk.BooleanVar(value=False)
+        ttk.Checkbutton(report_frame, text="Repeat measurement spread report",
+                        variable=self.show_repeat_spread).pack(side="left")
+
         # Plot button
-        ttk.Button(self, text="Plot", command=self.plot).grid(row=18, column=0, columnspan=3, **pad)
+        ttk.Button(self, text="Plot", command=self.plot).grid(row=20, column=0, columnspan=3, **pad)
 
         # populate lists from default file if possible
         self.populate_lists_from_file()
@@ -1078,6 +1218,9 @@ class App(tk.Tk):
                font_size=font_size,
                paired_dates=self.paired_dates.get(),
                show_outlier_markers=self.show_outlier_markers.get(),
+               show_n=self.show_n.get(),
+               outlier_thr=self.outlier_thr_var.get().strip(),
+               show_repeat_spread=self.show_repeat_spread.get(),
                debug_scales=self._debug_scales)
         except Exception as e:
             messagebox.showerror("Plot error", str(e))

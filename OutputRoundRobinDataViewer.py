@@ -27,6 +27,8 @@ import statsmodels.formula.api as smf
 # ---------- Config ----------
 DEFAULT_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\OutputRoundRobinData.xlsx"
 EXPECTED_ENERGIES = ["6X", "10X", "15X", "6FFF", "8FFF", "10FFF"]
+# TPS output at dmax [cGy/100MU] — used to compute debug scale factors (100/dmax)
+TPS_OUTPUT_DEFAULTS = {"6X": 98.9, "10X": 99.6, "15X": 99.2, "6FFF": 99.0, "8FFF": 98.7, "10FFF": 98.8}
 SYSTEM_ORDER = ["IROC", "RDS", "Institution", "Consortium Audit", "Institution Reported (Consortium Form)", "Consortium Audit (Form-Corrected)"]
 ORDER = {name: i for i, name in enumerate(SYSTEM_ORDER)}
 # Marker per system (used in both boxplots)
@@ -48,7 +50,7 @@ DEFAULT_MAJOR_PCT  = 1.0    # major tick every 1%
 DEFAULT_MINOR_PCT  = 0.5    # minor tick every 0.5%
 
 # Default font size for plot text (tick labels, axis labels, legend)
-DEFAULT_FONT_SIZE = 12
+DEFAULT_FONT_SIZE = 16
 
 # ---------- Data helpers ----------
 def read_table(path: str) -> pd.DataFrame:
@@ -720,6 +722,61 @@ def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True, outl
         print(divider)
         print(f"  {'ALL (combined)':<{sys_col_w}}{n_all:>{n_col_w}}{rate_str_all}")
 
+        # --- 1. Per-system descriptive stats ---
+        stat_col_w = 10
+        print("\nPer-system descriptive statistics (Ratio, %):")
+        stat_header = (f"  {'System':<{sys_col_w}}{'N':>{n_col_w}}"
+                       f"{'Mean%':>{stat_col_w}}{'Median%':>{stat_col_w}}"
+                       f"{'SD%':>{stat_col_w}}{'Min%':>{stat_col_w}}{'Max%':>{stat_col_w}}")
+        print(stat_header)
+        print("  " + "-" * (sys_col_w + n_col_w + stat_col_w * 5))
+        for sys, grp in df.groupby("System"):
+            r = grp["Ratio"]
+            print(f"  {sys:<{sys_col_w}}{len(r):>{n_col_w}}"
+                  f"{(r.mean()-1)*100:>{stat_col_w}.3f}"
+                  f"{(r.median()-1)*100:>{stat_col_w}.3f}"
+                  f"{r.std()*100:>{stat_col_w}.3f}"
+                  f"{(r.min()-1)*100:>{stat_col_w}.3f}"
+                  f"{(r.max()-1)*100:>{stat_col_w}.3f}")
+
+        # --- 2. Per-energy breakdown (mean ± SD per system) ---
+        energy_order = [e for e in EXPECTED_ENERGIES if e in df["Energy"].unique()]
+        en_col_w = 14
+        print("\nPer-energy mean% (SD%) by system:")
+        en_header = f"  {'System':<{sys_col_w}}" + "".join(f"{e:>{en_col_w}}" for e in energy_order)
+        print(en_header)
+        print("  " + "-" * (sys_col_w + en_col_w * len(energy_order)))
+        for sys, grp in df.groupby("System"):
+            row_str = f"  {sys:<{sys_col_w}}"
+            for e in energy_order:
+                sub = grp.loc[grp["Energy"] == e, "Ratio"]
+                if sub.empty:
+                    row_str += f"{'—':>{en_col_w}}"
+                else:
+                    cell = f"{(sub.mean()-1)*100:.2f}({sub.std()*100:.2f})"
+                    row_str += f"{cell:>{en_col_w}}"
+            print(row_str)
+
+        # --- 3. Per-SN summary (mean ± SD per SN within each system) ---
+        print("\nPer-SN summary by system (mean%, SD%, N):")
+        sn_col_w = 8
+        val_col_w = 10
+        for sys, grp in df.groupby("System"):
+            print(f"\n  {sys}")
+            print(f"    {'SN':<{sn_col_w}}{'N':>{n_col_w}}{'Mean%':>{val_col_w}}{'SD%':>{val_col_w}}{'Min%':>{val_col_w}}{'Max%':>{val_col_w}}")
+            print(f"    " + "-" * (sn_col_w + n_col_w + val_col_w * 4))
+            for sn, sgrp in grp.groupby("SN"):
+                r = sgrp["Ratio"]
+                try:
+                    sn_label = f"SN {int(sn)}"
+                except (ValueError, TypeError):
+                    sn_label = str(sn)
+                print(f"    {sn_label:<{sn_col_w}}{len(r):>{n_col_w}}"
+                      f"{(r.mean()-1)*100:>{val_col_w}.3f}"
+                      f"{r.std()*100:>{val_col_w}.3f}"
+                      f"{(r.min()-1)*100:>{val_col_w}.3f}"
+                      f"{(r.max()-1)*100:>{val_col_w}.3f}")
+
         # Print rows outside user-specified threshold (blank = skip)
         try:
             _thr = float(outlier_thr) / 100.0 if outlier_thr else None
@@ -818,9 +875,10 @@ def make_plots(df: pd.DataFrame,
         if long_filt.empty:
             raise ValueError("No data left after filtering to paired dates.")
 
-    # Analysis B
+    # Analysis B — exclude the reference system (it's the normalization anchor, not an independent measurement)
     try:
-        analysis_B_mixed_effects(long_filt, verbose=True, outlier_thr=outlier_thr)
+        long_for_analysis = long_filt[long_filt["System"].astype(str).str.strip() != ref_label] if normalized else long_filt
+        analysis_B_mixed_effects(long_for_analysis, verbose=True, outlier_thr=outlier_thr)
     except Exception as e:
         print(f"Analysis B failed: {e}")
 
@@ -1112,6 +1170,67 @@ class App(tk.Tk):
                          foreground="darkorange")
         note.grid(row=len(systems) + 1, column=0, columnspan=len(energies) + 1, padx=8, pady=4)
 
+        def _load_tps_output():
+            """Sub-dialog: TPS dmax dose per energy (pre-filled) → fills 100/dose for RDS and IROC."""
+            sub = tk.Toplevel(dlg)
+            sub.title("Load TPS Output Values")
+            sub.resizable(False, False)
+            sub.grab_set()
+
+            ttk.Label(sub, text="TPS dmax dose [cGy/100MU] — applied to RDS and IROC",
+                      foreground="darkorange").grid(
+                row=0, column=0, columnspan=len(energies), padx=8, pady=(8, 4), sticky="w")
+
+            tps_entries = {}
+            for j, e in enumerate(energies):
+                ttk.Label(sub, text=e, width=7).grid(row=1, column=j, padx=4, pady=2)
+                ent = ttk.Entry(sub, width=7)
+                ent.insert(0, str(TPS_OUTPUT_DEFAULTS.get(e, "")))
+                ent.grid(row=2, column=j, padx=4, pady=2)
+                tps_entries[e] = ent
+
+            result_lbl = ttk.Label(sub, text="", foreground="steelblue")
+            result_lbl.grid(row=3, column=0, columnspan=len(energies), padx=8, pady=4)
+
+            def _preview(*_):
+                parts = []
+                for e, ent in tps_entries.items():
+                    txt = ent.get().strip()
+                    if txt:
+                        try:
+                            d = float(txt)
+                            parts.append(f"{e}={100/d:.4f}")
+                        except (ValueError, ZeroDivisionError):
+                            pass
+                result_lbl.config(text="  ".join(parts))
+
+            for ent in tps_entries.values():
+                ent.bind("<KeyRelease>", _preview)
+            _preview()  # show on open
+
+            def _apply():
+                for sys_target in systems:
+                    if sys_target not in entries:
+                        continue
+                    for e, ent in tps_entries.items():
+                        txt = ent.get().strip()
+                        if txt:
+                            try:
+                                d = float(txt)
+                                if d > 0:
+                                    entries[sys_target][e].set(f"{100.0 / d:.6f}")
+                            except (ValueError, ZeroDivisionError):
+                                pass
+                sub.destroy()
+
+            btn = ttk.Frame(sub)
+            btn.grid(row=4, column=0, columnspan=len(energies), pady=8)
+            ttk.Button(btn, text="Apply to RDS & IROC", command=_apply).pack(side="left", padx=6)
+            ttk.Button(btn, text="Cancel", command=sub.destroy).pack(side="left", padx=6)
+
+            sub.bind("<Return>", lambda *_: _apply())
+            sub.bind("<Escape>", lambda *_: sub.destroy())
+
         def _save():
             self._debug_scales = {}
             for sys, evars in entries.items():
@@ -1140,6 +1259,7 @@ class App(tk.Tk):
 
         btn_frame = ttk.Frame(dlg)
         btn_frame.grid(row=len(systems) + 2, column=0, columnspan=len(energies) + 1, pady=8)
+        ttk.Button(btn_frame, text="Load TPS Output Values…", command=_load_tps_output).pack(side="left", padx=6)
         ttk.Button(btn_frame, text="OK",    command=_save ).pack(side="left", padx=6)
         ttk.Button(btn_frame, text="Clear", command=_clear).pack(side="left", padx=6)
         ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=6)

@@ -255,11 +255,19 @@ def _preprocess(pos, dose, axis, sheet):
             dose = dose / dose.max() * 100.0
 
     else:  # PDD (Z axis)
-        if pdd_norm_var.get() == "depth":
+        mode = pdd_norm_var.get()
+        if mode == "depth":
             try:
                 d_ref = float(pdd_norm_depth_entry.get())
                 d_at_ref = float(PchipInterpolator(pos, dose)(d_ref))
                 dose = dose / d_at_ref * 100.0 if d_at_ref > 0 else dose / dose.max() * 100.0
+            except Exception:
+                dose = dose / dose.max() * 100.0
+        elif mode == "TPS d10":
+            try:
+                d_at_10 = float(PchipInterpolator(pos, dose)(10.0))
+                tps_val = float(tps_d10_entry.get())
+                dose = dose / d_at_10 * tps_val if d_at_10 > 0 else dose / dose.max() * 100.0
             except Exception:
                 dose = dose / dose.max() * 100.0
         else:
@@ -517,9 +525,17 @@ def make_avg():
         print("No sheets selected!")
         return
 
+    avg_sheets = (
+        [s for s in selected_sheets if "TPS" not in s.upper()]
+        if exclude_tps_var.get() else selected_sheets
+    )
+    if not avg_sheets:
+        print("No non-TPS sheets selected for averaging!")
+        return
+
     # Minimum number of datasets required at each position to include in average
     min_n_str = min_datasets_var.get()
-    min_n = len(selected_sheets) if min_n_str == 'All' else max(1, int(min_n_str))
+    min_n = len(avg_sheets) if min_n_str == 'All' else max(1, int(min_n_str))
 
     fixed_pos_z = np.arange(0, 30.05, 0.05)
     max_field_size = max([int(fs) for fs in fsl]) if fsl else 0
@@ -527,7 +543,7 @@ def make_avg():
 
     resampled_doses_by_combination = {}
 
-    for sheet in selected_sheets:
+    for sheet in avg_sheets:
         df = excel_data[sheet].sort_values(by=['FS', 'Axis', 'Pos'])
         for fs in fsl:
             for axis in scl:
@@ -705,10 +721,12 @@ cax_norm_var = tk.BooleanVar(value=False)
 ttk.Checkbutton(preproc_frame, text="Normalize profiles to CAX", variable=cax_norm_var).grid(
     row=0, column=1, sticky="w", padx=(0, 16))
 
+_TPS_D10 = {"6X": 66.5, "10X": 73.6, "15X": 76.5, "6FFF": 63.4, "8FFF": 68.2, "10FFF": 70.1}
+
 ttk.Label(preproc_frame, text="PDD norm:").grid(row=0, column=2, sticky="w", padx=(0, 4))
 pdd_norm_var = tk.StringVar(value="dmax")
-pdd_norm_combo = ttk.Combobox(preproc_frame, textvariable=pdd_norm_var, width=7, state="readonly")
-pdd_norm_combo['values'] = ["dmax", "depth"]
+pdd_norm_combo = ttk.Combobox(preproc_frame, textvariable=pdd_norm_var, width=8, state="readonly")
+pdd_norm_combo['values'] = ["dmax", "depth", "TPS d10"]
 pdd_norm_combo.grid(row=0, column=3, sticky="w", padx=(0, 4))
 
 ttk.Label(preproc_frame, text="Depth [cm]:").grid(row=0, column=4, sticky="w", padx=(0, 2))
@@ -716,8 +734,47 @@ pdd_norm_depth_entry = ttk.Entry(preproc_frame, width=6)
 pdd_norm_depth_entry.insert(0, "10.0")
 pdd_norm_depth_entry.grid(row=0, column=5, sticky="w", padx=(0, 16))
 
+# TPS d10 widgets (shown only when "TPS d10" selected)
+_tps_energy_lbl  = ttk.Label(preproc_frame, text="Energy:")
+_tps_energy_var  = tk.StringVar(value="6X")
+_tps_energy_combo = ttk.Combobox(preproc_frame, textvariable=_tps_energy_var,
+                                  width=7, state="readonly",
+                                  values=list(_TPS_D10.keys()))
+_tps_val_lbl  = ttk.Label(preproc_frame, text="%dd(10):")
+tps_d10_entry = ttk.Entry(preproc_frame, width=6)
+tps_d10_entry.insert(0, str(_TPS_D10["6X"]))
+
+def _on_tps_energy(*_):
+    tps_d10_entry.delete(0, tk.END)
+    tps_d10_entry.insert(0, str(_TPS_D10.get(_tps_energy_var.get(), "")))
+_tps_energy_var.trace_add("write", _on_tps_energy)
+
+def _on_pdd_norm_change(*_):
+    mode = pdd_norm_var.get()
+    if mode == "depth":
+        _tps_energy_lbl.grid_remove(); _tps_energy_combo.grid_remove()
+        _tps_val_lbl.grid_remove();    tps_d10_entry.grid_remove()
+        pdd_norm_depth_entry.grid(row=0, column=5, sticky="w", padx=(0, 16))
+    elif mode == "TPS d10":
+        pdd_norm_depth_entry.grid_remove()
+        _tps_energy_lbl.grid( row=0, column=5, sticky="w", padx=(0, 2))
+        _tps_energy_combo.grid(row=0, column=6, sticky="w", padx=(0, 4))
+        _tps_val_lbl.grid(    row=0, column=7, sticky="w", padx=(0, 2))
+        tps_d10_entry.grid(   row=0, column=8, sticky="w", padx=(0, 16))
+    else:  # dmax
+        pdd_norm_depth_entry.grid_remove()
+        _tps_energy_lbl.grid_remove(); _tps_energy_combo.grid_remove()
+        _tps_val_lbl.grid_remove();    tps_d10_entry.grid_remove()
+
+pdd_norm_combo.bind("<<ComboboxSelected>>", _on_pdd_norm_change)
+_on_pdd_norm_change()  # set initial state
+
 ttk.Button(preproc_frame, text="Manual Profile Shifts…", command=_open_manual_shifts).grid(
-    row=0, column=6, sticky="w", padx=(0, 4))
+    row=0, column=9, sticky="w", padx=(0, 4))
+
+exclude_tps_var = tk.BooleanVar(value=True)
+ttk.Checkbutton(preproc_frame, text="Exclude TPS tabs from avg", variable=exclude_tps_var).grid(
+    row=0, column=10, sticky="w", padx=(16, 0))
 
 # Adding the buttons to the GUI
 
@@ -732,6 +789,15 @@ make_avg_button.grid(row=9, column=0, pady=10)
 # Button to save the average data
 save_avg_button = ttk.Button(root, text="Save Avg", command=save_average)
 save_avg_button.grid(row=10, column=0, pady=10)
+
+def clear_avg():
+    global avg_dose_global, fixed_pos_global
+    avg_dose_global  = {}
+    fixed_pos_global = {}
+    print("Average cleared.")
+
+clear_avg_button = ttk.Button(root, text="Clear Avg", command=clear_avg)
+clear_avg_button.grid(row=11, column=0, pady=10)
 
 # Start the GUI loop
 root.mainloop()

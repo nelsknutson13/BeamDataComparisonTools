@@ -456,6 +456,22 @@ loaded_files = []
 _user_specs  = {}   # {metric_name: varies by spec_type}
 _tps_values  = {}   # {metric_name: {energy: value}}
 
+_detector_aliases  = {}   # {raw_str: canonical_name}
+_known_raw_detectors = set()  # populated from runs
+_pion_corrections  = {}   # {canonical_name: {energy: factor}}
+
+
+def _canonical_detector(raw):
+    """Return canonical detector name, applying any user-defined alias."""
+    raw = str(raw).strip()
+    if raw in _detector_aliases:
+        return _detector_aliases[raw]
+    # substring fallback: use first match where the alias key is in the raw string
+    for key, canon in _detector_aliases.items():
+        if key.lower() in raw.lower():
+            return canon
+    return raw
+
 # OAR seed data: {energy: {fs: {oar_pos: spec_%}}}  tol ±1%
 _OAR_SEED = {
     "6X":    {10.5: {2.0: 100.0, 4.0: 100.0}, 40.0: {6.0: 100.0, 18.0: 100.0}},
@@ -497,7 +513,9 @@ fs_var          = tk.StringVar(master=root, value="10.5")
 depth_var       = tk.StringVar(master=root, value="10")
 metric_var      = tk.StringVar(master=root, value="PDD at depth")
 highlight_var   = tk.StringVar(master=root)
-show_labels_var = tk.BooleanVar(master=root, value=False)
+show_labels_var    = tk.BooleanVar(master=root, value=False)
+show_detector_var  = tk.BooleanVar(master=root, value=False)
+apply_pion_var     = tk.BooleanVar(master=root, value=False)
 axis_var        = tk.StringVar(master=root, value="Both")
 side_var        = tk.StringVar(master=root, value="Both")
 oar_pos_var     = tk.StringVar(master=root, value="2.0")
@@ -1027,13 +1045,24 @@ highlight_combo = ttk.Combobox(main, textvariable=highlight_var, values=[''],
 highlight_combo.grid(row=11, column=1, sticky="w", padx=5)
 ttk.Checkbutton(main, text="Label all points", variable=show_labels_var).grid(
     row=11, column=2, sticky="w", padx=5)
+ttk.Checkbutton(main, text="Show detector/SN per sheet", variable=show_detector_var).grid(
+    row=11, column=3, sticky="w", padx=5)
 
-# Row 12: Run button (above output so it's always visible)
-# Row 12 run button is bound after run_compare is defined, below.
+# Row 12: Detector aliases + Pion correction
+detector_row = ttk.Frame(main)
+detector_row.grid(row=12, column=0, columnspan=4, sticky="w", pady=(4, 0))
+detector_alias_btn = ttk.Button(detector_row, text="Detector Aliases…")
+detector_alias_btn.pack(side="left", padx=(0, 8))
+pion_btn = ttk.Button(detector_row, text="Pion Corrections…")
+pion_btn.pack(side="left", padx=(0, 8))
+ttk.Checkbutton(detector_row, text="Apply Pion correction", variable=apply_pion_var).pack(side="left")
 
-# Row 13: output
+# Row 13: Run button (above output so it's always visible)
+# Row 13 run button is bound after run_compare is defined, below.
+
+# Row 14: output
 output_frame = ttk.Frame(main)
-output_frame.grid(row=13, column=0, columnspan=3, sticky="w")
+output_frame.grid(row=14, column=0, columnspan=3, sticky="w")
 output_text = tk.Text(output_frame, height=15, width=110, wrap='none',
                       font=('Courier', 9))
 output_text.grid(row=0, column=0, sticky="nsew")
@@ -1150,6 +1179,9 @@ def run_compare():
     output_text.insert(tk.END, f"{metric_name}  (FS={fs_ref} cm, depth={depth_ref} cm{axis_str})\n")
     output_text.insert(tk.END, "=" * 70 + "\n")
 
+    # Accumulate sheet → (sn, detectors) for the summary
+    _sheet_detector_map = {}   # {sheet: {'sn': str, 'detectors': set}}
+
     for entry in loaded_files:
         energy = entry['energy']; ssd = entry['ssd']
         if use_energy_fs_pos_spec:
@@ -1194,10 +1226,42 @@ def run_compare():
                 df['FS'] = df['FS'].astype(float)
             except Exception:
                 pass
+
+            if show_detector_var.get():
+                sub = df[df['FS'] == fs_ref]
+                if file_kw == 'PDD':
+                    sub = sub[sub['Axis'] == 'Z']
+                elif file_kw == 'Profile' and 'Depth' in sub.columns:
+                    avail = sub['Depth'].dropna().to_numpy(dtype=float)
+                    if len(avail) > 0:
+                        nearest = avail[np.argmin(np.abs(avail - depth_ref))]
+                        sub = sub[sub['Depth'] == nearest]
+                sn_vals = ([str(v) for v in sub['SN'].dropna().unique()
+                            if str(v).strip() not in ("", "nan")]
+                           if 'SN' in sub.columns else [])
+                det_vals = []
+                for col in ("Detector", "Chamber"):
+                    if col in sub.columns:
+                        det_vals += [str(v) for v in sub[col].dropna().unique()
+                                     if str(v).strip() not in ("", "nan")]
+                _known_raw_detectors.update(det_vals)
+                canonicals_for_sheet = list({_canonical_detector(d) for d in det_vals}) if det_vals else []
+                _sheet_detector_map[s] = {
+                    'sn': sn_vals[0] if sn_vals else None,
+                    'detectors': set(det_vals),
+                    'canonical': canonicals_for_sheet[0] if canonicals_for_sheet else None,
+                }
+
             for suffix, combo_fn in combos:
                 d_arg = (spec_val if metric_name == "Depth of dmax" and spec_val is not None
                          else depth_ref)
                 val = combo_fn(df, fs_ref, d_arg)
+                if apply_pion_var.get() and not np.isnan(val):
+                    canon = _sheet_detector_map.get(s, {}).get('canonical')
+                    if canon:
+                        pion = _pion_corrections.get(canon, {}).get(energy)
+                        if pion is not None:
+                            val *= pion
                 key = f"{s}{suffix}"
                 results[group_key][key] = val
                 flag = ""
@@ -1302,6 +1366,20 @@ def run_compare():
                     f"z={z:+.2f}σ\n"
                 )
 
+    # ── Detector/SN summary ──
+    if show_detector_var.get() and _sheet_detector_map:
+        output_text.insert(tk.END, "\n" + "=" * 60 + "\n")
+        output_text.insert(tk.END, "Detectors used\n")
+        output_text.insert(tk.END, "=" * 60 + "\n")
+        sh_w = max(len(s) for s in _sheet_detector_map) + 2
+        has_sn = any(v['sn'] for v in _sheet_detector_map.values())
+        for sheet, info in _sheet_detector_map.items():
+            sn_str = f"SN {info['sn']:<8}" if has_sn else ""
+            raw_dets = ", ".join(sorted(info['detectors'])) or "—"
+            canon = info.get('canonical')
+            canon_str = f"  → {canon}" if canon and canon != raw_dets else ""
+            output_text.insert(tk.END, f"  {sheet:<{sh_w}}  {sn_str}{raw_dets}{canon_str}\n")
+
     # ── plot: one subplot per group, per-group y-axis scaling ──
     import math
     n = len(group_keys)
@@ -1382,6 +1460,121 @@ def run_compare():
     plt.show()
 
 
-ttk.Button(main, text="Run", command=run_compare).grid(row=12, column=0, columnspan=3, pady=10)
+def _open_detector_alias_dialog():
+    dlg = tk.Toplevel(root)
+    dlg.title("Detector Aliases")
+    dlg.resizable(True, True)
+    dlg.grab_set()
+
+    ttk.Label(dlg, text="Raw name (in data)", width=36, anchor="w").grid(
+        row=0, column=0, padx=8, pady=4, sticky="w")
+    ttk.Label(dlg, text="Canonical name", width=20, anchor="w").grid(
+        row=0, column=1, padx=8, pady=4, sticky="w")
+
+    # All raw names known so far, plus any already in the alias map
+    all_raw = sorted(_known_raw_detectors | set(_detector_aliases.keys()))
+    entries = {}
+    for i, raw in enumerate(all_raw):
+        ttk.Label(dlg, text=raw, width=36, anchor="w").grid(
+            row=i + 1, column=0, padx=8, pady=2, sticky="w")
+        var = tk.StringVar(value=_detector_aliases.get(raw, ""))
+        ttk.Entry(dlg, textvariable=var, width=22).grid(
+            row=i + 1, column=1, padx=8, pady=2)
+        entries[raw] = var
+
+    # blank rows for adding new entries
+    extra_vars = []
+    base = len(all_raw) + 1
+    for j in range(3):
+        raw_var = tk.StringVar()
+        can_var = tk.StringVar()
+        ttk.Entry(dlg, textvariable=raw_var, width=36).grid(row=base + j, column=0, padx=8, pady=2)
+        ttk.Entry(dlg, textvariable=can_var, width=22).grid(row=base + j, column=1, padx=8, pady=2)
+        extra_vars.append((raw_var, can_var))
+
+    def _save():
+        _detector_aliases.clear()
+        for raw, var in entries.items():
+            txt = var.get().strip()
+            if txt:
+                _detector_aliases[raw] = txt
+        for rv, cv in extra_vars:
+            r, c = rv.get().strip(), cv.get().strip()
+            if r and c:
+                _detector_aliases[r] = c
+        dlg.destroy()
+
+    n = base + 3
+    ttk.Button(dlg, text="OK",     command=_save       ).grid(row=n, column=0, pady=8)
+    ttk.Button(dlg, text="Cancel", command=dlg.destroy ).grid(row=n, column=1, pady=8)
+    dlg.bind("<Return>", lambda *_: _save())
+
+detector_alias_btn.configure(command=_open_detector_alias_dialog)
+
+
+def _open_pion_dialog():
+    # Canonical detector names = alias values, plus any already in the pion table
+    canonicals = sorted(set(_detector_aliases.values()) | set(_pion_corrections.keys()))
+    if not canonicals:
+        messagebox.showinfo("Pion Corrections",
+                            "No canonical detector names yet.\n"
+                            "Set Detector Aliases first, then run once to discover names.")
+        return
+
+    dlg = tk.Toplevel(root)
+    dlg.title("Pion Corrections (multiplicative, per detector/energy)")
+    dlg.resizable(True, True)
+    dlg.grab_set()
+
+    ttk.Label(dlg, text="Detector \\ Energy", width=18).grid(
+        row=0, column=0, padx=6, pady=4, sticky="w")
+    for j, e in enumerate(_ENERGIES):
+        ttk.Label(dlg, text=e, width=9).grid(row=0, column=j + 1, padx=4, pady=4)
+
+    entries = {}
+    for i, det in enumerate(canonicals):
+        ttk.Label(dlg, text=det, width=18, anchor="w").grid(
+            row=i + 1, column=0, padx=6, pady=3, sticky="w")
+        entries[det] = {}
+        for j, e in enumerate(_ENERGIES):
+            cur = _pion_corrections.get(det, {}).get(e, "")
+            var = tk.StringVar(value="" if cur == "" else str(cur))
+            ttk.Entry(dlg, textvariable=var, width=9).grid(
+                row=i + 1, column=j + 1, padx=4, pady=3)
+            entries[det][e] = var
+
+    ttk.Label(dlg, text="Leave blank = 1.0 (no correction)",
+              foreground="gray").grid(row=len(canonicals) + 1, column=0,
+                                     columnspan=len(_ENERGIES) + 1, padx=6, pady=4)
+
+    def _save():
+        _pion_corrections.clear()
+        for det, evars in entries.items():
+            for e, var in evars.items():
+                txt = var.get().strip()
+                if txt:
+                    try:
+                        f = float(txt)
+                        _pion_corrections.setdefault(det, {})[e] = f
+                    except ValueError:
+                        pass
+        dlg.destroy()
+
+    def _clear():
+        for evars in entries.values():
+            for var in evars.values():
+                var.set("")
+
+    n = len(canonicals) + 2
+    btn_row = ttk.Frame(dlg)
+    btn_row.grid(row=n, column=0, columnspan=len(_ENERGIES) + 1, pady=8)
+    ttk.Button(btn_row, text="OK",     command=_save       ).pack(side="left", padx=6)
+    ttk.Button(btn_row, text="Clear",  command=_clear      ).pack(side="left", padx=6)
+    ttk.Button(btn_row, text="Cancel", command=dlg.destroy ).pack(side="left", padx=6)
+
+pion_btn.configure(command=_open_pion_dialog)
+
+
+ttk.Button(main, text="Run", command=run_compare).grid(row=13, column=0, columnspan=3, pady=10)
 
 root.mainloop()

@@ -777,6 +777,23 @@ def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True, outl
                       f"{(r.min()-1)*100:>{val_col_w}.3f}"
                       f"{(r.max()-1)*100:>{val_col_w}.3f}")
 
+        # --- 4. Per-Energy summary (mean ± SD per Energy within each system) ---
+        print("\nPer-Energy summary by system (mean%, SD%, N):")
+        en_label_col_w = 8
+        for sys, grp in df.groupby("System"):
+            print(f"\n  {sys}")
+            print(f"    {'Energy':<{en_label_col_w}}{'N':>{n_col_w}}{'Mean%':>{val_col_w}}{'SD%':>{val_col_w}}{'Min%':>{val_col_w}}{'Max%':>{val_col_w}}")
+            print(f"    " + "-" * (en_label_col_w + n_col_w + val_col_w * 4))
+            for e in energy_order:
+                sub = grp.loc[grp["Energy"] == e, "Ratio"]
+                if sub.empty:
+                    continue
+                print(f"    {e:<{en_label_col_w}}{len(sub):>{n_col_w}}"
+                      f"{(sub.mean()-1)*100:>{val_col_w}.3f}"
+                      f"{sub.std()*100:>{val_col_w}.3f}"
+                      f"{(sub.min()-1)*100:>{val_col_w}.3f}"
+                      f"{(sub.max()-1)*100:>{val_col_w}.3f}")
+
         # Print rows outside user-specified threshold (blank = skip)
         try:
             _thr = float(outlier_thr) / 100.0 if outlier_thr else None
@@ -935,13 +952,46 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Output Round Robin — Boxplots")
-        self.geometry("900x800")
+        # Clamp to the actual screen height (minus room for the taskbar/title
+        # bar) so the Plot button at the bottom stays reachable on shorter
+        # laptop screens instead of being placed off-screen by a fixed 800px.
+        win_h = min(800, self.winfo_screenheight() - 100)
+        self.geometry(f"900x{win_h}+50+20")
+        # Scrollable container: the control panel (3 listboxes + ~20 rows of
+        # checkboxes/entries) is taller than many laptop screens can show at
+        # once, and a fixed/clamped window size can't fix that — shrinking
+        # the window just clips whatever doesn't fit, it doesn't shrink the
+        # content. Wrap everything in a canvas+scrollbar instead so the Plot
+        # button is always reachable regardless of screen height.
+        outer = ttk.Frame(self)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        container = ttk.Frame(canvas)
+        container_id = canvas.create_window((0, 0), window=container, anchor="nw")
+
+        def _on_container_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        container.bind("<Configure>", _on_container_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(container_id, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
         pad = {"padx": 8, "pady": 6}
 
-        ttk.Label(self, text="Data file (XLSX/CSV):").grid(row=0, column=0, sticky="w", **pad)
+        ttk.Label(container, text="Data file (XLSX/CSV):").grid(row=0, column=0, sticky="w", **pad)
         self.path_var = tk.StringVar(value=DEFAULT_PATH)
-        ttk.Entry(self, textvariable=self.path_var, width=70).grid(row=0, column=1, **pad)
-        ttk.Button(self, text="Browse…", command=self.browse).grid(row=0, column=2, **pad)
+        ttk.Entry(container, textvariable=self.path_var, width=70).grid(row=0, column=1, **pad)
+        ttk.Button(container, text="Browse…", command=self.browse).grid(row=0, column=2, **pad)
 
         # ---- Plot selection checkboxes ----
         self.do_system = tk.BooleanVar(value=True)
@@ -961,54 +1011,54 @@ class App(tk.Tk):
         self.show_outlier_markers = tk.BooleanVar(value=True)
 
         ttk.Checkbutton(
-            self, text="System boxplot (all data)",
+            container, text="System boxplot (all data)",
             variable=self.do_system
         ).grid(row=1, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
-            self, text="Grouped boxplot by SN",
+            container, text="Grouped boxplot by SN",
             variable=self.do_sn
         ).grid(row=2, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
-            self, text="Grouped boxplot by Energy",
+            container, text="Grouped boxplot by Energy",
             variable=self.do_energy
         ).grid(row=3, column=0, columnspan=3, sticky="w", **pad)
-        
+
         ttk.Checkbutton(
-            self, text="Show Dates",
+            container, text="Show Dates",
             variable=self.show_dates
         ).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Checkbutton(self, text="Show SN labels (System + Energy plots)", variable=self.show_sn_labels).grid(row=5, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Checkbutton(self, text="Show Energy labels (System plot only)", variable=self.show_energy_labels).grid(row=6, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Checkbutton(self, text="Show tolerance  ±", variable=self.show_tolerance).grid(row=7, column=0, sticky="e", **pad)
-        ttk.Entry(self, textvariable=self.tol_var, width=6).grid(row=7, column=1, sticky="w", **pad)
-        ttk.Label(self, text="%").grid(row=7, column=1, sticky="w", padx=(60, 0))
-        ttk.Checkbutton(self, text="Show all points (off = outliers only)", variable=self.show_points).grid(row=7, column=2, sticky="w", **pad)
-        ttk.Checkbutton(self, text="Paired dates only (require ≥2 systems per date)", variable=self.paired_dates).grid(row=8, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Checkbutton(self, text="Mark outliers (★)", variable=self.show_outlier_markers).grid(row=8, column=2, sticky="w", **pad)
+        ttk.Checkbutton(container, text="Show SN labels (System + Energy plots)", variable=self.show_sn_labels).grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(container, text="Show Energy labels (System plot only)", variable=self.show_energy_labels).grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(container, text="Show tolerance  ±", variable=self.show_tolerance).grid(row=7, column=0, sticky="e", **pad)
+        ttk.Entry(container, textvariable=self.tol_var, width=6).grid(row=7, column=1, sticky="w", **pad)
+        ttk.Label(container, text="%").grid(row=7, column=1, sticky="w", padx=(60, 0))
+        ttk.Checkbutton(container, text="Show all points (off = outliers only)", variable=self.show_points).grid(row=7, column=2, sticky="w", **pad)
+        ttk.Checkbutton(container, text="Paired dates only (require ≥2 systems per date)", variable=self.paired_dates).grid(row=8, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Checkbutton(container, text="Mark outliers (★)", variable=self.show_outlier_markers).grid(row=8, column=2, sticky="w", **pad)
         self.show_n = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self, text="Show n= counts (system plot)", variable=self.show_n).grid(row=9, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Checkbutton(container, text="Show n= counts (system plot)", variable=self.show_n).grid(row=9, column=0, columnspan=2, sticky="w", **pad)
 
         # ---- System selection ----
-        ttk.Label(self, text="Select System(s) for global filter:").grid(
+        ttk.Label(container, text="Select System(s) for global filter:").grid(
             row=10, column=0, columnspan=3, sticky="w", **pad
         )
-        self.system_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
+        self.system_listbox = tk.Listbox(container, selectmode="extended", height=4, exportselection=False)
         self.system_listbox.grid(row=11, column=0, columnspan=3, sticky="nsew", **pad)
 
         # ---- SN selection ----
-        ttk.Label(self, text="Select SN(s) for SN-grouped plot:").grid(
+        ttk.Label(container, text="Select SN(s) for SN-grouped plot:").grid(
             row=12, column=0, columnspan=3, sticky="w", **pad
         )
-        self.sn_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
+        self.sn_listbox = tk.Listbox(container, selectmode="extended", height=4, exportselection=False)
         self.sn_listbox.grid(row=13, column=0, columnspan=3, sticky="nsew", **pad)
 
         # ---- Energy selection ----
-        ttk.Label(self, text="Select Energy(ies) for Energy-grouped plot:").grid(
+        ttk.Label(container, text="Select Energy(ies) for Energy-grouped plot:").grid(
             row=14, column=0, columnspan=3, sticky="w", **pad
         )
-        self.energy_listbox = tk.Listbox(self, selectmode="extended", height=4, exportselection=False)
+        self.energy_listbox = tk.Listbox(container, selectmode="extended", height=4, exportselection=False)
         self.energy_listbox.grid(row=15, column=0, columnspan=3, sticky="nsew", **pad)
 
         # backing lists for listbox indices
@@ -1017,23 +1067,23 @@ class App(tk.Tk):
         self.energy_values = []
 
         # ---- Normalization selection ('None' = no normalization) ----
-        ttk.Label(self, text="Normalization:").grid(row=16, column=0, sticky="w", **pad)
+        ttk.Label(container, text="Normalization:").grid(row=16, column=0, sticky="w", **pad)
         self.normalize_var = tk.StringVar(value="None")
-        self.normalize_combo = ttk.Combobox(self, textvariable=self.normalize_var,
+        self.normalize_combo = ttk.Combobox(container, textvariable=self.normalize_var,
                                              state="readonly", width=40)
         self.normalize_combo["values"] = ["None"]
         self.normalize_combo.grid(row=16, column=1, sticky="w", **pad)
 
         # ---- Debug scaling (troubleshooting only) ----
         self._debug_scales = {}   # {system: {energy: factor}}
-        debug_frame = ttk.Frame(self)
+        debug_frame = ttk.Frame(container)
         debug_frame.grid(row=17, column=0, columnspan=3, sticky="w", **pad)
         ttk.Button(debug_frame, text="Debug Scale…", command=self._open_debug_scale).pack(side="left")
         self._debug_scale_lbl = ttk.Label(debug_frame, text="", foreground="darkorange")
         self._debug_scale_lbl.pack(side="left", padx=8)
 
         # ---- Y-axis range / tick spacing (all in percent) ----
-        axis_frame = ttk.Frame(self)
+        axis_frame = ttk.Frame(container)
         axis_frame.grid(row=18, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(axis_frame, text="Y-axis ±(%):").pack(side="left")
         ttk.Entry(axis_frame, textvariable=self.y_range_var, width=5).pack(side="left", padx=(2, 12))
@@ -1045,7 +1095,7 @@ class App(tk.Tk):
         ttk.Entry(axis_frame, textvariable=self.font_size_var, width=5).pack(side="left", padx=(2, 0))
 
         # ---- Report options ----
-        report_frame = ttk.Frame(self)
+        report_frame = ttk.Frame(container)
         report_frame.grid(row=19, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(report_frame, text="Print rows with |difference| >").pack(side="left")
         self.outlier_thr_var = tk.StringVar(value="")
@@ -1057,7 +1107,7 @@ class App(tk.Tk):
                         variable=self.show_repeat_spread).pack(side="left")
 
         # Plot button
-        ttk.Button(self, text="Plot", command=self.plot).grid(row=20, column=0, columnspan=3, **pad)
+        ttk.Button(container, text="Plot", command=self.plot).grid(row=20, column=0, columnspan=3, **pad)
 
         # populate lists from default file if possible
         self.populate_lists_from_file()

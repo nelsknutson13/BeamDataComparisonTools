@@ -455,18 +455,39 @@ def parse_energy_ssd(name):
 loaded_files = []
 _user_specs  = {}   # {metric_name: varies by spec_type}
 _tps_values  = {}   # {metric_name: {energy: value}}
+_df_cache    = {}   # {path: {sheet: DataFrame}} — populated by Load Data
 
-_detector_aliases  = {}   # {raw_str: canonical_name}
 _known_raw_detectors = set()  # populated from runs
-_pion_corrections  = {}   # {canonical_name: {energy: factor}}
+
+# Default Pion corrections (multiplicative) per canonical detector / energy.
+# Blank energies = 1.0 (no correction). FFF beams only — X beams have negligible Pion.
+_pion_corrections = {
+    "CC 04":    {"6FFF": 1.000, "8FFF": 0.998, "10FFF": 0.998},
+    "CC 13":    {"6FFF": 0.994, "8FFF": 0.989, "10FFF": 0.986},
+    "TN 31010": {"6FFF": 0.9985, "8FFF": 0.997, "10FFF": 0.996},
+    "TN 31021": {"6FFF": 0.998,  "8FFF": 0.996, "10FFF": 0.995},
+}
+
+# Alias map pre-populated with common detector name variants → canonical name.
+# Shown and editable in the Detector Aliases dialog. Substring-matched (case-insensitive).
+_detector_aliases = {
+    "CC 04":         "CC 04",
+    "CC04":          "CC 04",
+    "CC 13":         "CC 13",
+    "CC13":          "CC 13",
+    "31010":         "TN 31010",
+    "Semiflex (1)":  "TN 31010",
+    "31021":         "TN 31021",
+    "TN31021":       "TN 31021",
+    "Semiflex 3D":   "TN 31021",
+}
 
 
 def _canonical_detector(raw):
-    """Return canonical detector name, applying any user-defined alias."""
+    """Return canonical detector name via exact then substring match in _detector_aliases."""
     raw = str(raw).strip()
     if raw in _detector_aliases:
         return _detector_aliases[raw]
-    # substring fallback: use first match where the alias key is in the raw string
     for key, canon in _detector_aliases.items():
         if key.lower() in raw.lower():
             return canon
@@ -514,7 +535,7 @@ depth_var       = tk.StringVar(master=root, value="10")
 metric_var      = tk.StringVar(master=root, value="PDD at depth")
 highlight_var   = tk.StringVar(master=root)
 show_labels_var    = tk.BooleanVar(master=root, value=False)
-show_detector_var  = tk.BooleanVar(master=root, value=False)
+show_detector_var  = tk.BooleanVar(master=root, value=True)
 apply_pion_var     = tk.BooleanVar(master=root, value=False)
 axis_var        = tk.StringVar(master=root, value="Both")
 side_var        = tk.StringVar(master=root, value="Both")
@@ -523,9 +544,14 @@ spec_var        = tk.StringVar(master=root, value="")
 tol_var         = tk.StringVar(master=root, value="")
 show_spec_var   = tk.BooleanVar(master=root, value=True)
 show_tps_var    = tk.BooleanVar(master=root, value=False)
+tps_tol_var     = tk.StringVar(master=root, value="0.5")
 
 main = ttk.Frame(root, padding=10)
 main.grid(row=0, column=0, sticky="nsew")
+root.rowconfigure(0, weight=1)
+root.columnconfigure(0, weight=1)
+main.rowconfigure(14, weight=1)
+main.columnconfigure(1, weight=1)
 
 
 def _refresh_sheets():
@@ -567,6 +593,8 @@ def _refresh_filters_from_loaded():
 def _load_paths(paths):
     """Given a list of xlsx paths, read metadata and populate registry."""
     loaded_files.clear()
+    _df_cache.clear()
+    load_status_lbl.config(text="")
     file_listbox.delete(0, tk.END)
     for p in paths:
         try:
@@ -692,6 +720,8 @@ show_spec_chk = ttk.Checkbutton(tol_frame, text="Show spec/tol lines", variable=
 show_spec_chk.pack(side='left', padx=10)
 show_tps_chk  = ttk.Checkbutton(tol_frame, text="Show TPS", variable=show_tps_var)
 show_tps_chk.pack(side='left', padx=10)
+ttk.Label(tol_frame, text="TPS tol ±:").pack(side='left')
+ttk.Entry(tol_frame, textvariable=tps_tol_var, width=6).pack(side='left', padx=4)
 tps_btn = ttk.Button(tol_frame, text="TPS per energy…")
 tps_btn.pack(side='left', padx=4)
 
@@ -1062,7 +1092,9 @@ ttk.Checkbutton(detector_row, text="Apply Pion correction", variable=apply_pion_
 
 # Row 14: output
 output_frame = ttk.Frame(main)
-output_frame.grid(row=14, column=0, columnspan=3, sticky="w")
+output_frame.grid(row=14, column=0, columnspan=4, sticky="nsew", pady=(6, 0))
+output_frame.rowconfigure(0, weight=1)
+output_frame.columnconfigure(0, weight=1)
 output_text = tk.Text(output_frame, height=15, width=110, wrap='none',
                       font=('Courier', 9))
 output_text.grid(row=0, column=0, sticky="nsew")
@@ -1174,6 +1206,10 @@ def run_compare():
         tol_val = float(tol_var.get()) if tol_var.get().strip() else None
     except ValueError:
         tol_val = None
+    try:
+        tps_tol_val = float(tps_tol_var.get()) if tps_tol_var.get().strip() else None
+    except ValueError:
+        tps_tol_val = None
 
     output_text.delete("1.0", tk.END)
     output_text.insert(tk.END, f"{metric_name}  (FS={fs_ref} cm, depth={depth_ref} cm{axis_str})\n")
@@ -1208,15 +1244,18 @@ def run_compare():
         output_text.insert(tk.END, "-" * 70 + "\n")
         output_text.update_idletasks()
 
-        # Read only the needed sheets in ONE open (much faster than per-sheet read_excel)
         wanted = [s for s in sheets if s in entry['sheets']]
         if not wanted:
             continue
-        try:
-            dfs = pd.read_excel(entry['path'], sheet_name=wanted)
-        except Exception as e:
-            output_text.insert(tk.END, f"  ERROR reading file: {e}\n")
-            continue
+        cached = _df_cache.get(entry['path'])
+        if cached is not None:
+            dfs = {s: cached[s] for s in wanted if s in cached}
+        else:
+            try:
+                dfs = pd.read_excel(entry['path'], sheet_name=wanted)
+            except Exception as e:
+                output_text.insert(tk.END, f"  ERROR reading file: {e}\n")
+                continue
 
         for s in wanted:
             df = dfs.get(s)
@@ -1242,8 +1281,11 @@ def run_compare():
                 det_vals = []
                 for col in ("Detector", "Chamber"):
                     if col in sub.columns:
-                        det_vals += [str(v) for v in sub[col].dropna().unique()
-                                     if str(v).strip() not in ("", "nan")]
+                        vals = [str(v) for v in sub[col].dropna().unique()
+                                if str(v).strip() not in ("", "nan")]
+                        if vals:
+                            det_vals = vals  # use first column that has data
+                            break
                 _known_raw_detectors.update(det_vals)
                 canonicals_for_sheet = list({_canonical_detector(d) for d in det_vals}) if det_vals else []
                 _sheet_detector_map[s] = {
@@ -1437,6 +1479,8 @@ def run_compare():
                 y_range.extend([spec_val + tol_val, spec_val - tol_val])
         if tps_val is not None:
             y_range.append(tps_val)
+            if tps_tol_val is not None:
+                y_range.extend([tps_val + tps_tol_val, tps_val - tps_tol_val])
 
         vmin, vmax = min(y_range), max(y_range)
         pad = max((vmax - vmin) * 0.3, abs(vmax) * 0.01)
@@ -1450,6 +1494,10 @@ def run_compare():
                 ax.axhline(spec_val - tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8)
         if tps_val is not None:
             ax.axhline(tps_val, color='steelblue', linestyle='--', linewidth=1.4, alpha=0.9, label='TPS')
+            if tps_tol_val is not None:
+                ax.axhline(tps_val + tps_tol_val, color='steelblue', linestyle=':', linewidth=1.0, alpha=0.7,
+                           label=f'TPS ±{tps_tol_val:g}')
+                ax.axhline(tps_val - tps_tol_val, color='steelblue', linestyle=':', linewidth=1.0, alpha=0.7)
 
     # Hide any unused axes (when n isn't a multiple of ncols)
     for j in range(n, nrows * ncols):
@@ -1471,13 +1519,14 @@ def _open_detector_alias_dialog():
     ttk.Label(dlg, text="Canonical name", width=20, anchor="w").grid(
         row=0, column=1, padx=8, pady=4, sticky="w")
 
-    # All raw names known so far, plus any already in the alias map
-    all_raw = sorted(_known_raw_detectors | set(_detector_aliases.keys()))
+    # Only actual raw names seen in data; canonical pre-filled via full resolution
+    all_raw = sorted(_known_raw_detectors)
     entries = {}
     for i, raw in enumerate(all_raw):
         ttk.Label(dlg, text=raw, width=36, anchor="w").grid(
             row=i + 1, column=0, padx=8, pady=2, sticky="w")
-        var = tk.StringVar(value=_detector_aliases.get(raw, ""))
+        resolved = _detector_aliases.get(raw) or _canonical_detector(raw)
+        var = tk.StringVar(value=resolved if resolved != raw else "")
         ttk.Entry(dlg, textvariable=var, width=22).grid(
             row=i + 1, column=1, padx=8, pady=2)
         entries[raw] = var
@@ -1575,6 +1624,74 @@ def _open_pion_dialog():
 pion_btn.configure(command=_open_pion_dialog)
 
 
-ttk.Button(main, text="Run", command=run_compare).grid(row=13, column=0, columnspan=3, pady=10)
+def load_data():
+    if not loaded_files:
+        messagebox.showerror("Error", "Load at least one file first.")
+        return
+    sel_idx = sheet_listbox.curselection()
+    if not sel_idx:
+        messagebox.showerror("Error", "Select at least one sheet.")
+        return
+    sheets = [sheet_listbox.get(i) for i in sel_idx]
+
+    metric_name = metric_var.get()
+    file_kw = METRICS[metric_name].get("file_keyword")
+
+    _df_cache.clear()
+    n_loaded = 0
+    load_status_lbl.config(text="Loading…", foreground="darkorange")
+    root.update_idletasks()
+    for entry in loaded_files:
+        if file_kw and file_kw.lower() not in os.path.basename(entry['path']).lower():
+            continue
+        wanted = [s for s in sheets if s in entry['sheets']]
+        if not wanted:
+            continue
+        load_status_lbl.config(text=f"Loading {os.path.basename(entry['path'])}…")
+        root.update_idletasks()
+        try:
+            dfs = pd.read_excel(entry['path'], sheet_name=wanted)
+            _df_cache[entry['path']] = dfs
+            n_loaded += len(dfs)
+            try:
+                fs_ref = float(fs_var.get())
+                depth_ref = float(depth_var.get())
+            except ValueError:
+                fs_ref = None
+                depth_ref = None
+            for df in dfs.values():
+                sub = df
+                if fs_ref is not None and 'FS' in df.columns:
+                    try:
+                        sub = df[df['FS'].astype(float) == fs_ref]
+                    except Exception:
+                        sub = df
+                if file_kw == 'PDD' and 'Axis' in sub.columns:
+                    sub = sub[sub['Axis'] == 'Z']
+                elif file_kw == 'Profile' and depth_ref is not None and 'Depth' in sub.columns:
+                    avail = sub['Depth'].dropna().to_numpy(dtype=float)
+                    if len(avail) > 0:
+                        nearest = avail[np.argmin(np.abs(avail - depth_ref))]
+                        sub = sub[sub['Depth'] == nearest]
+                for col in ("Detector", "Chamber"):
+                    if col in sub.columns:
+                        vals = [str(v) for v in sub[col].dropna().unique()
+                                if str(v).strip() not in ("", "nan")]
+                        if vals:
+                            _known_raw_detectors.update(vals)
+                            break
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read {os.path.basename(entry['path'])}:\n{e}")
+            load_status_lbl.config(text="Load failed", foreground="red")
+            return
+    load_status_lbl.config(text=f"{n_loaded} sheet(s) loaded", foreground="green")
+
+
+load_btn_frame = ttk.Frame(main)
+load_btn_frame.grid(row=13, column=0, columnspan=3, pady=(10, 0))
+ttk.Button(load_btn_frame, text="Load Data", command=load_data).pack(side="left", padx=8)
+ttk.Button(load_btn_frame, text="Run",       command=run_compare).pack(side="left", padx=8)
+load_status_lbl = ttk.Label(load_btn_frame, text="")
+load_status_lbl.pack(side="left", padx=8)
 
 root.mainloop()

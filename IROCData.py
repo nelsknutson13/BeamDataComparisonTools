@@ -407,7 +407,10 @@ class App(tk.Tk):
                 for s in unique_sites
             ]
         if all_handles:
-            ax.legend(handles=all_handles, loc="upper right", frameon=True)
+            leg = ax.legend(handles=all_handles, loc="upper right", frameon=True)
+            leg_fs = max(font_size - 2, 8)
+            for text in leg.get_texts():
+                text.set_fontsize(leg_fs)
         plt.tight_layout(pad=0.5)
         self._current_fig.subplots_adjust(left=0.15)
         plt.show()

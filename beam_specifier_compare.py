@@ -537,6 +537,7 @@ highlight_var   = tk.StringVar(master=root)
 show_labels_var    = tk.BooleanVar(master=root, value=False)
 show_detector_var  = tk.BooleanVar(master=root, value=True)
 apply_pion_var     = tk.BooleanVar(master=root, value=False)
+color_tps_var      = tk.BooleanVar(master=root, value=False)
 axis_var        = tk.StringVar(master=root, value="Both")
 side_var        = tk.StringVar(master=root, value="Both")
 oar_pos_var     = tk.StringVar(master=root, value="2.0")
@@ -1077,6 +1078,8 @@ ttk.Checkbutton(main, text="Label all points", variable=show_labels_var).grid(
     row=11, column=2, sticky="w", padx=5)
 ttk.Checkbutton(main, text="Show detector/SN per sheet", variable=show_detector_var).grid(
     row=11, column=3, sticky="w", padx=5)
+ttk.Checkbutton(main, text="Color TPS vs measured", variable=color_tps_var).grid(
+    row=11, column=4, sticky="w", padx=5)
 
 # Row 12: Detector aliases + Pion correction
 detector_row = ttk.Frame(main)
@@ -1451,16 +1454,19 @@ def run_compare():
                    boxprops=dict(facecolor='lightgray'))
         xs = (rng.random(len(sheet_items)) - 0.5) * 0.15
         label_all = show_labels_var.get()
+        do_color_tps = color_tps_var.get()
         for (sh, v), x in zip(sheet_items, xs):
             if highlight and (sh == highlight or sh.startswith(highlight + "_")):
                 ax.plot(x, v, 'o', color='red', ms=11, zorder=5)
                 ax.annotate(sh, (x, v), xytext=(8, 0), textcoords='offset points',
                             color='red', fontweight='bold', fontsize=9, va='center')
             else:
-                ax.plot(x, v, 'o', color='black', ms=6)
+                is_tps = do_color_tps and "TPS" in sh.upper()
+                pt_color = 'darkorange' if is_tps else 'black'
+                ax.plot(x, v, 'o', color=pt_color, ms=6)
                 if label_all:
                     ax.annotate(sh, (x, v), xytext=(8, 0), textcoords='offset points',
-                                color='gray', fontsize=7, va='center')
+                                color=pt_color, fontsize=7, va='center')
 
         ax.set_xticks([0])
         ax.set_xticklabels([f"{e or '?'}  {s or '?'} SSD"])

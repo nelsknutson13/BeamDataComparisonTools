@@ -538,6 +538,7 @@ show_labels_var    = tk.BooleanVar(master=root, value=False)
 show_detector_var  = tk.BooleanVar(master=root, value=True)
 apply_pion_var     = tk.BooleanVar(master=root, value=False)
 color_tps_var      = tk.BooleanVar(master=root, value=False)
+show_pion_spec_var = tk.BooleanVar(master=root, value=True)
 axis_var        = tk.StringVar(master=root, value="Both")
 side_var        = tk.StringVar(master=root, value="Both")
 oar_pos_var     = tk.StringVar(master=root, value="2.0")
@@ -1089,6 +1090,7 @@ detector_alias_btn.pack(side="left", padx=(0, 8))
 pion_btn = ttk.Button(detector_row, text="Pion Corrections…")
 pion_btn.pack(side="left", padx=(0, 8))
 ttk.Checkbutton(detector_row, text="Apply Pion correction", variable=apply_pion_var).pack(side="left")
+ttk.Checkbutton(detector_row, text="Show pion-scaled spec", variable=show_pion_spec_var).pack(side="left", padx=(8, 0))
 
 # Row 13: Run button (above output so it's always visible)
 # Row 13 run button is bound after run_compare is defined, below.
@@ -1478,11 +1480,19 @@ def run_compare():
         # Include spec/tol values in the range so lines are always visible.
         tps_val = _tps_values.get(metric_name, {}).get(e) if show_tps_var.get() else None
 
+        cc13_pion = (_pion_corrections.get("CC 13", {}).get(e)
+                     if apply_pion_var.get() and show_pion_spec_var.get() else None)
+        spec_corr = spec_val * cc13_pion if (spec_val is not None and cc13_pion is not None) else None
+
         y_range = list(vals)
         if show_spec_var.get() and spec_val is not None:
             y_range.append(spec_val)
             if tol_val is not None:
                 y_range.extend([spec_val + tol_val, spec_val - tol_val])
+            if spec_corr is not None:
+                y_range.append(spec_corr)
+                if tol_val is not None:
+                    y_range.extend([spec_corr + tol_val, spec_corr - tol_val])
         if tps_val is not None:
             y_range.append(tps_val)
             if tps_tol_val is not None:
@@ -1498,6 +1508,12 @@ def run_compare():
             if tol_val is not None:
                 ax.axhline(spec_val + tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8, label='Tol')
                 ax.axhline(spec_val - tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8)
+            if spec_corr is not None:
+                ax.axhline(spec_corr, color='green', linestyle='--', linewidth=1.2, alpha=0.8,
+                           label='Spec (CC13 pion)')
+                if tol_val is not None:
+                    ax.axhline(spec_corr + tol_val, color='red', linestyle=':', linewidth=1.0, alpha=0.8)
+                    ax.axhline(spec_corr - tol_val, color='red', linestyle=':', linewidth=1.0, alpha=0.8)
         if tps_val is not None:
             ax.axhline(tps_val, color='steelblue', linestyle='--', linewidth=1.4, alpha=0.9, label='TPS')
             if tps_tol_val is not None:

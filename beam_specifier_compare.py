@@ -462,10 +462,10 @@ _known_raw_detectors = set()  # populated from runs
 # Default Pion corrections (multiplicative) per canonical detector / energy.
 # Blank energies = 1.0 (no correction). FFF beams only — X beams have negligible Pion.
 _pion_corrections = {
-    "CC 04":    {"6FFF": 1.000, "8FFF": 0.998, "10FFF": 0.998},
-    "CC 13":    {"6FFF": 0.994, "8FFF": 0.989, "10FFF": 0.986},
-    "TN 31010": {"6FFF": 0.9985, "8FFF": 0.997, "10FFF": 0.996},
-    "TN 31021": {"6FFF": 0.998,  "8FFF": 0.996, "10FFF": 0.995},
+    "CC 04":    {"6X": 1.0, "10X": 1.0, "15X": 1.0, "6FFF": 1.000, "8FFF": 0.998, "10FFF": 0.998},
+    "CC 13":    {"6X": 1.0, "10X": 1.0, "15X": 1.0, "6FFF": 0.995, "8FFF": 0.992, "10FFF": 0.990},
+    "TN 31010": {"6X": 1.0, "10X": 1.0, "15X": 1.0, "6FFF": 0.999, "8FFF": 0.998, "10FFF": 0.997},
+    "TN 31021": {"6X": 1.0, "10X": 1.0, "15X": 1.0, "6FFF": 0.998, "8FFF": 0.997, "10FFF": 0.996},
 }
 
 # Alias map pre-populated with common detector name variants → canonical name.
@@ -1489,10 +1489,10 @@ def run_compare():
             y_range.append(spec_val)
             if tol_val is not None:
                 y_range.extend([spec_val + tol_val, spec_val - tol_val])
-            if spec_corr is not None:
-                y_range.append(spec_corr)
-                if tol_val is not None:
-                    y_range.extend([spec_corr + tol_val, spec_corr - tol_val])
+        if spec_corr is not None:
+            y_range.append(spec_corr)
+            if tol_val is not None:
+                y_range.extend([spec_corr + tol_val, spec_corr - tol_val])
         if tps_val is not None:
             y_range.append(tps_val)
             if tps_tol_val is not None:
@@ -1508,12 +1508,12 @@ def run_compare():
             if tol_val is not None:
                 ax.axhline(spec_val + tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8, label='Tol')
                 ax.axhline(spec_val - tol_val, color='red', linestyle='--', linewidth=1.0, alpha=0.8)
-            if spec_corr is not None:
-                ax.axhline(spec_corr, color='green', linestyle='--', linewidth=1.2, alpha=0.8,
-                           label='Spec (CC13 pion)')
-                if tol_val is not None:
-                    ax.axhline(spec_corr + tol_val, color='red', linestyle=':', linewidth=1.0, alpha=0.8)
-                    ax.axhline(spec_corr - tol_val, color='red', linestyle=':', linewidth=1.0, alpha=0.8)
+        if spec_corr is not None:
+            ax.axhline(spec_corr, color='green', linestyle='--', linewidth=1.2, alpha=0.8,
+                       label='Spec (CC13 pion)')
+            if tol_val is not None:
+                ax.axhline(spec_corr + tol_val, color='red', linestyle=':', linewidth=1.0, alpha=0.8)
+                ax.axhline(spec_corr - tol_val, color='red', linestyle=':', linewidth=1.0, alpha=0.8)
         if tps_val is not None:
             ax.axhline(tps_val, color='steelblue', linestyle='--', linewidth=1.4, alpha=0.9, label='TPS')
             if tps_tol_val is not None:

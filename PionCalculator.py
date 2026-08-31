@@ -8,6 +8,7 @@ import os, sys, subprocess
 
 last_df = None
 last_meta = None
+curves_summary = []
 
 # Cache for parsed groups and labels
 last_groups = None                # dict: key(tuple)-> {voltage: [arrays]}
@@ -414,6 +415,7 @@ def plot_pion():
 
     print(f"Plotting {len(chosen_keys)} selected groups out of {len(groups)}.")
 
+    global curves_summary
     rows = []
     curves_summary = []
 
@@ -716,6 +718,86 @@ def plot_pion():
             vals_fmt = sorted({ str(v) if v not in (None,"") else "?" for v in vals })
         last_meta[facet_names.get(facet, facet+"s")] = ", ".join(vals_fmt)
 
+def show_cf_report():
+    global curves_summary
+    if not curves_summary:
+        print("Plot Pion first to generate data.")
+        return
+    try:
+        depth = float(report_depth_var.get())
+    except ValueError:
+        print("Invalid depth value.")
+        return
+
+    report_rows = []
+    for item in curves_summary:
+        x   = item["x"]
+        y   = item["mean"]
+        err = item["yerr"]
+        lbl = item["label"]
+        en  = item.get("energy", "")
+
+        if depth < float(x.min()) or depth > float(x.max()):
+            cf_val = lo_val = hi_val = None
+        else:
+            cf_val = float(np.interp(depth, x, y))
+            if err is not None:
+                err_at_d = float(np.interp(depth, x, err if err.ndim == 1 else err[1]))
+                lo_val = cf_val - err_at_d
+                hi_val = cf_val + err_at_d
+            else:
+                lo_val = hi_val = None
+        report_rows.append({"Label": lbl, "Energy": en or "", "CF": cf_val,
+                             "Lower (−2σ)": lo_val, "Upper (+2σ)": hi_val})
+
+    win = tk.Toplevel(root)
+    win.title(f"CF Report at {depth:.2f} cm")
+    win.transient(root)
+
+    cols = ["Label", "Energy", "CF", "Lower (−2σ)", "Upper (+2σ)"]
+    tree = ttk.Treeview(win, columns=cols, show="headings", height=min(len(report_rows) + 1, 18))
+    tree.heading("Label",       text="Group")
+    tree.heading("Energy",      text="Energy")
+    tree.heading("CF",          text=f"CF @ {depth:.2f} cm")
+    tree.heading("Lower (−2σ)", text="Lower (−2σ)")
+    tree.heading("Upper (+2σ)", text="Upper (+2σ)")
+    tree.column("Label",       width=320, anchor="w")
+    tree.column("Energy",      width=80,  anchor="center")
+    tree.column("CF",          width=100, anchor="center")
+    tree.column("Lower (−2σ)", width=110, anchor="center")
+    tree.column("Upper (+2σ)", width=110, anchor="center")
+
+    for r in report_rows:
+        cf_s  = f"{r['CF']:.3f}"          if r['CF']          is not None else "out of range"
+        lo_s  = f"{r['Lower (−2σ)']:.3f}" if r['Lower (−2σ)'] is not None else "—"
+        hi_s  = f"{r['Upper (+2σ)']:.3f}" if r['Upper (+2σ)'] is not None else "—"
+        tree.insert("", "end", values=(r["Label"], r["Energy"], cf_s, lo_s, hi_s))
+
+    sb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=sb.set)
+    tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=(10, 0))
+    sb.grid(row=0, column=1, sticky="ns", padx=(0, 10), pady=(10, 0))
+    win.rowconfigure(0, weight=1)
+    win.columnconfigure(0, weight=1)
+
+    def copy_to_clipboard():
+        header = "\t".join(["Group", "Energy", f"CF @ {depth:.2f} cm", "Lower (-2σ)", "Upper (+2σ)"])
+        lines = [header]
+        for r in report_rows:
+            cf_s = f"{r['CF']:.3f}"          if r['CF']          is not None else "out of range"
+            lo_s = f"{r['Lower (−2σ)']:.3f}" if r['Lower (−2σ)'] is not None else ""
+            hi_s = f"{r['Upper (+2σ)']:.3f}" if r['Upper (+2σ)'] is not None else ""
+            lines.append(f"{r['Label']}\t{r['Energy']}\t{cf_s}\t{lo_s}\t{hi_s}")
+        win.clipboard_clear()
+        win.clipboard_append("\n".join(lines))
+        print(f"CF report ({len(report_rows)} rows) copied to clipboard.")
+
+    btn_frame = ttk.Frame(win)
+    btn_frame.grid(row=1, column=0, columnspan=2, pady=8, sticky="e", padx=10)
+    ttk.Button(btn_frame, text="Copy to Clipboard", command=copy_to_clipboard).pack(side="right", padx=5)
+    ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side="right")
+
+
 def export_excel():
     if last_df is None:
         print("Run Plot Pion first to generate results.")
@@ -805,4 +887,12 @@ ttk.Button(action_frame, text="Export Excel", command=export_excel).pack(side="l
 ttk.Button(action_frame, text="Grouping…", command=open_grouping_dialog).pack(side="left", padx=5)
 only_beyond_dmax_var = tk.BooleanVar(value=False)
 ttk.Checkbutton(action_frame, text="Beyond dmax only", variable=only_beyond_dmax_var).pack(side="left", padx=12)
+
+report_frame = ttk.Frame(root, padding=(10, 0, 10, 10))
+report_frame.grid(row=3, column=0, sticky="ew")
+ttk.Label(report_frame, text="Report depth (cm):").pack(side="left")
+report_depth_var = tk.StringVar(value="10.0")
+ttk.Entry(report_frame, textvariable=report_depth_var, width=7).pack(side="left", padx=5)
+ttk.Button(report_frame, text="CF Report", command=show_cf_report).pack(side="left", padx=5)
+
 root.mainloop()

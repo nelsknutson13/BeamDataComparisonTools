@@ -5,6 +5,7 @@ from tkinter import filedialog, ttk
 import matplotlib.pyplot as plt
 import pandas as pd
 import os, sys, subprocess
+from scipy.stats import t as t_dist
 
 last_df = None
 last_meta = None
@@ -18,7 +19,8 @@ last_label_map = {}               # label -> key
 # Facets the UI can group by (only ones we parse today)
 available_facets = [
     "Energy", "Detector", "SSD_cm", "FieldSize_cm",
-    "NominalDoseRate_MUmin", "Detector_SN", "Linac", "ScanType", "ProfileDepth_cm"
+    "NominalDoseRate_MUmin", "Detector_SN", "Linac", "ScanType", "ProfileDepth_cm",
+    "HVPair",
 ]
 
 group_facets = ["Energy", "Detector", "SSD_cm", "FieldSize_cm"]  # default selection (leave MU/min out)
@@ -46,8 +48,13 @@ def _dmax_for_energy(energy_label):
 # ------------------------------
 # Legend: click to toggle lines
 # ------------------------------
+_fig1 = None
+_fig2 = None
+
 def _attach_click_legend(fig, lines, labels):
-    leg = fig.axes[0].legend(lines, labels)
+    ax = fig.axes[0]
+    short_labels = [lbl if len(lbl) <= 55 else lbl[:52] + "…" for lbl in labels]
+    leg = ax.legend(lines, short_labels, fontsize=9, loc='upper right', framealpha=0.85)
     lined = {}
     for legline, origline in zip(leg.get_lines(), lines):
         legline.set_picker(True)
@@ -64,6 +71,20 @@ def _attach_click_legend(fig, lines, labels):
         fig.canvas.draw()
 
     fig.canvas.mpl_connect("pick_event", on_pick)
+
+# Strip noise from detector names
+_ROLE_SUFFIX = re.compile(r'\s+(?:Field|Reference|Ref|Monitor|Det)\s*$', re.IGNORECASE)
+_DEMO_WORD   = re.compile(r'\bDemo\b\s*', re.IGNORECASE)
+_PAREN_NUM   = re.compile(r'\s*\(\d+\)\s*$')
+_LETTER_SUF  = re.compile(r'\s*-\s*[A-Z]\s*$', re.IGNORECASE)
+
+def _clean_det_name(name):
+    name = (name or '').strip()
+    name = _DEMO_WORD.sub('', name)
+    name = _PAREN_NUM.sub('', name)
+    name = _LETTER_SUF.sub('', name)
+    name = _ROLE_SUFFIX.sub('', name)
+    return name.strip()
 
 # ------------------------------
 # Parsing helpers
@@ -184,29 +205,68 @@ def _get_facet(key, facet):
     except ValueError:
         return None
 
-def _group_label(key):
-    parts = []
-    for facet, val in zip(group_facets, key):
-        if facet == "SSD_cm":
-            txt = "?" if val is None or not np.isfinite(val) else f"{val:g} cm"
-            parts.append(f"SSD={txt}")
-        elif facet == "FieldSize_cm":
-            txt = "?" if val is None or not np.isfinite(val) else f"{val:g} cm"
-            parts.append(f"FS={txt}")
-        elif facet == "NominalDoseRate_MUmin":
-            txt = "?" if val is None else f"{int(val)} MU/min"
-            parts.append(f"Nominal={txt}")
-        elif facet == "Detector_SN":
-            parts.append(f"SN={val if val not in (None,'') else '?'}")
-        elif facet == "Linac":
-            parts.append(f"LINAC={val if val not in (None,'') else '?'}")
-        elif facet == "ProfileDepth_cm":
-            txt = "?" if val is None or not np.isfinite(val) else f"{val:g} cm"
-            parts.append(f"Depth={txt}")
+def _format_facet_val(facet, val):
+    if facet == "SSD_cm":
+        txt = "?" if val is None or (isinstance(val, float) and not np.isfinite(val)) else f"{val:g} cm"
+        return f"SSD={txt}"
+    elif facet == "FieldSize_cm":
+        txt = "?" if val is None or (isinstance(val, float) and not np.isfinite(val)) else f"{val:g} cm"
+        return f"FS={txt}"
+    elif facet == "NominalDoseRate_MUmin":
+        txt = "?" if val is None else f"{int(val)} MU/min"
+        return f"Nominal={txt}"
+    elif facet == "Detector_SN":
+        return f"SN={val if val not in (None, '') else '?'}"
+    elif facet == "Linac":
+        return f"LINAC={val if val not in (None, '') else '?'}"
+    elif facet == "ProfileDepth_cm":
+        txt = "?" if val is None or (isinstance(val, float) and not np.isfinite(val)) else f"{val:g} cm"
+        return f"Depth={txt}"
+    elif facet == "HVPair":
+        return val if val not in (None, "") else "?"
+    else:
+        return str(val) if val not in (None, "") else "?"
 
+def _group_label(key):
+    return " — ".join(_format_facet_val(f, v) for f, v in zip(group_facets, key))
+
+def _split_common_varying(keys):
+    """Return (common_str, {key: short_label}) splitting out facets constant across all keys."""
+    if not keys:
+        return "", {}
+    n = len(group_facets)
+    varying = [i for i in range(n) if len({k[i] for k in keys}) > 1]
+    ref = keys[0]
+    common_str = " — ".join(
+        _format_facet_val(group_facets[i], ref[i]) for i in range(n) if i not in varying
+    )
+    per_key = {
+        key: " — ".join(_format_facet_val(group_facets[i], key[i]) for i in varying) or "—"
+        for key in keys
+    }
+    return common_str, per_key
+
+def _expand_by_hv_pair(groups, facets):
+    """Split groups by detected HV pair when HVPair is a selected facet."""
+    if "HVPair" not in facets:
+        return groups
+    hv_pos = list(facets).index("HVPair")
+    new_groups = {}
+    for key, by_v in groups.items():
+        uniq_vs = sorted(by_v.keys())
+        hv_pairs = [(v, u) for v in uniq_vs for u in uniq_vs if abs(u - 2*v) <= 1e-6]
+        if not hv_pairs:
+            new_key = key[:hv_pos] + ("?",) + key[hv_pos+1:]
+            new_groups[new_key] = by_v
         else:
-            parts.append(str(val) if val not in (None, "") else "?")
-    return " — ".join(parts)
+            for v_low, v_high in hv_pairs:
+                hv_tag = f"{int(v_high)}/{int(v_low)} V"
+                new_key = key[:hv_pos] + (hv_tag,) + key[hv_pos+1:]
+                new_groups[new_key] = {
+                    v_low:  by_v.get(v_low,  []),
+                    v_high: by_v.get(v_high, []),
+                }
+    return new_groups
 
 def _group_scans(scans, facets):
     groups = {}
@@ -221,14 +281,15 @@ def _group_scans(scans, facets):
 
         meta = {
             "Energy": _energy_label(energy_mv, filt),
-            "Detector": det or "",
+            "Detector": _clean_det_name(det),
             "SSD_cm": ssd,
             "FieldSize_cm": fs_cm,
             "NominalDoseRate_MUmin": nominal_mu_min,
             "Detector_SN": det_sn,
             "Linac": linac,
-            "ScanType": scan_type,            # ← ADD THIS
-            "ProfileDepth_cm": prof_depth_cm, # ← AND THIS
+            "ScanType": scan_type,
+            "ProfileDepth_cm": prof_depth_cm,
+            "HVPair": None,  # placeholder; replaced by _expand_by_hv_pair after grouping
         }
 
 
@@ -345,6 +406,7 @@ def set_group_facets(chosen):
 
     # Regroup data based on chosen facets
     last_groups = _group_scans(scans, group_facets)
+    last_groups = _expand_by_hv_pair(last_groups, group_facets)
     last_group_keys = list(last_groups.keys())
     last_label_map = {_group_label(k): k for k in last_group_keys}
 
@@ -394,6 +456,11 @@ def plot_pion():
         print("No file selected")
         return
 
+    try:
+        em_std = float(em_rel_std_var.get()) / 100.0
+    except (ValueError, AttributeError):
+        em_std = EM_REL_STD
+
     # Ensure groups are parsed (handles manual path entry)
     if last_groups is None:
         set_group_facets(group_facets)  # builds groups + listbox and auto-adds ProfileDepth_cm for profiles
@@ -415,12 +482,31 @@ def plot_pion():
 
     print(f"Plotting {len(chosen_keys)} selected groups out of {len(groups)}.")
 
-    global curves_summary
+    # Determine which facets are constant across all selected groups
+    chosen_key_list = [k for k in last_group_keys if k in chosen_keys]
+    common_str, varying_labels = _split_common_varying(chosen_key_list)
+
+    # Pre-scan HV pairs (only when HVPair is not already a grouping facet)
+    hv_faceted = "HVPair" in group_facets
+    all_hv_tags = set()
+    if not hv_faceted:
+        for key in chosen_key_list:
+            by_v_pre = groups[key]
+            uvs = sorted(by_v_pre.keys())
+            for v, u in [(v, u) for v in uvs for u in uvs if abs(u - 2*v) <= 1e-6]:
+                all_hv_tags.add(f"{int(u)}/{int(v)} V")
+    hv_uniform = (not hv_faceted) and len(all_hv_tags) == 1
+
+    global curves_summary, _fig1, _fig2
+    if _fig1 is not None and plt.fignum_exists(_fig1.number):
+        plt.close(_fig1)
+    if _fig2 is not None and plt.fignum_exists(_fig2.number):
+        plt.close(_fig2)
     rows = []
     curves_summary = []
 
     # Figure 1: Pion vs Depth
-    fig1 = plt.figure(figsize=(7.6, 5.2))
+    fig1 = plt.figure(figsize=(10.5, 5.5))
     ax1 = fig1.add_subplot(111)
     main_lines_fig1, labels_fig1 = [], []
 
@@ -434,10 +520,17 @@ def plot_pion():
         by_v = groups[key]
 
         uniq_vs = sorted(by_v.keys())
-        hv_pairs = [(v, u) for v in uniq_vs for u in uniq_vs if abs(u - 2*v) <= 1e-6]
+        if hv_faceted:
+            hv_str = _get_facet(key, "HVPair") or ""
+            try:
+                vh_s, vl_s = hv_str.replace(" V", "").split("/")
+                hv_pairs = [(float(vl_s), float(vh_s))]
+            except Exception:
+                hv_pairs = []
+        else:
+            hv_pairs = [(v, u) for v in uniq_vs for u in uniq_vs if abs(u - 2*v) <= 1e-6]
         if not hv_pairs:
             print(f"Skipping {key} — no HV pairs found: {list(by_v.keys())}")
-
             continue
 
         for (v_low, v_high) in hv_pairs:
@@ -497,14 +590,18 @@ def plot_pion():
             depths   = base_grid
             pion_arr = np.vstack(pion_list)
 
-            # Label from facets + HV tag
-            base_lbl = _group_label(key)
+            # Label: only varying facets; HV tag only if not already captured as a facet
+            base_lbl = varying_labels.get(key, _group_label(key))
             hv_tag   = f"{int(v_high)}/{int(v_low)} V"
-            label    = f"{base_lbl}, {hv_tag}"
+            if hv_faceted or hv_uniform:
+                label = base_lbl or hv_tag
+            else:
+                label = f"{base_lbl}, {hv_tag}" if base_lbl else hv_tag
 
             if pion_arr.shape[0] == 1:
                 y = pion_arr[0]
-                y = np.maximum(y, 1.0)  # clamp
+                if clamp_pion_var.get():
+                    y = np.maximum(y, 1.0)
                 # HV-only uncertainty (one-sigma), then plot 95% (~±2σ)
                 beta = v_high / v_low
                 mL = aligned_lows[0][:,1]
@@ -514,7 +611,7 @@ def plot_pion():
                 u_beta_pi = _u_pion_from_beta(R0, beta)  # one-sigma from HV spec
 
                 # ADD: charge-ratio term from Mh,Ml (one-sigma)
-                u_R   = R0 * np.sqrt(EM_REL_STD**2 + EM_REL_STD**2)
+                u_R   = R0 * np.sqrt(em_std**2 + em_std**2)
                 den  = np.where(np.abs(beta - R0) < 1e-12, np.nan, np.abs(beta - R0))  # guard R≈s
                 dP_dR = (beta - 1.0) / (den**2)  # = (s-1)/(s-R)^2
                 u_pion_from_R = np.abs(dP_dR) * u_R
@@ -536,7 +633,8 @@ def plot_pion():
 
             else:
                 mean = pion_arr.mean(axis=0)
-                mean = np.maximum(mean, 1.0)  # clamp
+                if clamp_pion_var.get():
+                    mean = np.maximum(mean, 1.0)
                 std  = pion_arr.std(axis=0, ddof=1)  # replicate scatter (one-sigma)
             
                 # HV contribution, evaluated on mean charges at each depth
@@ -550,15 +648,17 @@ def plot_pion():
                     R0 = np.divide(mH_mean, mL_mean, out=np.full_like(mH_mean, np.nan), where=(mL_mean!=0))
                 u_beta_pi = _u_pion_from_beta(R0, beta)  # one-sigma from HV spec
 
-                # ADD: charge-ratio term from Mh,Ml (one-sigma)
-                u_R   = R0 * np.sqrt(EM_REL_STD**2 + EM_REL_STD**2)
-                den  = np.where(np.abs(beta - R0) < 1e-12, np.nan, np.abs(beta - R0))
-                dP_dR = (beta - 1.0) / (den**2)  # = (s-1)/(s-R)^2
+                # 95% interval: max(t×SEM, spec-based floor) — no quadrature addition
+                u_R = R0 * np.sqrt(em_std**2 + em_std**2)
+                den = np.where(np.abs(beta - R0) < 1e-12, np.nan, np.abs(beta - R0))
+                dP_dR = (beta - 1.0) / (den**2)
                 u_pion_from_R = np.abs(dP_dR) * u_R
-                
-                # Combine uncertainties in quadrature; plot 95% (~±2σ)
-                u_total = np.sqrt(std**2 + u_beta_pi**2 + u_pion_from_R**2)
-                yerr = 2.0 * u_total
+                yerr_spec = 2.0 * np.sqrt(u_beta_pi**2 + u_pion_from_R**2)
+
+                n_reps = pion_arr.shape[0]
+                sem = std / np.sqrt(n_reps)
+                t95 = t_dist.ppf(0.975, df=n_reps - 1) if n_reps > 1 else 2.0
+                yerr = np.maximum(t95 * sem, yerr_spec)
 
             
                 cont = ax1.errorbar(depths, mean, yerr=yerr, fmt='-o', capsize=3, label=label)
@@ -579,7 +679,7 @@ def plot_pion():
                 d_aln  = aligned_lows[pi][:,0]
                 yL_aln = aligned_lows[pi][:,1]
                 yH_aln = aligned_highs[pi][:,1]
-                pion_k = np.maximum(pion_arr[pi], 1.0)  # clamp
+                pion_k = np.maximum(pion_arr[pi], 1.0) if clamp_pion_var.get() else pion_arr[pi]
                 for j, depth in enumerate(d_aln):
                     rows.append({"Energy": energy_label,"Detector": det_name,"SSD_cm": ssd_cm,
                                  "HV_low_V": float(v_low),"HV_high_V": float(v_high),"Pair": pi+1,
@@ -601,28 +701,32 @@ def plot_pion():
     if len(first_key) > len(group_facets):
         scan_type = str(first_key[-1]).upper()
     
+    subtitle_parts = ([common_str] if common_str else []) + ([next(iter(all_hv_tags))] if hv_uniform else [])
+    subtitle = " — ".join(subtitle_parts)
+
     if "PROFILE" in scan_type:
         ax1.set_xlabel("Off-axis Position [cm]")
-        ax1.set_title("Pion vs Off-axis Position")
+        ax1.set_title(f"Pion vs Off-axis Position\n{subtitle}" if subtitle else "Pion vs Off-axis Position", fontsize=10)
     elif scan_type == "PDD":
         ax1.set_xlabel("Depth [cm]")
-        ax1.set_title("Pion vs Depth")
+        ax1.set_title(f"Pion vs Depth\n{subtitle}" if subtitle else "Pion vs Depth", fontsize=10)
     else:
         ax1.set_xlabel("Depth / Off-axis Position [cm]")
-        ax1.set_title("Pion vs Depth / Off-axis Position")
+        ax1.set_title(f"Pion vs Depth / Off-axis Position\n{subtitle}" if subtitle else "Pion vs Depth / Off-axis Position", fontsize=10)
 
     
     ax1.set_ylabel("Pion")
     ax1.grid(True, alpha=0.3)
     ax1.set_xlim(0,30)
     ax1.set_ylim(.98, 1.06)
+    _fig1 = fig1
     _attach_click_legend(fig1, main_lines_fig1, labels_fig1)
     fig1.tight_layout()
 
 
 
     # Figure 2: CF (normalized differently for PDD vs Profile)
-    fig2 = plt.figure(figsize=(7.6, 5.2))
+    fig2 = plt.figure(figsize=(10.5, 5.5))
     ax2 = fig2.add_subplot(111)
     main_lines_fig2, labels_fig2 = [], []
 
@@ -651,21 +755,29 @@ def plot_pion():
             x0 = float(min(max(0.0, np.nanmin(x)), np.nanmax(x)))
             denom = np.interp(x0, x, y)
         else:
-            # PDD: normalize at fixed depth
-            d = NORM_DEPTH_CM.get(en)
-            if d is None:
-                print(f"[CF norm] No depth found for energy '{en}'. Skipping.")
-                continue
-            d = float(min(max(d, float(np.nanmin(x))), float(np.nanmax(x))))
-            denom = np.interp(d, x, y)
+            if cf_norm_var.get() == "peak":
+                # Normalize at measured pion peak
+                peak_idx = int(np.argmax(y))
+                denom = y[peak_idx]
+            else:
+                # Normalize at fixed depth per energy
+                d = NORM_DEPTH_CM.get(en)
+                if d is None:
+                    print(f"[CF norm] No depth found for energy '{en}'. Skipping.")
+                    continue
+                d = float(min(max(d, float(np.nanmin(x))), float(np.nanmax(x))))
+                denom = np.interp(d, x, y)
 
         if not np.isfinite(denom) or denom == 0:
             print(f"[CF norm] Bad normalization point for '{lbl}'. Skipping.")
             continue
 
         yn = y / denom
-        if err is not None:
-            err_n = err / denom
+        err_n = (err / denom) if err is not None else None
+        item["cf_mean"] = yn
+        item["cf_yerr"] = err_n
+
+        if err_n is not None:
             cont = ax2.errorbar(x, yn, yerr=err_n, fmt='-o', capsize=3, label=lbl)
             mainline = cont.lines[0] if hasattr(cont, "lines") else cont[0]
         else:
@@ -681,15 +793,16 @@ def plot_pion():
 
     if "PROFILE" in st0:
         ax2.set_xlabel("Position [cm]")
-        ax2.set_title("Profile CF (normalized at CAX)")
+        ax2.set_title(f"Profile CF (normalized at CAX)\n{subtitle}" if subtitle else "Profile CF (normalized at CAX)", fontsize=10)
     else:
         ax2.set_xlabel("Depth [cm]")
-        ax2.set_title("PDD CF (normalized at fixed depth per energy)")
+        ax2.set_title(f"PDD CF (normalized at fixed depth per energy)\n{subtitle}" if subtitle else "PDD CF (normalized at fixed depth per energy)", fontsize=10)
 
     ax2.set_ylabel("CF (normalized)")
     ax2.set_xlim(0, 30)
     ax2.set_ylim(.95, 1.02)
     ax2.grid(True, alpha=0.3)
+    _fig2 = fig2
     _attach_click_legend(fig2, main_lines_fig2, labels_fig2)
     fig2.tight_layout()
 
@@ -732,8 +845,8 @@ def show_cf_report():
     report_rows = []
     for item in curves_summary:
         x   = item["x"]
-        y   = item["mean"]
-        err = item["yerr"]
+        y   = item.get("cf_mean", item["mean"])
+        err = item.get("cf_yerr", item["yerr"])
         lbl = item["label"]
         en  = item.get("energy", "")
 
@@ -768,9 +881,9 @@ def show_cf_report():
     tree.column("Upper (+2σ)", width=110, anchor="center")
 
     for r in report_rows:
-        cf_s  = f"{r['CF']:.3f}"          if r['CF']          is not None else "out of range"
-        lo_s  = f"{r['Lower (−2σ)']:.3f}" if r['Lower (−2σ)'] is not None else "—"
-        hi_s  = f"{r['Upper (+2σ)']:.3f}" if r['Upper (+2σ)'] is not None else "—"
+        cf_s  = f"{r['CF']:.5f}"          if r['CF']          is not None else "out of range"
+        lo_s  = f"{r['Lower (−2σ)']:.5f}" if r['Lower (−2σ)'] is not None else "—"
+        hi_s  = f"{r['Upper (+2σ)']:.5f}" if r['Upper (+2σ)'] is not None else "—"
         tree.insert("", "end", values=(r["Label"], r["Energy"], cf_s, lo_s, hi_s))
 
     sb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
@@ -784,9 +897,9 @@ def show_cf_report():
         header = "\t".join(["Group", "Energy", f"CF @ {depth:.2f} cm", "Lower (-2σ)", "Upper (+2σ)"])
         lines = [header]
         for r in report_rows:
-            cf_s = f"{r['CF']:.3f}"          if r['CF']          is not None else "out of range"
-            lo_s = f"{r['Lower (−2σ)']:.3f}" if r['Lower (−2σ)'] is not None else ""
-            hi_s = f"{r['Upper (+2σ)']:.3f}" if r['Upper (+2σ)'] is not None else ""
+            cf_s = f"{r['CF']:.5f}"          if r['CF']          is not None else "out of range"
+            lo_s = f"{r['Lower (−2σ)']:.5f}" if r['Lower (−2σ)'] is not None else ""
+            hi_s = f"{r['Upper (+2σ)']:.5f}" if r['Upper (+2σ)'] is not None else ""
             lines.append(f"{r['Label']}\t{r['Energy']}\t{cf_s}\t{lo_s}\t{hi_s}")
         win.clipboard_clear()
         win.clipboard_append("\n".join(lines))
@@ -887,6 +1000,8 @@ ttk.Button(action_frame, text="Export Excel", command=export_excel).pack(side="l
 ttk.Button(action_frame, text="Grouping…", command=open_grouping_dialog).pack(side="left", padx=5)
 only_beyond_dmax_var = tk.BooleanVar(value=False)
 ttk.Checkbutton(action_frame, text="Beyond dmax only", variable=only_beyond_dmax_var).pack(side="left", padx=12)
+clamp_pion_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(action_frame, text="Set Pion <1 = 1", variable=clamp_pion_var).pack(side="left", padx=4)
 
 report_frame = ttk.Frame(root, padding=(10, 0, 10, 10))
 report_frame.grid(row=3, column=0, sticky="ew")
@@ -894,5 +1009,16 @@ ttk.Label(report_frame, text="Report depth (cm):").pack(side="left")
 report_depth_var = tk.StringVar(value="10.0")
 ttk.Entry(report_frame, textvariable=report_depth_var, width=7).pack(side="left", padx=5)
 ttk.Button(report_frame, text="CF Report", command=show_cf_report).pack(side="left", padx=5)
+
+ttk.Separator(report_frame, orient="vertical").pack(side="left", fill="y", padx=10)
+ttk.Label(report_frame, text="CF norm:").pack(side="left")
+cf_norm_var = tk.StringVar(value="fixed")
+ttk.Radiobutton(report_frame, text="Fixed depth", variable=cf_norm_var, value="fixed").pack(side="left", padx=4)
+ttk.Radiobutton(report_frame, text="Peak pion", variable=cf_norm_var, value="peak").pack(side="left", padx=4)
+
+ttk.Separator(report_frame, orient="vertical").pack(side="left", fill="y", padx=10)
+ttk.Label(report_frame, text="EM rel std (%):").pack(side="left")
+em_rel_std_var = tk.StringVar(value="0.05")
+ttk.Entry(report_frame, textvariable=em_rel_std_var, width=6).pack(side="left", padx=5)
 
 root.mainloop()

@@ -6,7 +6,7 @@ import pandas as pd
 import os, sys, subprocess
 
 from mcc_utils import (
-    available_facets,
+    available_facets, EM_REL_STD, HV_REL_STD,
     parse_mcc_path, _group_scans,
     _group_label, _get_facet, _split_common_varying,
     align_all_voltages, jaffe_fit, jaffe_pion,
@@ -38,6 +38,7 @@ _fig_jaffe = None
 _fig_pion  = None
 _fig_rsq   = None
 _fig_dpp   = None
+_fig_boag  = None
 
 # ── Legend helper (shared style) ───────────────────────────────────────────────
 def _attach_click_legend(fig, lines, labels):
@@ -118,7 +119,7 @@ def browse_folder():
 
 # ── Core analysis ──────────────────────────────────────────────────────────────
 def run_jaffe():
-    global _fig_jaffe, _fig_pion, _fig_rsq, _fig_dpp, last_results
+    global _fig_jaffe, _fig_pion, _fig_rsq, _fig_dpp, _fig_boag, last_results
 
     if last_groups is None:
         set_group_facets(group_facets)
@@ -137,7 +138,11 @@ def run_jaffe():
         print("Invalid diagnostic depths — enter one or more comma-separated values."); return
 
     ref_dpp_str = ref_dpp_var.get().strip()
-    ref_dpp     = float(ref_dpp_str) if ref_dpp_str else None   # Gy/pulse; None = skip DPP figure
+    ref_dpp     = float(ref_dpp_str) if ref_dpp_str else None   # Gy/pulse at cal_ssd; None = skip DPP figure
+    try:
+        cal_ssd = float(cal_ssd_var.get())
+    except ValueError:
+        cal_ssd = 100.0
     try:
         ref_depth = float(ref_depth_var.get())
     except ValueError:
@@ -160,7 +165,7 @@ def run_jaffe():
 
     last_results = {}
 
-    for fig in (_fig_jaffe, _fig_pion, _fig_rsq, _fig_dpp):
+    for fig in (_fig_jaffe, _fig_pion, _fig_rsq, _fig_dpp, _fig_boag):
         if fig is not None and plt.fignum_exists(fig.number):
             plt.close(fig)
 
@@ -172,11 +177,15 @@ def run_jaffe():
     ax_r  = fig_r.add_subplot(111)
     fig_d = plt.figure(figsize=(10.5, 4.5)) if ref_dpp else None
     ax_d  = fig_d.add_subplot(111) if fig_d else None
+    fig_b = plt.figure(figsize=(7, 5)) if ref_dpp else None
+    ax_b  = fig_b.add_subplot(111) if fig_b else None
 
     lines_j, lbls_j = [], []
     lines_p, lbls_p = [], []
     lines_r, lbls_r = [], []
     lines_d, lbls_d = [], []
+    lines_b, lbls_b = [], []
+    boag_pts = []   # (D_p_Gy, b, label) — collected for α_Boag extraction
 
     for key in last_group_keys:
         if key not in chosen_keys:
@@ -184,7 +193,7 @@ def run_jaffe():
         by_v  = last_groups[key]
         label = varying_labels.get(key, _group_label(key, group_facets))
 
-        depths, aligned = align_all_voltages(by_v)
+        depths, aligned, aligned_sem = align_all_voltages(by_v)
         if depths is None or len(aligned) < 2:
             print(f"[skip] {label}: need ≥2 voltages, got {len(aligned)}."); continue
 
@@ -196,16 +205,42 @@ def run_jaffe():
 
         dpp = None
         if ref_dpp is not None:
-            ref_idx    = int(np.argmin(np.abs(depths - ref_depth)))
-            bM_ref     = b_Minf[ref_idx]
-            if np.isfinite(bM_ref) and bM_ref != 0:
-                dpp = ref_dpp * b_Minf / bM_ref   # Gy/pulse at each depth
+            # apply inverse-square correction: BGM is at cal_ssd, scan may differ
+            energy_key = _get_facet(key, "Energy", group_facets) or ""
+            dmax_bgm   = BGM_DPP.get(energy_key, (None, ref_depth))[1]
+            try:
+                ssd_scan = float(_get_facet(key, "SSD_cm", group_facets) or cal_ssd)
+            except (TypeError, ValueError):
+                ssd_scan = cal_ssd
+            isf = ((cal_ssd + dmax_bgm) / (ssd_scan + dmax_bgm)) ** 2
+            ref_dpp_corrected = ref_dpp * isf
+            print(f"  [{label}] ISF: cal_SSD={cal_ssd}, scan_SSD={ssd_scan:.1f}, "
+                  f"dmax={dmax_bgm} → ×{isf:.4f}, "
+                  f"ref_DPP {ref_dpp*1e4:.3f}→{ref_dpp_corrected*1e4:.3f} ×10⁻⁴ Gy/pulse")
+            # Use highest-voltage PDD as dose proxy (least recombination)
+            # DPP(depth) = DPP_ref × M(depth,V_max) / M(ref_depth,V_max)
+            v_max     = max(aligned.keys())
+            m_vmax    = aligned[v_max]                        # charge at all depths, highest V
+            ref_idx   = int(np.argmin(np.abs(depths - ref_depth)))
+            m_ref_val = m_vmax[ref_idx]
+            if np.isfinite(m_ref_val) and m_ref_val != 0:
+                dpp = ref_dpp_corrected * m_vmax / m_ref_val  # Gy/pulse at each depth
 
         last_results[key] = {
             "depths": depths, "M_inf": M_inf, "alpha": alpha,
             "R_sq": R_sq, "pion": pion, "dpp": dpp, "label": label,
             "aligned": aligned,
         }
+
+        # ── collect (D_p, b) for α_Boag extraction figure (R²≥0.99 only) ──────
+        if dpp is not None:
+            for i_d in range(len(depths)):
+                b_val  = alpha[i_d]
+                dp_val = dpp[i_d]
+                r2_val = R_sq[i_d]
+                if (np.isfinite(b_val) and np.isfinite(dp_val) and dp_val > 0
+                        and np.isfinite(r2_val) and r2_val >= 0.99):
+                    boag_pts.append((dp_val, b_val, label))
 
         # ── Jaffe diagnostic: one line per selected depth, normalized to lowest V ─
         voltages = np.array(sorted(aligned.keys()))
@@ -228,14 +263,32 @@ def run_jaffe():
                 d_lbl = f"{label} — {dpp_str}" if multi_group else dpp_str
             else:
                 d_lbl = f"{label} @ {actual_d:.1f} cm" if multi_group else f"{actual_d:.1f} cm"
-            sc = ax_j.scatter(inv_V[ok], inv_M_n[ok], s=50, zorder=3, label=d_lbl)
-            color = sc.get_facecolor()[0]
+
+            # ── uncertainty propagation ───────────────────────────────────────
+            # σ(M) = max(SEM_from_repeats, EM_REL_STD × M)  per voltage
+            M_raw   = np.array([aligned[v][d_idx] for v in voltages])
+            sem_M   = np.array([aligned_sem[v][d_idx] for v in voltages])
+            sigma_M = np.maximum(sem_M, EM_REL_STD * M_raw)
+            # normalization point
+            norm_v_idx  = int(np.argmin(np.abs(voltages - v_low)))
+            sigma_M_nrm = sigma_M[norm_v_idx]
+            M_nrm       = M_raw[norm_v_idx]
+            # propagate: σ(y_i)/y_i = sqrt((σ_Mi/M_i)² + (σ_Mnorm/M_norm)²)
+            sigma_y = inv_M_n * np.sqrt((sigma_M / M_raw)**2 + (sigma_M_nrm / M_nrm)**2)
+            # x-bars from HV spec (tiny but correct)
+            sigma_x = HV_REL_STD * inv_V
+
+            eb = ax_j.errorbar(inv_V[ok], inv_M_n[ok],
+                               yerr=sigma_y[ok], xerr=sigma_x[ok],
+                               fmt='o', markersize=6, capsize=3, linewidth=1,
+                               zorder=3, label=d_lbl)
+            color = eb[0].get_color()
             if ok.sum() >= 2:
                 coeffs = np.polyfit(inv_V[ok], inv_M_n[ok], 1)
                 x_fit  = np.linspace(inv_V[ok].min() * 0.95, inv_V[ok].max() * 1.05, 100)
                 ax_j.plot(x_fit, np.polyval(coeffs, x_fit), color=color,
                           linewidth=1.2, alpha=0.7, linestyle='--')
-            lines_j.append(sc); lbls_j.append(d_lbl)
+            lines_j.append(eb[0]); lbls_j.append(d_lbl)
 
         # ── Pion vs depth ─────────────────────────────────────────────────────
         valid = np.isfinite(pion)
@@ -302,7 +355,41 @@ def run_jaffe():
         _attach_click_legend(fig_d, lines_d, lbls_d)
         fig_d.tight_layout()
 
-    _fig_jaffe, _fig_pion, _fig_rsq, _fig_dpp = fig_j, fig_p, fig_r, fig_d
+    # ── Finish α_Boag extraction: b vs D_p across all depths × groups ────────
+    if fig_b is not None and boag_pts:
+        dp_all = np.array([p[0] for p in boag_pts]) * 1e3   # Gy → mGy
+        b_all  = np.array([p[1] for p in boag_pts])
+        # forced-through-origin OLS: min Σ(b_i - α·Dp_i)²  →  α = Σ(b·Dp)/Σ(Dp²)
+        alpha_boag = np.dot(b_all, dp_all) / np.dot(dp_all, dp_all)
+        # scatter per group
+        groups_b = {}
+        for dp, b, lbl in boag_pts:
+            if lbl not in groups_b:
+                groups_b[lbl] = ([], [])
+            groups_b[lbl][0].append(dp * 1e3)
+            groups_b[lbl][1].append(b)
+        for lbl, (dp_list, b_list) in groups_b.items():
+            line, = ax_b.plot(dp_list, b_list, 'o', markersize=6, alpha=0.8,
+                              linewidth=0, label=lbl)
+            lines_b.append(line); lbls_b.append(lbl)
+        # overlay forced-origin fit line
+        dp_fit = np.linspace(0, dp_all.max() * 1.08, 200)
+        ax_b.plot(dp_fit, alpha_boag * dp_fit, 'k--', linewidth=1.5,
+                  label=f"b = {alpha_boag:.4f}·Dp  (n={len(boag_pts)})")
+        print(f"  α_Boag (forced-origin slope) = {alpha_boag:.5f} V·pulse/mGy  "
+              f"from {len(boag_pts)} depth×group points")
+        ax_b.set_xlabel("Dose per pulse [mGy/pulse]")
+        ax_b.set_ylabel("Jaffé slope  b  [V / charge-unit]")
+        ax_b.set_title("α_Boag Extraction: Jaffé Slope vs Dose per Pulse"
+                       + (f"\n{subtitle}" if subtitle else ""), fontsize=10)
+        ax_b.set_xlim(left=0); ax_b.set_ylim(bottom=0)
+        ax_b.grid(True, alpha=0.3)
+        _attach_click_legend(fig_b, lines_b, lbls_b)
+        fig_b.tight_layout()
+    elif fig_b is not None:
+        plt.close(fig_b); fig_b = None
+
+    _fig_jaffe, _fig_pion, _fig_rsq, _fig_dpp, _fig_boag = fig_j, fig_p, fig_r, fig_d, fig_b
     plt.show()
 
 # ── Export ─────────────────────────────────────────────────────────────────────
@@ -319,13 +406,15 @@ def export_excel():
         lbl    = res["label"]
         depths = res["depths"]
         for i, d in enumerate(depths):
+            dpp_i = float(res["dpp"][i]) if (res["dpp"] is not None and np.isfinite(res["dpp"][i])) else None
             rows.append({
-                "Label":   lbl,
-                "Depth_cm": float(d),
-                "M_inf":   float(res["M_inf"][i])  if np.isfinite(res["M_inf"][i])  else None,
-                "Alpha":   float(res["alpha"][i])   if np.isfinite(res["alpha"][i])  else None,
-                "R_sq":    float(res["R_sq"][i])    if np.isfinite(res["R_sq"][i])   else None,
+                "Label":             lbl,
+                "Depth_cm":          float(d),
+                "M_inf":             float(res["M_inf"][i])  if np.isfinite(res["M_inf"][i])  else None,
+                "b_jaffe_slope":     float(res["alpha"][i])  if np.isfinite(res["alpha"][i])  else None,
+                "R_sq":              float(res["R_sq"][i])   if np.isfinite(res["R_sq"][i])   else None,
                 f"Pion_at_{int(v_op)}V": float(res["pion"][i]) if np.isfinite(res["pion"][i]) else None,
+                "DPP_mGy_pulse":     dpp_i * 1e3 if dpp_i is not None else None,
             })
 
     df = pd.DataFrame(rows)
@@ -406,5 +495,9 @@ ttk.Separator(ref_frame, orient="vertical").pack(side="left", fill="y", padx=10)
 ttk.Label(ref_frame, text="at ref depth (cm):").pack(side="left")
 ref_depth_var = tk.StringVar(value="1.5")
 ttk.Entry(ref_frame, textvariable=ref_depth_var, width=7).pack(side="left", padx=5)
+ttk.Separator(ref_frame, orient="vertical").pack(side="left", fill="y", padx=10)
+ttk.Label(ref_frame, text="Cal SSD (cm):").pack(side="left")
+cal_ssd_var = tk.StringVar(value="100")
+ttk.Entry(ref_frame, textvariable=cal_ssd_var, width=6).pack(side="left", padx=5)
 
 root.mainloop()

@@ -220,7 +220,9 @@ def _align_pair(arr_low, arr_high, tol=1e-4):
 
 def align_all_voltages(by_v):
     """Average repeats per voltage, then align all voltages to a common depth grid.
-    Returns (depths, {voltage: charge_array}) or (None, {}) if insufficient data.
+    Returns (depths, {voltage: charge_array}, {voltage: sem_array})
+    or (None, {}, {}) if insufficient data.
+    SEM is the standard error of the mean across repeats; zero if only one repeat.
     """
     averaged = {}
     for v, arr_list in by_v.items():
@@ -228,23 +230,27 @@ def align_all_voltages(by_v):
             continue
         ref_d = arr_list[0][:,0]
         iref = np.argsort(ref_d); ref_d = ref_d[iref]
-        m = np.nanmean([np.interp(ref_d, np.sort(a[:,0]), a[np.argsort(a[:,0]),1]) for a in arr_list], axis=0)
-        averaged[v] = (ref_d, m)
+        interped = [np.interp(ref_d, np.sort(a[:,0]), a[np.argsort(a[:,0]),1]) for a in arr_list]
+        m = np.nanmean(interped, axis=0)
+        n = len(interped)
+        sem = (np.nanstd(interped, axis=0, ddof=1) / np.sqrt(n)) if n > 1 else np.zeros_like(m)
+        averaged[v] = (ref_d, m, sem)
 
     if len(averaged) < 2:
-        return None, {}
+        return None, {}, {}
 
-    lo = max(d[0]  for d, _ in averaged.values())
-    hi = min(d[-1] for d, _ in averaged.values())
-    step = min((np.median(np.diff(d)) if len(d)>1 else np.inf) for d, _ in averaged.values())
+    lo = max(d[0]  for d, _, _ in averaged.values())
+    hi = min(d[-1] for d, _, _ in averaged.values())
+    step = min((np.median(np.diff(d)) if len(d)>1 else np.inf) for d, _, _ in averaged.values())
     if not np.isfinite(step) or lo >= hi:
-        return None, {}
+        return None, {}, {}
 
     base_d = sorted(averaged.items(), key=lambda kv: np.median(np.diff(kv[1][0])) if len(kv[1][0])>1 else np.inf)[0][1][0]
     base_d = base_d[(base_d >= lo) & (base_d <= hi)]
 
-    aligned = {v: np.interp(base_d, d, m) for v, (d, m) in averaged.items()}
-    return base_d, aligned
+    aligned     = {v: np.interp(base_d, d, m)   for v, (d, m, sem) in averaged.items()}
+    aligned_sem = {v: np.interp(base_d, d, sem) for v, (d, m, sem) in averaged.items()}
+    return base_d, aligned, aligned_sem
 
 # ── Pion math ─────────────────────────────────────────────────────────────────
 def calc_pion(depths_cm, m_low, m_high, v_low, v_high):

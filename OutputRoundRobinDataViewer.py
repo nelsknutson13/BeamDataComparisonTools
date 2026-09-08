@@ -135,7 +135,7 @@ def renormalize_to_reference(long: pd.DataFrame, reference_system: str):
         grp_valid = grp_valid.copy()
         grp_valid["_session_key"] = ref_dates[nearest_idx]
 
-        for _, sgrp in grp_valid.groupby("_session_key"):
+        for sess_date, sgrp in grp_valid.groupby("_session_key"):
             ref_vals = sgrp.loc[sgrp["System"] == ref, "Ratio"].dropna()
             if ref_vals.empty:
                 dropped += len(sgrp)
@@ -148,6 +148,25 @@ def renormalize_to_reference(long: pd.DataFrame, reference_system: str):
             if ref_val == 0 or not np.isfinite(ref_val):
                 dropped += len(sgrp)
                 continue
+            # Warn if the reference value itself is far from 1.0 — a likely data-entry error
+            if abs(ref_val - 1.0) > 0.05:
+                sess_str = pd.Timestamp(sess_date).date() if pd.notna(sess_date) else "?"
+                print(f"[renormalize] WARNING: SN {sn}, {en}, session {sess_str}: "
+                      f"reference '{ref}' value = {ref_val:.4f} ({(ref_val-1)*100:+.2f}%) "
+                      f"— this is >5% from 1.0, check for data-entry error.")
+            # Warn if any non-reference row in this session has a large date gap from the anchor
+            non_ref = sgrp[sgrp["System"] != ref].dropna(subset=["_date"])
+            if not non_ref.empty and pd.notna(sess_date):
+                anchor = pd.Timestamp(sess_date)
+                gaps = (non_ref["_date"] - anchor).dt.days   # signed: positive = after anchor
+                max_gap_days = gaps.abs().max()
+                if max_gap_days > 30:
+                    sess_str = anchor.date()
+                    print(f"[renormalize] NOTE: SN {sn}, {en} — anchor: {ref} on {sess_str}")
+                    for (_, row), gap in zip(non_ref.iterrows(), gaps):
+                        direction = f"+{gap}d" if gap >= 0 else f"{gap}d"
+                        row_date  = row["_date"].date() if pd.notna(row["_date"]) else "?"
+                        print(f"              {row['System']:<38}  {row_date}  ({direction})")
             s = sgrp.copy()
             s["Ratio"] = s["Ratio"] / ref_val
             kept.append(s)
@@ -955,8 +974,8 @@ class App(tk.Tk):
         # Clamp to the actual screen height (minus room for the taskbar/title
         # bar) so the Plot button at the bottom stays reachable on shorter
         # laptop screens instead of being placed off-screen by a fixed 800px.
-        win_h = min(800, self.winfo_screenheight() - 100)
-        self.geometry(f"900x{win_h}+50+20")
+        win_h = min(950, self.winfo_screenheight() - 60)
+        self.geometry(f"900x{win_h}+50+10")
         # Scrollable container: the control panel (3 listboxes + ~20 rows of
         # checkboxes/entries) is taller than many laptop screens can show at
         # once, and a fixed/clamped window size can't fix that — shrinking

@@ -344,13 +344,15 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
     _apply_yaxis(ax, y_range, major_tick, minor_tick)
 
     # Legend to match grouped plot
-    handles = [
-        Line2D([], [], linestyle="None",
-               marker=marker_map.get(sys, "D"), markersize=10,
-               markerfacecolor="none", markeredgecolor=MARKER_COLOR, color=MARKER_COLOR,
-               label=sys)
-        for sys in systems_present
-    ]
+    handles = []
+    if show_points:
+        handles = [
+            Line2D([], [], linestyle="None",
+                   marker=marker_map.get(sys, "D"), markersize=10,
+                   markerfacecolor="none", markeredgecolor=MARKER_COLOR, color=MARKER_COLOR,
+                   label=sys)
+            for sys in systems_present
+        ]
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
     if show_outlier_markers:
         handles.append(Line2D([], [], linestyle="None", marker=r'$\ast$', markersize=7,

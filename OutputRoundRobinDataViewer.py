@@ -579,7 +579,7 @@ def repeat_spread_report(long_filt: pd.DataFrame):
               f"{grp['Std%'].mean():>11.3f}%")
 
 
-def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True, outlier_thr: str = ""):
+def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True, outlier_thr: str = "", ref_df: pd.DataFrame = None, ref_label: str = ""):
     """
     Analysis B: Mixed-effects model on Delta = Ratio - 1.00
       Delta ~ 0 + C(System)
@@ -759,6 +759,28 @@ def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True, outl
                   f"{r.std()*100:>{stat_col_w}.3f}"
                   f"{(r.min()-1)*100:>{stat_col_w}.3f}"
                   f"{(r.max()-1)*100:>{stat_col_w}.3f}")
+        if ref_df is not None and not ref_df.empty and ref_label:
+            r = pd.to_numeric(ref_df["Ratio"], errors="coerce").dropna()
+            label = f"{ref_label} [norm ref, not in model]"
+            print(f"  {label:<{sys_col_w}}{len(r):>{n_col_w}}"
+                  f"{'—':>{stat_col_w}}{'—':>{stat_col_w}}{'—':>{stat_col_w}}{'—':>{stat_col_w}}{'—':>{stat_col_w}}")
+            # Per-SN breakdown for reference system (anchoring measurements only)
+            sn_col_w2 = 12
+            print(f"\n  {ref_label} per-SN (anchoring measurements):")
+            print(f"    {'SN':<{sn_col_w2}}{'Visits':>8}{'N':>6}")
+            print(f"    " + "-" * (sn_col_w2 + 14))
+            ref_clean = ref_df.copy()
+            ref_clean["Ratio"] = pd.to_numeric(ref_clean["Ratio"], errors="coerce")
+            ref_clean = ref_clean.dropna(subset=["Ratio"])
+            total_visits = 0
+            total_n = 0
+            for sn, sgrp in ref_clean.groupby("SN"):
+                n_visits = sgrp["Date"].nunique() if "Date" in sgrp.columns else "?"
+                total_visits += n_visits if isinstance(n_visits, int) else 0
+                total_n += len(sgrp)
+                print(f"    {str(sn):<{sn_col_w2}}{n_visits:>8}{len(sgrp):>6}")
+            print(f"    " + "-" * (sn_col_w2 + 14))
+            print(f"    {'Total':<{sn_col_w2}}{total_visits:>8}{total_n:>6}")
 
         # --- 2. Per-energy breakdown (mean ± SD per system) ---
         energy_order = [e for e in EXPECTED_ENERGIES if e in df["Energy"].unique()]
@@ -908,6 +930,31 @@ def make_plots(df: pd.DataFrame,
     if long_filt.empty:
         raise ValueError("No data left after applying SN/Energy/System filters.")
 
+    # Drop reference rows that are not the nearest anchor for any non-reference row
+    # in the filtered data (e.g. Institution dates only paired with excluded IROC).
+    if normalized:
+        lf = long_filt.copy()
+        lf["_date"] = pd.to_datetime(lf["Date"], errors="coerce")
+        ref_sys = lf["System"].astype(str).str.strip() == ref_label
+        ref_rows = lf[ref_sys].dropna(subset=["_date"])
+        other_rows = lf[~ref_sys].dropna(subset=["_date"])
+
+        used_ref_idx = set()
+        for (sn, en), grp in other_rows.groupby(["SN", "Energy"]):
+            rr = ref_rows[(ref_rows["SN"] == sn) & (ref_rows["Energy"] == en)]
+            if rr.empty:
+                continue
+            ref_dates = rr["_date"].values.astype("int64")
+            for od in grp["_date"].values.astype("int64"):
+                nearest = int(np.argmin(np.abs(ref_dates - od)))
+                used_ref_idx.add(rr.index[nearest])
+
+        orphan_mask = ref_sys & ~lf.index.isin(used_ref_idx)
+        n_dropped = int(orphan_mask.sum())
+        if n_dropped:
+            print(f"[filter] dropped {n_dropped} {ref_label} row(s) not used as anchor by any non-{ref_label} measurement.")
+        long_filt = long_filt[~orphan_mask]
+
     if paired_dates:
         long_filt = filter_paired_dates(long_filt)
         if long_filt.empty:
@@ -916,7 +963,9 @@ def make_plots(df: pd.DataFrame,
     # Analysis B — exclude the reference system (it's the normalization anchor, not an independent measurement)
     try:
         long_for_analysis = long_filt[long_filt["System"].astype(str).str.strip() != ref_label] if normalized else long_filt
-        analysis_B_mixed_effects(long_for_analysis, verbose=True, outlier_thr=outlier_thr)
+        ref_rows = long_filt[long_filt["System"].astype(str).str.strip() == ref_label] if normalized else None
+        analysis_B_mixed_effects(long_for_analysis, verbose=True, outlier_thr=outlier_thr,
+                                 ref_df=ref_rows, ref_label=ref_label if normalized else "")
     except Exception as e:
         print(f"Analysis B failed: {e}")
 

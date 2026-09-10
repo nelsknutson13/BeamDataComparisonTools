@@ -345,6 +345,12 @@ def plot_data():
     except ValueError:
         _ms = 3.0
 
+    try:
+        _fs = float(font_size_entry.get())
+    except ValueError:
+        _fs = 16.0
+    plt.rcParams.update({'font.size': _fs})
+
     # Define marker styles to iterate over
     markers = ['o', 's', 'D', '+', 'x', '^', '*', 'p', 'h', 'H', '|', '_']
     
@@ -491,11 +497,11 @@ def plot_data():
 
     # Finalize the plots
     if fig_profiles:
-        ax_profiles.legend(loc='upper right', fontsize=10, markerscale=1.5)
+        ax_profiles.legend(loc='upper right', fontsize=_fs, markerscale=1.5)
         fig_profiles.show()
-    
+
     if fig_z:
-        ax_z.legend(loc='upper right', fontsize=10, markerscale=1.5)
+        ax_z.legend(loc='upper right', fontsize=_fs, markerscale=1.5)
         fig_z.show()
 
     plt.tight_layout()
@@ -705,9 +711,14 @@ marker_size_entry = ttk.Entry(controls_frame, width=5)
 marker_size_entry.insert(0, "3")
 marker_size_entry.grid(row=0, column=7, sticky="w", padx=(0, 20))
 
+ttk.Label(controls_frame, text="Font size:").grid(row=0, column=8, sticky="w", padx=(0, 5))
+font_size_entry = ttk.Entry(controls_frame, width=5)
+font_size_entry.insert(0, "16")
+font_size_entry.grid(row=0, column=9, sticky="w", padx=(0, 20))
+
 show_band_var = tk.BooleanVar(value=True)
 ttk.Checkbutton(controls_frame, text="Show uncertainty band", variable=show_band_var).grid(
-    row=0, column=8, sticky="w")
+    row=0, column=10, sticky="w")
 
 # Pre-processing frame
 preproc_frame = ttk.LabelFrame(root, text="Pre-processing", padding="5")

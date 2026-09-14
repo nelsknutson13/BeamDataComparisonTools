@@ -7,9 +7,9 @@ import os, sys, subprocess
 
 from mcc_utils import (
     available_facets, EM_REL_STD, HV_REL_STD,
-    parse_mcc_path, _group_scans,
+    parse_mcc, _group_scans,
     _group_label, _get_facet, _split_common_varying,
-    align_all_voltages, jaffe_fit, jaffe_pion,
+    align_all_voltages, jaffe_fit, jaffe_pion, _dmax_for_energy,
 )
 
 # HVPair is a two-voltage concept — not meaningful for Jaffe (all voltages are individual points)
@@ -31,6 +31,7 @@ last_groups     = None
 last_group_keys = []
 last_label_map  = {}
 last_results    = {}   # key -> {depths, M_inf, alpha, R_sq, pion, label}
+mcc_files       = []   # list of absolute paths when a folder is loaded
 
 group_facets = ["Energy", "Detector", "SSD_cm", "FieldSize_cm"]
 
@@ -77,14 +78,31 @@ def open_grouping_dialog():
     ttk.Button(btns, text="OK",     command=apply_and_close).pack(side="left", padx=6)
     ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left")
 
+def _load_scans_from_selected_files():
+    """Parse only the files currently selected in file_listbox (or full path if single file)."""
+    path = file_entry.get().strip()
+    if not path:
+        return []
+    if not os.path.isdir(path):
+        scans = parse_mcc(path)
+        print(f"Loaded 1 .mcc file; {len(scans)} scan(s).")
+        return scans
+    sel = file_listbox.curselection()
+    chosen_files = [mcc_files[i] for i in sel] if sel else mcc_files
+    scans = []
+    for fp in chosen_files:
+        try:
+            scans.extend(parse_mcc(fp))
+        except Exception as e:
+            print(f"[skip] {os.path.basename(fp)}: {e}")
+    print(f"Loaded {len(chosen_files)} .mcc file(s); {len(scans)} scan(s).")
+    return scans
+
 def set_group_facets(chosen):
     global group_facets, last_groups, last_group_keys, last_label_map
     path = file_entry.get().strip()
     if not path: return
-    scans = parse_mcc_path(path)
-    has_profile = any(len(s) >= 11 and isinstance(s[10], str) and "PROFILE" in s[10].upper() for s in scans)
-    if has_profile and "ProfileDepth_cm" not in chosen:
-        chosen = chosen + ["ProfileDepth_cm"]
+    scans = _load_scans_from_selected_files()
     group_facets = chosen
     last_groups     = _group_scans(scans, group_facets)
     last_group_keys = list(last_groups.keys())
@@ -105,16 +123,32 @@ def set_group_facets(chosen):
             except Exception:
                 pass
 
+def _populate_file_listbox(folder):
+    """Scan folder for .mcc files and populate the file listbox."""
+    global mcc_files
+    mcc_files = sorted(
+        os.path.join(folder, fn)
+        for fn in os.listdir(folder)
+        if fn.lower().endswith(".mcc")
+    )
+    file_listbox.delete(0, tk.END)
+    for fp in mcc_files:
+        file_listbox.insert(tk.END, os.path.basename(fp))
+    file_listbox.select_set(0, tk.END)
+    file_list_frame.grid()   # show
+
 def browse_file():
     p = filedialog.askopenfilename(filetypes=[("PTW MCC files", "*.mcc"), ("All files", "*.*")])
     if not p: return
     file_entry.delete(0, tk.END); file_entry.insert(0, p)
+    file_list_frame.grid_remove()  # hide file list for single file
     set_group_facets(group_facets)
 
 def browse_folder():
     p = filedialog.askdirectory()
     if not p: return
     file_entry.delete(0, tk.END); file_entry.insert(0, p)
+    _populate_file_listbox(p)
     set_group_facets(group_facets)
 
 # ── Core analysis ──────────────────────────────────────────────────────────────
@@ -137,8 +171,8 @@ def run_jaffe():
     except ValueError:
         print("Invalid diagnostic depths — enter one or more comma-separated values."); return
 
-    ref_dpp_str = ref_dpp_var.get().strip()
-    ref_dpp     = float(ref_dpp_str) if ref_dpp_str else None   # Gy/pulse at cal_ssd; None = skip DPP figure
+    ref_dpp_str    = ref_dpp_var.get().strip()
+    ref_dpp_manual = float(ref_dpp_str) if ref_dpp_str else None  # manual override / fallback
     try:
         cal_ssd = float(cal_ssd_var.get())
     except ValueError:
@@ -161,6 +195,12 @@ def run_jaffe():
     common_str, varying_labels = _split_common_varying(chosen_key_list, group_facets)
     subtitle = common_str
 
+    # Show DPP/Boag figures if any group has a BGM entry or a manual DPP was given
+    has_any_dpp = ref_dpp_manual is not None or any(
+        BGM_DPP.get(_get_facet(k, "Energy", group_facets)) is not None
+        for k in chosen_key_list
+    )
+
     print(f"Running Jaffe fit on {len(chosen_keys)} group(s). Operating voltage: {v_op} V")
 
     last_results = {}
@@ -169,15 +209,15 @@ def run_jaffe():
         if fig is not None and plt.fignum_exists(fig.number):
             plt.close(fig)
 
-    fig_j = plt.figure(figsize=(8, 5))
-    ax_j  = fig_j.add_subplot(111)
-    fig_p = plt.figure(figsize=(10.5, 5.5))
-    ax_p  = fig_p.add_subplot(111)
-    fig_r = plt.figure(figsize=(10.5, 4.5))
-    ax_r  = fig_r.add_subplot(111)
-    fig_d = plt.figure(figsize=(10.5, 4.5)) if ref_dpp else None
+    fig_j = plt.figure(figsize=(8, 5))   if show_jaffe_var.get() else None
+    ax_j  = fig_j.add_subplot(111)       if fig_j else None
+    fig_p = plt.figure(figsize=(10.5, 5.5)) if show_pion_var.get() else None
+    ax_p  = fig_p.add_subplot(111)       if fig_p else None
+    fig_r = plt.figure(figsize=(10.5, 4.5)) if show_rsq_var.get() else None
+    ax_r  = fig_r.add_subplot(111)       if fig_r else None
+    fig_d = plt.figure(figsize=(10.5, 4.5)) if (has_any_dpp and show_dpp_var.get()) else None
     ax_d  = fig_d.add_subplot(111) if fig_d else None
-    fig_b = plt.figure(figsize=(7, 5)) if ref_dpp else None
+    fig_b = plt.figure(figsize=(7, 5))   if (has_any_dpp and show_boag_var.get()) else None
     ax_b  = fig_b.add_subplot(111) if fig_b else None
 
     lines_j, lbls_j = [], []
@@ -204,19 +244,21 @@ def run_jaffe():
         b_Minf = alpha * M_inf   # shape (n_depths,)
 
         dpp = None
-        if ref_dpp is not None:
+        energy_key = _get_facet(key, "Energy", group_facets) or ""
+        bgm_entry  = BGM_DPP.get(energy_key)
+        ref_dpp_this = bgm_entry[0] if bgm_entry is not None else ref_dpp_manual
+        if ref_dpp_this is not None:
             # apply inverse-square correction: BGM is at cal_ssd, scan may differ
-            energy_key = _get_facet(key, "Energy", group_facets) or ""
-            dmax_bgm   = BGM_DPP.get(energy_key, (None, ref_depth))[1]
+            dmax_bgm = bgm_entry[1] if bgm_entry is not None else ref_depth
             try:
                 ssd_scan = float(_get_facet(key, "SSD_cm", group_facets) or cal_ssd)
             except (TypeError, ValueError):
                 ssd_scan = cal_ssd
             isf = ((cal_ssd + dmax_bgm) / (ssd_scan + dmax_bgm)) ** 2
-            ref_dpp_corrected = ref_dpp * isf
+            ref_dpp_corrected = ref_dpp_this * isf
             print(f"  [{label}] ISF: cal_SSD={cal_ssd}, scan_SSD={ssd_scan:.1f}, "
                   f"dmax={dmax_bgm} → ×{isf:.4f}, "
-                  f"ref_DPP {ref_dpp*1e4:.3f}→{ref_dpp_corrected*1e4:.3f} ×10⁻⁴ Gy/pulse")
+                  f"ref_DPP {ref_dpp_this*1e4:.3f}→{ref_dpp_corrected*1e4:.3f} ×10⁻⁴ Gy/pulse")
             # Use highest-voltage PDD as dose proxy (least recombination)
             # DPP(depth) = DPP_ref × M(depth,V_max) / M(ref_depth,V_max)
             v_max     = max(aligned.keys())
@@ -233,9 +275,12 @@ def run_jaffe():
         }
 
         # ── collect (D_p, b) for α_Boag extraction figure (R²≥0.99 only) ──────
+        dmax_this = _dmax_for_energy(energy_key)
         if dpp is not None:
             for i_d in range(len(depths)):
-                b_val  = alpha[i_d]
+                if only_beyond_dmax_var.get() and dmax_this is not None and depths[i_d] < dmax_this:
+                    continue
+                b_val  = alpha[i_d] * M_inf[i_d]
                 dp_val = dpp[i_d]
                 r2_val = R_sq[i_d]
                 if (np.isfinite(b_val) and np.isfinite(dp_val) and dp_val > 0
@@ -278,33 +323,38 @@ def run_jaffe():
             # x-bars from HV spec (tiny but correct)
             sigma_x = HV_REL_STD * inv_V
 
-            eb = ax_j.errorbar(inv_V[ok], inv_M_n[ok],
-                               yerr=sigma_y[ok], xerr=sigma_x[ok],
-                               fmt='o', markersize=6, capsize=3, linewidth=1,
-                               zorder=3, label=d_lbl)
-            color = eb[0].get_color()
-            if ok.sum() >= 2:
-                coeffs = np.polyfit(inv_V[ok], inv_M_n[ok], 1)
-                x_fit  = np.linspace(inv_V[ok].min() * 0.95, inv_V[ok].max() * 1.05, 100)
-                ax_j.plot(x_fit, np.polyval(coeffs, x_fit), color=color,
-                          linewidth=1.2, alpha=0.7, linestyle='--')
-            lines_j.append(eb[0]); lbls_j.append(d_lbl)
+            if ax_j is not None:
+                eb = ax_j.errorbar(inv_V[ok], inv_M_n[ok],
+                                   yerr=sigma_y[ok], xerr=sigma_x[ok],
+                                   fmt='o', markersize=6, capsize=3, linewidth=1,
+                                   zorder=3, label=d_lbl)
+                color = eb[0].get_color()
+                if ok.sum() >= 2:
+                    coeffs = np.polyfit(inv_V[ok], inv_M_n[ok], 1)
+                    x_fit  = np.linspace(inv_V[ok].min() * 0.95, inv_V[ok].max() * 1.05, 100)
+                    ax_j.plot(x_fit, np.polyval(coeffs, x_fit), color=color,
+                              linewidth=1.2, alpha=0.7, linestyle='--')
+                lines_j.append(eb[0]); lbls_j.append(d_lbl)
 
         # ── Pion vs depth ─────────────────────────────────────────────────────
-        valid = np.isfinite(pion)
-        if valid.any():
-            line, = ax_p.plot(depths[valid], pion[valid], '-o', markersize=3, label=label)
-            lines_p.append(line); lbls_p.append(label)
+        if ax_p is not None:
+            valid = np.isfinite(pion)
+            if valid.any():
+                line, = ax_p.plot(depths[valid], pion[valid], '-o', markersize=3, label=label)
+                lines_p.append(line); lbls_p.append(label)
 
         # ── R² vs depth ───────────────────────────────────────────────────────
-        valid_r = np.isfinite(R_sq)
-        if valid_r.any():
-            line, = ax_r.plot(depths[valid_r], R_sq[valid_r], '-', linewidth=1.5, label=label)
-            lines_r.append(line); lbls_r.append(label)
+        if ax_r is not None:
+            valid_r = np.isfinite(R_sq)
+            if valid_r.any():
+                line, = ax_r.plot(depths[valid_r], R_sq[valid_r], '-', linewidth=1.5, label=label)
+                lines_r.append(line); lbls_r.append(label)
 
         # ── Dose per pulse vs depth ───────────────────────────────────────────
         if ax_d is not None and dpp is not None:
             valid_d = np.isfinite(dpp)
+            if only_beyond_dmax_var.get() and dmax_this is not None:
+                valid_d &= (depths >= dmax_this)
             if valid_d.any():
                 dpp_mGy = dpp[valid_d] * 1e3   # convert Gy → mGy
                 line, = ax_d.plot(depths[valid_d], dpp_mGy, '-o', markersize=3, label=label)
@@ -314,41 +364,44 @@ def run_jaffe():
         print("No groups produced valid Jaffe fits."); return
 
     # ── Finish Jaffe diagnostic ───────────────────────────────────────────────
-    depth_str = ", ".join(f"{d:.1f}" for d in diag_depths)
-    ax_j.axhline(1.0, color="gray", linewidth=0.8, linestyle="--")
-    ax_j.set_xlabel("1 / Voltage  (V⁻¹)")
-    ax_j.set_ylabel(f"1/Q  (normalized to 1/Q at {int(v_low)} V)")
-    ax_j.set_title(f"Jaffe Plot — depths {depth_str} cm\n{subtitle}" if subtitle
-                   else f"Jaffe Plot — depths {depth_str} cm", fontsize=10)
-    ax_j.grid(True, alpha=0.3)
-    _attach_click_legend(fig_j, lines_j, lbls_j)
-    fig_j.tight_layout()
+    if fig_j is not None and lines_j:
+        depth_str = ", ".join(f"{d:.1f}" for d in diag_depths)
+        ax_j.axhline(1.0, color="gray", linewidth=0.8, linestyle="--")
+        ax_j.set_xlabel("1 / Voltage  (V⁻¹)")
+        ax_j.set_ylabel(f"1/Q  (normalized to 1/Q at {int(v_low)} V)")
+        ax_j.set_title(f"Jaffe Plot — depths {depth_str} cm\n{subtitle}" if subtitle
+                       else f"Jaffe Plot — depths {depth_str} cm", fontsize=10)
+        ax_j.grid(True, alpha=0.3)
+        _attach_click_legend(fig_j, lines_j, lbls_j)
+        fig_j.tight_layout()
 
     # ── Finish Pion vs depth ──────────────────────────────────────────────────
-    ax_p.axhline(1.0, color="gray", linestyle="--", linewidth=1)
-    ax_p.set_xlabel("Depth [cm]"); ax_p.set_ylabel("Pion")
-    ax_p.set_title(f"Pion vs Depth (Jaffe, V_op = {v_op:.0f} V)\n{subtitle}" if subtitle
-                   else f"Pion vs Depth (Jaffe, V_op = {v_op:.0f} V)", fontsize=10)
-    ax_p.set_xlim(0, 30); ax_p.set_ylim(0.98, 1.06)
-    ax_p.grid(True, alpha=0.3)
-    _attach_click_legend(fig_p, lines_p, lbls_p)
-    fig_p.tight_layout()
+    if fig_p is not None and lines_p:
+        ax_p.axhline(1.0, color="gray", linestyle="--", linewidth=1)
+        ax_p.set_xlabel("Depth [cm]"); ax_p.set_ylabel("Pion")
+        ax_p.set_title(f"Pion vs Depth (Jaffe, V_op = {v_op:.0f} V)\n{subtitle}" if subtitle
+                       else f"Pion vs Depth (Jaffe, V_op = {v_op:.0f} V)", fontsize=10)
+        ax_p.set_xlim(0, 30); ax_p.set_ylim(0.98, 1.06)
+        ax_p.grid(True, alpha=0.3)
+        _attach_click_legend(fig_p, lines_p, lbls_p)
+        fig_p.tight_layout()
 
     # ── Finish R² vs depth ────────────────────────────────────────────────────
-    ax_r.axhline(1.0, color="gray", linestyle="--", linewidth=0.8)
-    ax_r.axhline(0.99, color="orange", linestyle=":", linewidth=0.8)
-    ax_r.set_xlabel("Depth [cm]"); ax_r.set_ylabel("R²")
-    ax_r.set_title(f"Jaffe Fit R² vs Depth\n{subtitle}" if subtitle
-                   else "Jaffe Fit R² vs Depth", fontsize=10)
-    ax_r.set_xlim(0, 30); ax_r.set_ylim(0.9, 1.005)
-    ax_r.grid(True, alpha=0.3)
-    _attach_click_legend(fig_r, lines_r, lbls_r)
-    fig_r.tight_layout()
+    if fig_r is not None and lines_r:
+        ax_r.axhline(1.0, color="gray", linestyle="--", linewidth=0.8)
+        ax_r.axhline(0.99, color="orange", linestyle=":", linewidth=0.8)
+        ax_r.set_xlabel("Depth [cm]"); ax_r.set_ylabel("R²")
+        ax_r.set_title(f"Jaffe Fit R² vs Depth\n{subtitle}" if subtitle
+                       else "Jaffe Fit R² vs Depth", fontsize=10)
+        ax_r.set_xlim(0, 30); ax_r.set_ylim(0.9, 1.005)
+        ax_r.grid(True, alpha=0.3)
+        _attach_click_legend(fig_r, lines_r, lbls_r)
+        fig_r.tight_layout()
 
     # ── Finish DPP vs depth ───────────────────────────────────────────────────
     if fig_d is not None and lines_d:
         ax_d.set_xlabel("Depth [cm]"); ax_d.set_ylabel("Dose per pulse [mGy/pulse]")
-        ax_d.set_title(f"Dose per Pulse vs Depth (ref {ref_dpp*1e3:.3f} mGy/pulse @ {ref_depth:.1f} cm)"
+        ax_d.set_title(f"Dose per Pulse vs Depth (BGM ref @ {ref_depth:.1f} cm, cal SSD={cal_ssd:.0f} cm)"
                        + (f"\n{subtitle}" if subtitle else ""), fontsize=10)
         ax_d.set_xlim(0, 30)
         ax_d.grid(True, alpha=0.3)
@@ -375,11 +428,11 @@ def run_jaffe():
         # overlay forced-origin fit line
         dp_fit = np.linspace(0, dp_all.max() * 1.08, 200)
         ax_b.plot(dp_fit, alpha_boag * dp_fit, 'k--', linewidth=1.5,
-                  label=f"b = {alpha_boag:.4f}·Dp  (n={len(boag_pts)})")
+                  label=f"α_Boag = {alpha_boag:.4f} V·pulse/mGy  (n={len(boag_pts)})")
         print(f"  α_Boag (forced-origin slope) = {alpha_boag:.5f} V·pulse/mGy  "
               f"from {len(boag_pts)} depth×group points")
         ax_b.set_xlabel("Dose per pulse [mGy/pulse]")
-        ax_b.set_ylabel("Jaffé slope  b  [V / charge-unit]")
+        ax_b.set_ylabel("b × M_inf  [V]")
         ax_b.set_title("α_Boag Extraction: Jaffé Slope vs Dose per Pulse"
                        + (f"\n{subtitle}" if subtitle else ""), fontsize=10)
         ax_b.set_xlim(left=0); ax_b.set_ylim(bottom=0)
@@ -454,11 +507,33 @@ ttk.Button(top, text="Browse Folder", command=browse_folder).grid(row=0, column=
 sel_frame = ttk.Frame(root, padding=(10,0,10,10))
 sel_frame.grid(row=1, column=0, sticky="nsew")
 root.rowconfigure(1, weight=1)
-sel_frame.rowconfigure(1, weight=1); sel_frame.columnconfigure(0, weight=1)
-ttk.Label(sel_frame, text="Select Groups:").grid(row=0, column=0, sticky="w")
+sel_frame.rowconfigure(1, weight=1)
+sel_frame.columnconfigure(0, weight=1)
+sel_frame.columnconfigure(1, weight=3)
 
+# ── File list (left, folder mode only) ───────────────────────────────────────
+file_list_frame = ttk.Frame(sel_frame)
+file_list_frame.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=(0,8))
+file_list_frame.rowconfigure(1, weight=1); file_list_frame.columnconfigure(0, weight=1)
+ttk.Label(file_list_frame, text="Files:").grid(row=0, column=0, sticky="w")
+fl_lb_frame = ttk.Frame(file_list_frame)
+fl_lb_frame.grid(row=1, column=0, sticky="nsew", pady=(4,0))
+fl_lb_frame.rowconfigure(0, weight=1); fl_lb_frame.columnconfigure(0, weight=1)
+file_listbox = tk.Listbox(fl_lb_frame, selectmode="extended", height=8, width=26)
+fl_scroll = ttk.Scrollbar(fl_lb_frame, orient="vertical", command=file_listbox.yview)
+file_listbox.configure(yscrollcommand=fl_scroll.set)
+file_listbox.grid(row=0, column=0, sticky="nsew")
+fl_scroll.grid(row=0, column=1, sticky="ns")
+fl_btns = ttk.Frame(file_list_frame); fl_btns.grid(row=2, column=0, sticky="w", pady=6)
+ttk.Button(fl_btns, text="Select All", command=lambda: file_listbox.select_set(0, tk.END)).pack(side="left", padx=(0,6))
+ttk.Button(fl_btns, text="Clear",      command=lambda: file_listbox.selection_clear(0, tk.END)).pack(side="left", padx=(0,6))
+ttk.Button(fl_btns, text="Reload Groups", command=lambda: set_group_facets(group_facets)).pack(side="left")
+file_list_frame.grid_remove()  # hidden until a folder is loaded
+
+# ── Group list (right) ────────────────────────────────────────────────────────
+ttk.Label(sel_frame, text="Select Groups:").grid(row=0, column=1, sticky="w")
 lb_frame = ttk.Frame(sel_frame)
-lb_frame.grid(row=1, column=0, sticky="nsew", pady=(4,0))
+lb_frame.grid(row=1, column=1, sticky="nsew", pady=(4,0))
 lb_frame.rowconfigure(0, weight=1); lb_frame.columnconfigure(0, weight=1)
 group_listbox = tk.Listbox(lb_frame, selectmode="extended", height=8)
 lb_scroll = ttk.Scrollbar(lb_frame, orient="vertical", command=group_listbox.yview)
@@ -466,7 +541,7 @@ group_listbox.configure(yscrollcommand=lb_scroll.set)
 group_listbox.grid(row=0, column=0, sticky="nsew")
 lb_scroll.grid(row=0, column=1, sticky="ns")
 
-btns = ttk.Frame(sel_frame); btns.grid(row=2, column=0, sticky="w", pady=6)
+btns = ttk.Frame(sel_frame); btns.grid(row=2, column=1, sticky="w", pady=6)
 ttk.Button(btns, text="Select All", command=lambda: group_listbox.select_set(0, tk.END)).pack(side="left", padx=(0,6))
 ttk.Button(btns, text="Clear",      command=lambda: group_listbox.selection_clear(0, tk.END)).pack(side="left")
 
@@ -475,9 +550,25 @@ action_frame.grid(row=2, column=0, sticky="ew")
 ttk.Button(action_frame, text="Run Jaffe",    command=run_jaffe).pack(side="left", padx=5)
 ttk.Button(action_frame, text="Export Excel", command=export_excel).pack(side="left", padx=5)
 ttk.Button(action_frame, text="Grouping…",    command=open_grouping_dialog).pack(side="left", padx=5)
+only_beyond_dmax_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(action_frame, text="Beyond dmax only", variable=only_beyond_dmax_var).pack(side="left", padx=12)
+
+plots_frame = ttk.Frame(root, padding=(10,0,10,4))
+plots_frame.grid(row=3, column=0, sticky="ew")
+ttk.Label(plots_frame, text="Show:").pack(side="left")
+show_jaffe_var = tk.BooleanVar(value=True)
+show_pion_var  = tk.BooleanVar(value=True)
+show_rsq_var   = tk.BooleanVar(value=True)
+show_dpp_var   = tk.BooleanVar(value=True)
+show_boag_var  = tk.BooleanVar(value=True)
+ttk.Checkbutton(plots_frame, text="Jaffé",  variable=show_jaffe_var).pack(side="left", padx=(8,4))
+ttk.Checkbutton(plots_frame, text="Pion",   variable=show_pion_var).pack(side="left", padx=4)
+ttk.Checkbutton(plots_frame, text="R²",     variable=show_rsq_var).pack(side="left", padx=4)
+ttk.Checkbutton(plots_frame, text="DPP",    variable=show_dpp_var).pack(side="left", padx=4)
+ttk.Checkbutton(plots_frame, text="Boag",   variable=show_boag_var).pack(side="left", padx=4)
 
 param_frame = ttk.Frame(root, padding=(10,0,10,10))
-param_frame.grid(row=3, column=0, sticky="ew")
+param_frame.grid(row=4, column=0, sticky="ew")
 ttk.Label(param_frame, text="Operating voltage (V):").pack(side="left")
 op_voltage_var = tk.StringVar(value="300")
 ttk.Entry(param_frame, textvariable=op_voltage_var, width=7).pack(side="left", padx=5)
@@ -487,7 +578,7 @@ diag_depth_var = tk.StringVar(value="1.5, 5, 10, 20, 30")
 ttk.Entry(param_frame, textvariable=diag_depth_var, width=22).pack(side="left", padx=5)
 
 ref_frame = ttk.Frame(root, padding=(10,0,10,10))
-ref_frame.grid(row=4, column=0, sticky="ew")
+ref_frame.grid(row=5, column=0, sticky="ew")
 ttk.Label(ref_frame, text="Ref DPP (Gy/pulse, optional):").pack(side="left")
 ref_dpp_var = tk.StringVar(value="")
 ttk.Entry(ref_frame, textvariable=ref_dpp_var, width=12).pack(side="left", padx=5)

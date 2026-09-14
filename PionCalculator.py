@@ -8,7 +8,7 @@ from scipy.stats import t as t_dist
 
 from mcc_utils import (
     available_facets, NORM_DEPTH_CM, EM_REL_STD,
-    parse_mcc_path, _group_scans, _expand_by_hv_pair,
+    parse_mcc, _group_scans, _expand_by_hv_pair,
     _group_label, _get_facet, _split_common_varying,
     _align_pair, calc_pion, _dmax_for_energy,
     _u_pion_from_beta,
@@ -22,6 +22,7 @@ curves_summary = []
 last_groups    = None
 last_group_keys = []
 last_label_map  = {}
+mcc_files      = []   # list of absolute paths when a folder is loaded
 
 group_facets = ["Energy", "Detector", "SSD_cm", "FieldSize_cm"]
 
@@ -66,15 +67,32 @@ def open_grouping_dialog():
     ttk.Button(btns, text="OK",     command=apply_and_close).pack(side="left", padx=6)
     ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left")
 
+def _load_scans_from_selected_files():
+    """Parse only the files currently selected in file_listbox (or full path if single file)."""
+    path = file_entry.get().strip()
+    if not path:
+        return []
+    if not os.path.isdir(path):
+        scans = parse_mcc(path)
+        print(f"Loaded 1 .mcc file; {len(scans)} scan(s).")
+        return scans
+    sel = file_listbox.curselection()
+    chosen_files = [mcc_files[i] for i in sel] if sel else mcc_files
+    scans = []
+    for fp in chosen_files:
+        try:
+            scans.extend(parse_mcc(fp))
+        except Exception as e:
+            print(f"[skip] {os.path.basename(fp)}: {e}")
+    print(f"Loaded {len(chosen_files)} .mcc file(s); {len(scans)} scan(s).")
+    return scans
+
 def set_group_facets(chosen):
     global group_facets, last_groups, last_group_keys, last_label_map
     path = file_entry.get().strip()
     if not path:
         return
-    scans = parse_mcc_path(path)
-    has_profile = any(len(s) >= 11 and isinstance(s[10], str) and "PROFILE" in s[10].upper() for s in scans)
-    if has_profile and "ProfileDepth_cm" not in chosen:
-        chosen = chosen + ["ProfileDepth_cm"]
+    scans = _load_scans_from_selected_files()
     group_facets = chosen
     last_groups = _expand_by_hv_pair(_group_scans(scans, group_facets), group_facets)
     last_group_keys = list(last_groups.keys())
@@ -84,16 +102,32 @@ def set_group_facets(chosen):
         group_listbox.insert(tk.END, _group_label(k, group_facets))
     group_listbox.select_set(0, tk.END)
 
+def _populate_file_listbox(folder):
+    """Scan folder for .mcc files and populate the file listbox."""
+    global mcc_files
+    mcc_files = sorted(
+        os.path.join(folder, fn)
+        for fn in os.listdir(folder)
+        if fn.lower().endswith(".mcc")
+    )
+    file_listbox.delete(0, tk.END)
+    for fp in mcc_files:
+        file_listbox.insert(tk.END, os.path.basename(fp))
+    file_listbox.select_set(0, tk.END)
+    file_list_frame.grid()
+
 def browse_file():
     p = filedialog.askopenfilename(filetypes=[("PTW MCC files", "*.mcc"), ("All files", "*.*")])
     if not p: return
     file_entry.delete(0, tk.END); file_entry.insert(0, p)
+    file_list_frame.grid_remove()
     set_group_facets(group_facets)
 
 def browse_folder():
     p = filedialog.askdirectory()
     if not p: return
     file_entry.delete(0, tk.END); file_entry.insert(0, p)
+    _populate_file_listbox(p)
     set_group_facets(group_facets)
 
 # ── Plotting ───────────────────────────────────────────────────────────────────
@@ -476,11 +510,33 @@ ttk.Button(top, text="Browse Folder", command=browse_folder).grid(row=0, column=
 sel_frame = ttk.Frame(root, padding=(10,0,10,10))
 sel_frame.grid(row=1, column=0, sticky="nsew")
 root.rowconfigure(1, weight=1)
-sel_frame.rowconfigure(1, weight=1); sel_frame.columnconfigure(0, weight=1)
-ttk.Label(sel_frame, text="Select Groups to Plot:").grid(row=0, column=0, sticky="w")
+sel_frame.rowconfigure(1, weight=1)
+sel_frame.columnconfigure(0, weight=1)
+sel_frame.columnconfigure(1, weight=3)
 
+# ── File list (left, folder mode only) ───────────────────────────────────────
+file_list_frame = ttk.Frame(sel_frame)
+file_list_frame.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=(0,8))
+file_list_frame.rowconfigure(1, weight=1); file_list_frame.columnconfigure(0, weight=1)
+ttk.Label(file_list_frame, text="Files:").grid(row=0, column=0, sticky="w")
+fl_lb_frame = ttk.Frame(file_list_frame)
+fl_lb_frame.grid(row=1, column=0, sticky="nsew", pady=(4,0))
+fl_lb_frame.rowconfigure(0, weight=1); fl_lb_frame.columnconfigure(0, weight=1)
+file_listbox = tk.Listbox(fl_lb_frame, selectmode="extended", height=8, width=26)
+fl_scroll = ttk.Scrollbar(fl_lb_frame, orient="vertical", command=file_listbox.yview)
+file_listbox.configure(yscrollcommand=fl_scroll.set)
+file_listbox.grid(row=0, column=0, sticky="nsew")
+fl_scroll.grid(row=0, column=1, sticky="ns")
+fl_btns = ttk.Frame(file_list_frame); fl_btns.grid(row=2, column=0, sticky="w", pady=6)
+ttk.Button(fl_btns, text="Select All", command=lambda: file_listbox.select_set(0, tk.END)).pack(side="left", padx=(0,6))
+ttk.Button(fl_btns, text="Clear",      command=lambda: file_listbox.selection_clear(0, tk.END)).pack(side="left", padx=(0,6))
+ttk.Button(fl_btns, text="Reload Groups", command=lambda: set_group_facets(group_facets)).pack(side="left")
+file_list_frame.grid_remove()  # hidden until a folder is loaded
+
+# ── Group list (right) ────────────────────────────────────────────────────────
+ttk.Label(sel_frame, text="Select Groups to Plot:").grid(row=0, column=1, sticky="w")
 lb_frame = ttk.Frame(sel_frame)
-lb_frame.grid(row=1, column=0, sticky="nsew", pady=(4,0))
+lb_frame.grid(row=1, column=1, sticky="nsew", pady=(4,0))
 lb_frame.rowconfigure(0, weight=1); lb_frame.columnconfigure(0, weight=1)
 group_listbox = tk.Listbox(lb_frame, selectmode="extended", height=8)
 lb_scroll = ttk.Scrollbar(lb_frame, orient="vertical", command=group_listbox.yview)
@@ -488,7 +544,7 @@ group_listbox.configure(yscrollcommand=lb_scroll.set)
 group_listbox.grid(row=0, column=0, sticky="nsew")
 lb_scroll.grid(row=0, column=1, sticky="ns")
 
-btns = ttk.Frame(sel_frame); btns.grid(row=2, column=0, sticky="w", pady=6)
+btns = ttk.Frame(sel_frame); btns.grid(row=2, column=1, sticky="w", pady=6)
 ttk.Button(btns, text="Select All", command=lambda: group_listbox.select_set(0, tk.END)).pack(side="left", padx=(0,6))
 ttk.Button(btns, text="Clear",      command=lambda: group_listbox.selection_clear(0, tk.END)).pack(side="left")
 

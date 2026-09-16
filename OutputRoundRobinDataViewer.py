@@ -29,12 +29,14 @@ DEFAULT_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis
 EXPECTED_ENERGIES = ["6X", "10X", "15X", "6FFF", "8FFF", "10FFF"]
 # TPS output at dmax [cGy/100MU] — used to compute debug scale factors (100/dmax)
 TPS_OUTPUT_DEFAULTS = {"6X": 98.9, "10X": 99.6, "15X": 99.2, "6FFF": 99.0, "8FFF": 98.7, "10FFF": 98.8}
-SYSTEM_ORDER = ["IROC", "RDS", "Institution", "Consortium Audit", "Institution Reported (Consortium Form)", "Consortium Audit (Form-Corrected)"]
+SYSTEM_ORDER = ["IROC", "IROC Revised", "IROC BeO", "RDS", "Institution", "Consortium Audit", "Institution Reported (Consortium Form)", "Consortium Audit (Form-Corrected)"]
 ORDER = {name: i for i, name in enumerate(SYSTEM_ORDER)}
 # Marker per system (used in both boxplots)
 MARKER_MAP = {
     "Institution": "P",
     "IROC": "D",
+    "IROC Revised": "v",
+    "IROC BeO": "p",
     "RDS": "o",
     "Institution Reported (Consortium Form)": "s",
     "Consortium Audit": "X",
@@ -900,21 +902,16 @@ def make_plots(df: pd.DataFrame,
                 mask = (long["System"] == system) & (long["Energy"] == energy)
                 long.loc[mask, "Ratio"] *= factor
 
-    # Re-reference per Institution-anchored session BEFORE filtering, so the
-    # session anchors (Institution rows) are still present even if the user
-    # later filters out a system.
-    long, _ = renormalize_to_reference(long, normalize_to)
-    if long.empty:
-        raise ValueError(f"No data left after normalizing to '{normalize_to}'.")
-    # 'None' (or empty) = no normalization; otherwise data was divided by ref.
     norm = (normalize_to or "None").strip()
     normalized = norm not in ("", "None")
-    # In no-norm mode the 1.0 baseline still represents the institution.
     ref_label = norm if normalized else "Institution"
 
     if not (show_system or show_sn or show_energy):
         raise ValueError("No plots selected. Please enable at least one plot type.")
 
+    # Apply filters first so the normalization anchor lookup only sees the
+    # relevant rows (correct system/SN/energy subset, and same-day rows when
+    # paired_dates is on — fixing the large date-gap normalization artifact).
     mask = np.ones(len(long), dtype=bool)
 
     if sn_filter:
@@ -924,15 +921,39 @@ def make_plots(df: pd.DataFrame,
         mask &= long["Energy"].isin(energy_filter)
 
     if system_filter:
-        mask &= long["System"].astype(str).str.strip().isin(system_filter)
+        # Always keep the reference system so it can anchor normalization even
+        # if the user filtered it out of the display.
+        ref_sys_mask = long["System"].astype(str).str.strip() == ref_label
+        mask &= long["System"].astype(str).str.strip().isin(system_filter) | ref_sys_mask
 
-    long_filt = long[mask]
+    long_pre = long[mask]
+    if long_pre.empty:
+        raise ValueError("No data left after applying SN/Energy/System filters.")
+
+    # When paired_dates is on, restrict to dates where all selected systems are
+    # present BEFORE normalizing so the anchor is always same-day.
+    if paired_dates:
+        long_pre = filter_paired_dates(long_pre)
+        if long_pre.empty:
+            raise ValueError("No data left after filtering to paired dates.")
+
+    # Normalize against the reference system using the already-filtered rows.
+    long_pre, _ = renormalize_to_reference(long_pre, normalize_to)
+    if long_pre.empty:
+        raise ValueError(f"No data left after normalizing to '{normalize_to}'.")
+
+    # Now apply system filter properly (drop reference rows not selected by user).
+    if system_filter:
+        long_filt = long_pre[long_pre["System"].astype(str).str.strip().isin(system_filter)]
+    else:
+        long_filt = long_pre
+
     if long_filt.empty:
         raise ValueError("No data left after applying SN/Energy/System filters.")
 
-    # Drop reference rows that are not the nearest anchor for any non-reference row
-    # in the filtered data (e.g. Institution dates only paired with excluded IROC).
-    if normalized:
+    # Drop reference rows not used as an anchor by any non-reference row
+    # (only relevant when normalized and paired_dates is off).
+    if normalized and not paired_dates:
         lf = long_filt.copy()
         lf["_date"] = pd.to_datetime(lf["Date"], errors="coerce")
         ref_sys = lf["System"].astype(str).str.strip() == ref_label
@@ -954,11 +975,6 @@ def make_plots(df: pd.DataFrame,
         if n_dropped:
             print(f"[filter] dropped {n_dropped} {ref_label} row(s) not used as anchor by any non-{ref_label} measurement.")
         long_filt = long_filt[~orphan_mask]
-
-    if paired_dates:
-        long_filt = filter_paired_dates(long_filt)
-        if long_filt.empty:
-            raise ValueError("No data left after filtering to paired dates.")
 
     # Analysis B — exclude the reference system (it's the normalization anchor, not an independent measurement)
     try:
@@ -1268,7 +1284,7 @@ class App(tk.Tk):
         dlg.resizable(False, False)
         dlg.grab_set()
 
-        systems = ["RDS", "IROC"]
+        systems = ["RDS", "IROC", "IROC Revised", "IROC BeO"]
         energies = EXPECTED_ENERGIES
 
         # Header row

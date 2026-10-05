@@ -94,6 +94,10 @@ class App(tk.Tk):
         ttk.Checkbutton(opts, text="Show site legend",
                         variable=self._show_legend_var).grid(row=0, column=1, sticky="w", padx=(20, 0))
 
+        self._flip_sign_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opts, text="Flip sign",
+                        variable=self._flip_sign_var).grid(row=0, column=10, sticky="w", padx=(20, 0))
+
         ttk.Label(opts, text="Font size:").grid(row=0, column=2, sticky="w", padx=(20, 4))
         self._font_var = tk.StringVar(value="16")
         ttk.Entry(opts, textvariable=self._font_var, width=5).grid(row=0, column=3, sticky="w")
@@ -306,6 +310,9 @@ class App(tk.Tk):
         if df.empty:
             messagebox.showwarning("No data", "No data after applying filters.")
             return
+
+        if self._flip_sign_var.get():
+            df["%RX Difference"] *= -1
 
         if self._add_all_var.get():
             df_all = df.copy()

@@ -323,6 +323,12 @@ class App(tk.Tk):
         markers = ["o", "s", "^", "D", "P", "X", "*", "v", "<", ">"]
         marker_map = {s: markers[i % len(markers)] for i, s in enumerate(unique_sites)}
 
+        try:
+            fig_w = float(self._fig_w_var.get())
+            fig_h = float(self._fig_h_var.get())
+        except ValueError:
+            fig_w, fig_h = 10, 8
+        sns.set_theme(style="whitegrid", palette="colorblind")
         plt.rcParams.update({
             "font.size":             font_size,
             "axes.labelsize":        font_size,
@@ -333,14 +339,7 @@ class App(tk.Tk):
             "font.weight":           "bold",
             "axes.labelweight":      "bold",
         })
-
-        try:
-            fig_w = float(self._fig_w_var.get())
-            fig_h = float(self._fig_h_var.get())
-        except ValueError:
-            fig_w, fig_h = 10, 8
         self._current_fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-        sns.set_theme(style="whitegrid", palette="colorblind")
         flier_style = dict(marker="o", markerfacecolor="none",
                            markersize=5, linestyle="none", color="gray")
         sns.boxplot(data=df, x="Body Site", y="%RX Difference",

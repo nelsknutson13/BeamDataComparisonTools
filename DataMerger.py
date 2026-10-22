@@ -64,7 +64,29 @@ def _load_source_dfs(source_path, status_cb=None):
             df = pd.read_csv(source_path)
         except Exception as e:
             raise RuntimeError(f"Cannot open source file: {e}")
-        result[_classify_table(df)] = df
+
+        # Inject Energy/SSD from filename if missing (e.g. "6FFF 90SSD.csv")
+        import re as _re
+        stem = os.path.splitext(os.path.basename(source_path))[0]
+        if 'Energy' not in df.columns:
+            em = _re.search(r'(6FFF|8FFF|10FFF|6X|10X|15X)', stem, _re.I)
+            if em:
+                df['Energy'] = em.group(1).upper()
+        if 'SSD' not in df.columns:
+            sm = _re.search(r'(\d{2,3})\s*SSD', stem, _re.I)
+            if sm:
+                df['SSD'] = int(sm.group(1))
+
+        # Split by Axis: Z rows → depth, everything else → profile
+        if 'Axis' in df.columns:
+            depth_df   = df[df['Axis'] == 'Z'].copy()
+            profile_df = df[df['Axis'] != 'Z'].copy()
+            if not depth_df.empty:
+                result['depth'] = depth_df
+            if not profile_df.empty:
+                result['profile'] = profile_df
+        else:
+            result[_classify_table(df)] = df
         return result
 
     try:

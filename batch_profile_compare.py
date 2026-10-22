@@ -45,8 +45,8 @@ OUTPUT_BASE = None
 
 FILE_FILTER = '*Profile*.xlsx'    # glob used in 'flat' mode only
 
-SHEET1_NAME = "SN 21"             # reference / measured sheet name; set 'none' to skip
-SHEET2_NAME = "TPS SN 21"         # comparison sheet name; set 'none' to skip
+SHEET1_NAME = "SN 1003"             # reference / measured sheet name; set 'none' to skip
+SHEET2_NAME = "TPS SN 1003"         # comparison sheet name; set 'none' to skip
 
 # Data selection — 'all' means use all common values found in each file
 FIELD_SIZES = 'all'               # e.g. [5.0, 10.0, 20.0]  or  'all'
@@ -85,7 +85,7 @@ CENTER_THRESHOLD = 0.3             # threshold fraction passed to center()
 
 # Detector convolution
 CONV_FWHM_CM = 0.45                 # detector FWHM [cm]; 0 = disabled
-CONV_TARGET  = 'curve2'              # 'none', 'curve1', 'curve2', or 'both'
+CONV_TARGET  = 'none'              # 'none', 'curve1', 'curve2', or 'both'
 
 # MPPG-specific parameters (used only when ANALYSIS == 'mppg')
 MPPG_DDTAIL  = 2                 # tail dose-difference criterion [% of Dmax]

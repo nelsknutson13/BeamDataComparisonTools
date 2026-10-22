@@ -145,12 +145,12 @@ OUTPUT_BASE = None
 FILE_FILTER = '*PDD*.xlsx'    # glob used in 'flat' mode only (e.g. '*PDD*.xlsx', '*.xlsx')
 FS_FILTER   = []      # list of field sizes [cm] to include, e.g. [10.0, 20.0, 30.0]; empty = all
 
-SHEET1_NAME = "SN 21"   # reference / measured sheet name; set 'none' to skip
-SHEET2_NAME = "none"            # comparison sheet name; set 'none' to skip
+SHEET1_NAME = "SN 1003"   # reference / measured sheet name; set 'none' to skip
+SHEET2_NAME = "TPS SN 1003"            # comparison sheet name; set 'none' to skip
 
-ANALYSIS      = 'none'        # 'comp', 'dif', 'dist', 'gam', 'plot', or 'none' (plot only, no comparison)
-DD_CRITERIA   = 2           # dose difference threshold [%]
-DTA_CRITERIA  = 0.2           # DTA threshold [cm]  (2 mm)
+ANALYSIS      = 'comp'        # 'comp', 'dif', 'dist', 'gam', 'plot', or 'none' (plot only, no comparison)
+DD_CRITERIA   = 1.5           # dose difference threshold [%]
+DTA_CRITERIA  = 0.15           # DTA threshold [cm]  (2 mm)
 NORM          = 1             # 1 = each dmax, 2 = fixed depth per energy, 3 = dmax of curve 1, 4 = dmax of curve 2
 
 # Fixed normalization depth [cm] per energy folder name

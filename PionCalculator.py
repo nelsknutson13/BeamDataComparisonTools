@@ -102,17 +102,29 @@ def set_group_facets(chosen):
         group_listbox.insert(tk.END, _group_label(k, group_facets))
     group_listbox.select_set(0, tk.END)
 
-def _populate_file_listbox(folder):
+def _populate_file_listbox(folder, recurse=False):
     """Scan folder for .mcc files and populate the file listbox."""
     global mcc_files
-    mcc_files = sorted(
-        os.path.join(folder, fn)
-        for fn in os.listdir(folder)
-        if fn.lower().endswith(".mcc")
-    )
-    file_listbox.delete(0, tk.END)
-    for fp in mcc_files:
-        file_listbox.insert(tk.END, os.path.basename(fp))
+    if recurse:
+        found = []
+        for root_dir, _, files in os.walk(folder):
+            for fn in files:
+                if fn.lower().endswith(".mcc"):
+                    found.append(os.path.join(root_dir, fn))
+        mcc_files = sorted(found)
+        file_listbox.delete(0, tk.END)
+        for fp in mcc_files:
+            rel = os.path.relpath(fp, folder)
+            file_listbox.insert(tk.END, rel)
+    else:
+        mcc_files = sorted(
+            os.path.join(folder, fn)
+            for fn in os.listdir(folder)
+            if fn.lower().endswith(".mcc")
+        )
+        file_listbox.delete(0, tk.END)
+        for fp in mcc_files:
+            file_listbox.insert(tk.END, os.path.basename(fp))
     file_listbox.select_set(0, tk.END)
     file_list_frame.grid()
 
@@ -127,7 +139,7 @@ def browse_folder():
     p = filedialog.askdirectory()
     if not p: return
     file_entry.delete(0, tk.END); file_entry.insert(0, p)
-    _populate_file_listbox(p)
+    _populate_file_listbox(p, recurse=recurse_var.get())
     set_group_facets(group_facets)
 
 # ── Plotting ───────────────────────────────────────────────────────────────────
@@ -506,6 +518,8 @@ file_entry = ttk.Entry(top, width=50)
 file_entry.grid(row=0, column=1, padx=5, sticky="ew")
 ttk.Button(top, text="Browse",        command=browse_file).grid(row=0, column=2, padx=5)
 ttk.Button(top, text="Browse Folder", command=browse_folder).grid(row=0, column=3, padx=5)
+recurse_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(top, text="Include subfolders", variable=recurse_var).grid(row=0, column=4, padx=(8,0))
 
 sel_frame = ttk.Frame(root, padding=(10,0,10,10))
 sel_frame.grid(row=1, column=0, sticky="nsew")

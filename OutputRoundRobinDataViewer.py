@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MultipleLocator
 import statsmodels.formula.api as smf
+from scipy import stats as _scipy_stats
 
 # ---------- Config ----------
 DEFAULT_PATH = r"C:\Users\nknutson\OneDrive - Washington University in St. Louis\NGDS QA Consortium\OutputRoundRobinData.xlsx"
@@ -821,6 +822,47 @@ def analysis_B_mixed_effects(long_filt: pd.DataFrame, verbose: bool = True, outl
                       f"{r.std()*100:>{val_col_w}.3f}"
                       f"{(r.min()-1)*100:>{val_col_w}.3f}"
                       f"{(r.max()-1)*100:>{val_col_w}.3f}")
+
+        # --- 3b. Per-linac statistical test (Kruskal-Wallis + pairwise) ---
+        print("\nPer-linac statistical test by system (Kruskal-Wallis, α=0.05):")
+        for sys, grp in df.groupby("System"):
+            sn_groups = {sn: sg["Ratio"].values for sn, sg in grp.groupby("SN") if len(sg) >= 2}
+            if len(sn_groups) < 2:
+                print(f"\n  {sys}: fewer than 2 linacs with data — skipped.")
+                continue
+            labels = list(sn_groups.keys())
+            arrays = list(sn_groups.values())
+            kw_stat, kw_p = _scipy_stats.kruskal(*arrays)
+            sig = "*" if kw_p < 0.05 else ""
+            print(f"\n  {sys}: H={kw_stat:.3f}  p={kw_p:.4f}{sig}")
+            if kw_p < 0.05:
+                # Each SN vs. rest (Holm-corrected)
+                all_vals = np.concatenate(arrays)
+                raw_p = []
+                for i, arr in enumerate(arrays):
+                    rest = np.concatenate([a for j, a in enumerate(arrays) if j != i])
+                    _, p = _scipy_stats.mannwhitneyu(arr, rest, alternative="two-sided")
+                    raw_p.append(p)
+                order = sorted(range(len(raw_p)), key=lambda k: raw_p[k])
+                n_tests = len(raw_p)
+                adj_p = [0.0] * n_tests
+                running_max = 0.0
+                for rank, idx in enumerate(order):
+                    corrected = raw_p[idx] * (n_tests - rank)
+                    running_max = max(running_max, corrected)
+                    adj_p[idx] = min(running_max, 1.0)
+                rest_mean = (all_vals.sum() - np.array([a.sum() for a in arrays])) / \
+                            (len(all_vals) - np.array([len(a) for a in arrays]))
+                print(f"    Each SN vs. rest (Holm-corrected):")
+                for i, lbl in enumerate(labels):
+                    sig_sn = " *" if adj_p[i] < 0.05 else ""
+                    try:
+                        lbl_str = f"SN {int(lbl)}"
+                    except (ValueError, TypeError):
+                        lbl_str = str(lbl)
+                    sn_mean = (np.mean(arrays[i]) - 1) * 100
+                    diff    = (np.mean(arrays[i]) - rest_mean[i]) * 100
+                    print(f"      {lbl_str:<10} mean={sn_mean:+.2f}%  Δrest={diff:+.2f}%  p_adj={adj_p[i]:.4f}{sig_sn}")
 
         # --- 4. Per-Energy summary (mean ± SD per Energy within each system) ---
         print("\nPer-Energy summary by system (mean%, SD%, N):")

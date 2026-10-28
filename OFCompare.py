@@ -517,6 +517,55 @@ def _stats_per_cell(stack):
             'Min': ymin, 'Max': ymax, 'N': n}
 
 
+def _flag_outliers(Ma, Mb, pct, x_vals, y_vals, crit=None, diff_k=5.0):
+    """Return a list of human-readable warning strings for suspect cells.
+
+    Two checks:
+      1. Scp spike: any cell in A or B whose value deviates from the matrix
+         robust mean by more than 5 × MAD (flags clear data-entry errors like
+         decimal-point shifts or dropped digits).
+      2. Extreme % diff: |diff| > diff_k × crit  (or > diff_k% when crit is None).
+         These are reported separately from normal pass/fail failures so the
+         reader can distinguish "big real disagreement" from "bad input value."
+    """
+    warnings = []
+
+    def _scp_spikes(M, label):
+        flat = M[~np.isnan(M)].ravel()
+        if len(flat) < 4:
+            return
+        med = np.median(flat)
+        mad = np.median(np.abs(flat - med))
+        if mad < 1e-6:
+            return
+        thresh = 5.0 * mad
+        for ri, y in enumerate(y_vals):
+            for ci, x in enumerate(x_vals):
+                v = M[ri, ci]
+                if np.isnan(v):
+                    continue
+                if abs(v - med) > thresh:
+                    warnings.append(
+                        f"  SUSPECT {label} value: FS_Y={y:g}, FS_X={x:g}  "
+                        f"Scp={v:.4f}  (matrix median={med:.4f}, MAD={mad:.4f})")
+
+    _scp_spikes(Ma, 'A')
+    _scp_spikes(Mb, 'B')
+
+    # Extreme % diff (beyond diff_k × crit or diff_k% absolute)
+    threshold = diff_k * float(crit) if crit is not None else diff_k
+    for ri, y in enumerate(y_vals):
+        for ci, x in enumerate(x_vals):
+            d = pct[ri, ci]
+            if np.isnan(d):
+                continue
+            if abs(d) > threshold:
+                warnings.append(
+                    f"  EXTREME diff: FS_Y={y:g}, FS_X={x:g}  "
+                    f"%diff={d:+.2f}%  (threshold ±{threshold:.1f}%)")
+    return warnings
+
+
 def _print_diff_matrix(label_a, label_b, x_vals, y_vals, Ma, Mb):
     """Print A, B and % diff matrices to stdout (Y rows × X columns)."""
     pct = 100.0 * (Mb - Ma) / Ma
@@ -535,6 +584,15 @@ def _print_diff_matrix(label_a, label_b, x_vals, y_vals, Ma, Mb):
                                'display.max_columns', None,
                                'display.width', 250):
             print(df_out.to_string(float_format=fmt))
+    try:
+        crit = abs(float(pass_crit_var.get()))
+    except Exception:
+        crit = None
+    flags = _flag_outliers(Ma, Mb, pct, x_vals, y_vals, crit=crit)
+    if flags:
+        print(f"\n-- Outlier flags --")
+        for f in flags:
+            print(f)
     print('=' * 78)
 
 
@@ -1845,6 +1903,11 @@ def _add_matrix_text_page(pdf, Ma, Mb, pct, x_vals, y_vals, label_a, label_b,
             sections.append(_mat_df(mat).to_string(
                 float_format=lambda v, f=fmt: f"{v:{f}}"))
         sections.append("")
+    flags = _flag_outliers(Ma, Mb, pct, x_vals, y_vals, crit=crit)
+    if flags:
+        sections.append("-- Outlier flags --")
+        sections.extend(flags)
+        sections.append("")
     text = "\n".join(sections)
     fig_t = plt.figure(figsize=(11, 14))
     fig_t.text(0.02, 0.98, text, family='monospace', fontsize=8, va='top')
@@ -2038,6 +2101,21 @@ def _save_all_energy_report():
                 overall = 100.0 * tot_pass / tot_total
                 sum_lines.append('-' * 36)
                 sum_lines.append(f"{'Overall':<8}  {overall:>7.1f}%  {tot_pass:>6d}/{tot_total:<6d}")
+
+            # Collect all outlier flags across energies
+            all_flags = []
+            for entry in per_energy:
+                energy, _, _, _, _, x_v, y_v, Ma, Mb, pct_e, _ = entry
+                if x_v is None or Ma is None:
+                    continue
+                flags = _flag_outliers(Ma, Mb, pct_e, x_v, y_v, crit=crit)
+                for f in flags:
+                    all_flags.append(f"[{energy}]{f}")
+            if all_flags:
+                sum_lines.append("")
+                sum_lines.append("Outlier flags:")
+                sum_lines.extend(all_flags)
+
             sum_text = "\n".join(sum_lines)
             print("\n" + sum_text)
             sfig = plt.figure(figsize=(11, 9))

@@ -45,6 +45,13 @@ MARKER_MAP = {
 }
 MARKER_COLOR = "black"   # or "#444", "0.3", etc.
 
+DETECTOR_LABEL = {
+    "IROC Revised": "AlO OSLD",
+    "RDS": "TLD",
+    "IROC BeO": "BeO OSLD",
+    "Consortium Audit": "IC",
+}
+
 DEFAULT_TOL = 0.05   # default acceptance tolerance (±5%), drawn as dashed lines around the 1.0 baseline
 
 # Default y-axis range and tick spacing, all in PERCENT around the 1.0 baseline.
@@ -252,7 +259,8 @@ def _apply_yaxis(ax, range_pct=DEFAULT_YRANGE_PCT,
 
 def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels: bool = False, show_energy_labels: bool = False, ref_label: str = "Institution", show_tolerance: bool = True, tol: float = DEFAULT_TOL,
                     y_range: float = DEFAULT_YRANGE_PCT, major_tick: float = DEFAULT_MAJOR_PCT, minor_tick: float = DEFAULT_MINOR_PCT,
-                    show_points: bool = True, normalized: bool = False, show_outlier_markers: bool = True, show_n: bool = False):
+                    show_points: bool = True, normalized: bool = False, show_outlier_markers: bool = True, show_n: bool = False,
+                    label_by_detector: bool = False):
 
 
     data = long.copy()
@@ -336,10 +344,13 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
 
 
     # Labels (no title)
+    def _disp(sys):
+        return DETECTOR_LABEL.get(sys, sys) if label_by_detector else sys
+
     ax.set_xticks(positions)
     tick_labels = (
-        [f"{s}\n(n={len(v)})" for s, v in zip(systems_present, series)]
-        if show_n else systems_present
+        [f"{_disp(s)}\n(n={len(v)})" for s, v in zip(systems_present, series)]
+        if show_n else [_disp(s) for s in systems_present]
     )
     ax.set_xticklabels(tick_labels, rotation=0)
     ax.set_ylabel(f"Output (relative to {ref_label})" if normalized
@@ -353,7 +364,7 @@ def _system_boxplot(long: pd.DataFrame, show_dates: bool = False, show_sn_labels
             Line2D([], [], linestyle="None",
                    marker=marker_map.get(sys, "D"), markersize=10,
                    markerfacecolor="none", markeredgecolor=MARKER_COLOR, color=MARKER_COLOR,
-                   label=sys)
+                   label=_disp(sys))
             for sys in systems_present
         ]
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
@@ -380,7 +391,8 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
                      minor_tick: float = DEFAULT_MINOR_PCT,
                      show_points: bool = True,
                      normalized: bool = False,
-                     show_outlier_markers: bool = True):
+                     show_outlier_markers: bool = True,
+                     label_by_detector: bool = False):
 
 
     data = long.copy()
@@ -500,10 +512,13 @@ def _grouped_boxplot(long: pd.DataFrame, group_col: str, energies_order,
     _apply_yaxis(ax, y_range, major_tick, minor_tick)
 
     # Legend: markers for each system + dashed baseline
+    def _disp(sys):
+        return DETECTOR_LABEL.get(sys, sys) if label_by_detector else sys
+
     handles = [Line2D([], [], linestyle="None",
                       marker=marker_map.get(sys, "D"), markersize=10,
                       markerfacecolor="none", markeredgecolor=MARKER_COLOR, color=MARKER_COLOR,
-                      label=sys) for sys in systems]
+                      label=_disp(sys)) for sys in systems]
 
     handles.append(Line2D([0], [0], linestyle="--", color="black", label=ref_label))
     if show_outlier_markers:
@@ -922,7 +937,8 @@ def make_plots(df: pd.DataFrame,
                show_n: bool = False,
                outlier_thr: str = "",
                show_repeat_spread: bool = False,
-               debug_scales: dict = None):
+               debug_scales: dict = None,
+               label_by_detector: bool = False):
 
     # Apply font size to all subsequently created matplotlib text
     plt.rcParams.update({
@@ -1040,7 +1056,8 @@ def make_plots(df: pd.DataFrame,
                         show_tolerance=show_tolerance, tol=tolerance,
                         y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
                         show_points=show_points, normalized=normalized,
-                        show_outlier_markers=show_outlier_markers, show_n=show_n)
+                        show_outlier_markers=show_outlier_markers, show_n=show_n,
+                        label_by_detector=label_by_detector)
 
     if show_sn:
         _grouped_boxplot(
@@ -1053,9 +1070,9 @@ def make_plots(df: pd.DataFrame,
             show_tolerance=show_tolerance,
             tol=tolerance,
             y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
-            show_points=show_points, normalized=normalized, show_outlier_markers=show_outlier_markers
+            show_points=show_points, normalized=normalized, show_outlier_markers=show_outlier_markers,
+            label_by_detector=label_by_detector
         )
-
 
     if show_energy:
         _grouped_boxplot(
@@ -1069,7 +1086,8 @@ def make_plots(df: pd.DataFrame,
             show_tolerance=show_tolerance,
             tol=tolerance,
             y_range=y_range, major_tick=major_tick, minor_tick=minor_tick,
-            show_points=show_points, normalized=normalized, show_outlier_markers=show_outlier_markers
+            show_points=show_points, normalized=normalized, show_outlier_markers=show_outlier_markers,
+            label_by_detector=label_by_detector
         )
 
 
@@ -1167,6 +1185,8 @@ class App(tk.Tk):
         ttk.Checkbutton(container, text="Mark outliers (★)", variable=self.show_outlier_markers).grid(row=8, column=2, sticky="w", **pad)
         self.show_n = tk.BooleanVar(value=False)
         ttk.Checkbutton(container, text="Show n= counts (system plot)", variable=self.show_n).grid(row=9, column=0, columnspan=2, sticky="w", **pad)
+        self.label_by_detector = tk.BooleanVar(value=False)
+        ttk.Checkbutton(container, text="Label by detector type", variable=self.label_by_detector).grid(row=9, column=2, sticky="w", **pad)
 
         # ---- System selection ----
         ttk.Label(container, text="Select System(s) for global filter:").grid(
@@ -1519,7 +1539,8 @@ class App(tk.Tk):
                show_n=self.show_n.get(),
                outlier_thr=self.outlier_thr_var.get().strip(),
                show_repeat_spread=self.show_repeat_spread.get(),
-               debug_scales=self._debug_scales)
+               debug_scales=self._debug_scales,
+               label_by_detector=self.label_by_detector.get())
         except Exception as e:
             messagebox.showerror("Plot error", str(e))
 

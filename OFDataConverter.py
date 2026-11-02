@@ -284,6 +284,8 @@ detector_var = tk.StringVar(master=root)
 ref_x_var    = tk.StringVar(master=root, value='10.5')
 ref_y_var    = tk.StringVar(master=root, value='10.5')
 force_norm   = tk.BooleanVar(master=root, value=False)
+# "cols_x" = columns are X (parser default); "cols_y" = columns are Y (swap after parse)
+axis_orient  = tk.StringVar(master=root, value='cols_x')
 
 conflict_var = tk.StringVar(master=root, value='replace')
 
@@ -360,6 +362,9 @@ def _preview_from_raw(raw, source_tag=''):
     except Exception as e:
         messagebox.showerror("Error", f"Failed to parse: {e}")
         return
+
+    if axis_orient.get() == 'cols_y':
+        df = df.rename(columns={'FS_X': 'FS_Y', 'FS_Y': 'FS_X'})
 
     try:
         ref_x = float(ref_x_var.get()); ref_y = float(ref_y_var.get())
@@ -551,6 +556,11 @@ ttk.Label(norm_frame, text="Y:").grid(row=0, column=2)
 ttk.Entry(norm_frame, textvariable=ref_y_var, width=8).grid(row=0, column=3, padx=4)
 ttk.Checkbutton(norm_frame, text="Force renormalize (override auto-detect)",
                 variable=force_norm).grid(row=0, column=4, padx=(12, 0))
+ttk.Label(norm_frame, text="Table orientation:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+ttk.Radiobutton(norm_frame, text="Columns = X, Rows = Y",
+                variable=axis_orient, value='cols_x').grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
+ttk.Radiobutton(norm_frame, text="Columns = Y, Rows = X",
+                variable=axis_orient, value='cols_y').grid(row=1, column=3, columnspan=2, sticky="w", pady=(6, 0))
 
 # Destination + conflict
 ttk.Label(main, text="Destination file:").grid(row=4, column=0, sticky="w", pady=(8, 0))

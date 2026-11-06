@@ -213,15 +213,15 @@ def parse_scans(df):
     return scans
 
 
-def write_sheet_inplace(source_path, sheet_name, cleaned_df):
-    """Write cleaned_df back to source_path in place, backing up original."""
-    src        = Path(source_path)
-    backup_dir = src.parent / 'Backups'
-    backup_dir.mkdir(exist_ok=True)
-    backup = backup_dir / (src.stem + '_orig.xlsx')
-    tmp    = src.with_name(src.stem + '_cleaned.xlsx')
+def write_sheet_inplace(source_path, sheet_name, cleaned_df, backup=True):
+    """Write cleaned_df back to source_path in place.
+    If backup=True, saves original to Backups/<stem>_orig.xlsx first.
+    Returns the backup path if one was made, else None.
+    """
+    src = Path(source_path)
+    tmp = src.with_name(src.stem + '_cleaned.xlsx')
 
-    # Write cleaned version to temp file first (safe), then close the handle
+    # Write cleaned version to temp file first (safe)
     with pd.ExcelFile(source_path, engine='openpyxl') as xl:
         sheets = {sn: (cleaned_df if sn == sheet_name else xl.parse(sn))
                   for sn in xl.sheet_names}
@@ -229,12 +229,19 @@ def write_sheet_inplace(source_path, sheet_name, cleaned_df):
         for sn, frame in sheets.items():
             frame.to_excel(writer, sheet_name=sn, index=False)
 
-    # Swap: original → backup, tmp → original
-    if backup.exists():
-        backup.unlink()
-    src.rename(backup)
-    tmp.rename(src)
-    return backup
+    if backup:
+        backup_dir = src.parent / 'Backups'
+        backup_dir.mkdir(exist_ok=True)
+        backup_path = backup_dir / (src.stem + '_orig.xlsx')
+        if backup_path.exists():
+            backup_path.unlink()
+        src.rename(backup_path)
+        tmp.rename(src)
+        return backup_path
+    else:
+        src.unlink()
+        tmp.rename(src)
+        return None
 
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
@@ -254,6 +261,7 @@ class App(tk.Tk):
         self._sort_col    = None
         self._sort_asc    = True
         self._filter_vars: dict[str, tk.StringVar] = {}
+        self._do_backup   = tk.BooleanVar(value=True)
 
         self._build_ui()
 
@@ -290,6 +298,8 @@ class App(tk.Tk):
                    command=self._clear_marks).pack(side='left', padx=4)
         ttk.Button(btn, text="Auto-mark duplicates",
                    command=self._auto_mark).pack(side='left', padx=12)
+        ttk.Checkbutton(btn, text="Backup before delete",
+                        variable=self._do_backup).pack(side='right', padx=(12, 4))
         self.delete_btn = ttk.Button(btn, text="Delete marked →",
                                      command=self._delete)
         self.delete_btn.pack(side='right', padx=4)
@@ -700,13 +710,16 @@ class App(tk.Tk):
         to_keep       = [s for s in self._scans if not s['delete']]
         n_rows_before = sum(len(s['row_indices']) for s in self._scans)
         n_rows_after  = sum(len(s['row_indices']) for s in to_keep)
-        src           = Path(self._source_path)
+        src       = Path(self._source_path)
+        do_backup = self._do_backup.get()
+        backup_note = f"Original backed up as:  Backups/{src.stem}_orig.xlsx\n\n" if do_backup \
+                      else "NO BACKUP will be made.\n\n"
 
         if not messagebox.askyesno('Confirm delete',
                 f"Delete {len(to_delete)} scan(s)  "
                 f"({n_rows_before - n_rows_after} rows).\n"
                 f"Keep {len(to_keep)} scan(s)  ({n_rows_after} rows).\n\n"
-                f"Original backed up as:  {src.stem}_orig.xlsx\n\n"
+                f"{backup_note}"
                 f"Continue?"):
             return
 
@@ -723,10 +736,15 @@ class App(tk.Tk):
                 for s in to_keep:
                     kept_idx.extend(s['row_indices'])
                 cleaned_df = source_df.loc[sorted(kept_idx)].reset_index(drop=True)
-                backup = write_sheet_inplace(source_path, sheet_name, cleaned_df)
-                msg = (f"Deleted {len(to_delete)} scan(s).\n"
-                       f"Backup: Backups/{backup.name}\n"
-                       f"Saved:  {Path(source_path).name}")
+                backup_path = write_sheet_inplace(source_path, sheet_name, cleaned_df,
+                                                  backup=do_backup)
+                if backup_path:
+                    msg = (f"Deleted {len(to_delete)} scan(s).\n"
+                           f"Backup: Backups/{backup_path.name}\n"
+                           f"Saved:  {Path(source_path).name}")
+                else:
+                    msg = (f"Deleted {len(to_delete)} scan(s).\n"
+                           f"Saved:  {Path(source_path).name}  (no backup)")
                 self.after(0, lambda m=msg: self._log(m))
                 self.after(0, lambda m=msg: messagebox.showinfo('Done', m))
                 self.after(0, self._load)

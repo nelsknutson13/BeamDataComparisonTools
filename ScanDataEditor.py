@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 try:
     from matplotlib.figure import Figure
@@ -213,6 +213,70 @@ def parse_scans(df):
     return scans
 
 
+def rename_tab_inplace(source_path, old_name, new_name, backup=True):
+    """Rename old_name to new_name in source_path.
+    Returns backup path if one was made, else None.
+    """
+    src = Path(source_path)
+    tmp = src.with_name(src.stem + '_cleaned.xlsx')
+
+    with pd.ExcelFile(source_path, engine='openpyxl') as xl:
+        if new_name in xl.sheet_names and new_name != old_name:
+            raise RuntimeError(f"A sheet named '{new_name}' already exists.")
+        sheets = {(new_name if sn == old_name else sn): xl.parse(sn)
+                  for sn in xl.sheet_names}
+
+    with pd.ExcelWriter(str(tmp), engine='openpyxl') as writer:
+        for sn, frame in sheets.items():
+            frame.to_excel(writer, sheet_name=sn, index=False)
+
+    if backup:
+        backup_dir = src.parent / 'Backups'
+        backup_dir.mkdir(exist_ok=True)
+        backup_path = backup_dir / (src.stem + '_orig.xlsx')
+        if backup_path.exists():
+            backup_path.unlink()
+        src.rename(backup_path)
+        tmp.rename(src)
+        return backup_path
+    else:
+        src.unlink()
+        tmp.rename(src)
+        return None
+
+
+def delete_tab_inplace(source_path, sheet_name, backup=True):
+    """Remove sheet_name entirely from source_path.
+    Returns backup path if one was made, else None.
+    """
+    src = Path(source_path)
+    tmp = src.with_name(src.stem + '_cleaned.xlsx')
+
+    with pd.ExcelFile(source_path, engine='openpyxl') as xl:
+        remaining = [sn for sn in xl.sheet_names if sn != sheet_name]
+        if not remaining:
+            raise RuntimeError("Cannot delete the only sheet in the file.")
+        sheets = {sn: xl.parse(sn) for sn in remaining}
+
+    with pd.ExcelWriter(str(tmp), engine='openpyxl') as writer:
+        for sn, frame in sheets.items():
+            frame.to_excel(writer, sheet_name=sn, index=False)
+
+    if backup:
+        backup_dir = src.parent / 'Backups'
+        backup_dir.mkdir(exist_ok=True)
+        backup_path = backup_dir / (src.stem + '_orig.xlsx')
+        if backup_path.exists():
+            backup_path.unlink()
+        src.rename(backup_path)
+        tmp.rename(src)
+        return backup_path
+    else:
+        src.unlink()
+        tmp.rename(src)
+        return None
+
+
 def write_sheet_inplace(source_path, sheet_name, cleaned_df, backup=True):
     """Write cleaned_df back to source_path in place.
     If backup=True, saves original to Backups/<stem>_orig.xlsx first.
@@ -262,6 +326,7 @@ class App(tk.Tk):
         self._sort_asc    = True
         self._filter_vars: dict[str, tk.StringVar] = {}
         self._do_backup   = tk.BooleanVar(value=True)
+        self._dirty       = False
 
         self._build_ui()
 
@@ -298,11 +363,20 @@ class App(tk.Tk):
                    command=self._clear_marks).pack(side='left', padx=4)
         ttk.Button(btn, text="Auto-mark duplicates",
                    command=self._auto_mark).pack(side='left', padx=12)
+        self.save_edits_btn = ttk.Button(btn, text="Save edits",
+                                         command=self._save_edits, state='disabled')
+        self.save_edits_btn.pack(side='left', padx=12)
         ttk.Checkbutton(btn, text="Backup before delete",
                         variable=self._do_backup).pack(side='right', padx=(12, 4))
         self.delete_btn = ttk.Button(btn, text="Delete marked →",
                                      command=self._delete)
         self.delete_btn.pack(side='right', padx=4)
+        self.delete_tab_btn = ttk.Button(btn, text="Delete tab…",
+                                         command=self._delete_tab)
+        self.delete_tab_btn.pack(side='right', padx=4)
+        self.rename_tab_btn = ttk.Button(btn, text="Rename tab…",
+                                         command=self._rename_tab)
+        self.rename_tab_btn.pack(side='right', padx=4)
 
         # Row 3: filter bar
         fbar = ttk.LabelFrame(main, text="Filter")
@@ -370,7 +444,8 @@ class App(tk.Tk):
         self.tree.grid(row=0, column=0, sticky='nsew')
         vsb.grid(row=0, column=1, sticky='ns')
         hsb.grid(row=1, column=0, sticky='ew')
-        self.tree.bind('<Button-1>', self._on_click)
+        self.tree.bind('<Button-1>',        self._on_click)
+        self.tree.bind('<Double-Button-1>', self._on_double_click)
 
         self.tree.tag_configure(TAG_UNIQUE,    background='')
         self.tree.tag_configure(TAG_DUP_IDENT, background='#FFF3CD')
@@ -461,6 +536,7 @@ class App(tk.Tk):
             self._refresh_filter_values()
             self._clear_filters()
             self._update_summary()
+            self._clear_dirty()
             self._log(f"Loaded {len(self._scans)} scans  ({len(df)} rows total).")
         except Exception as e:
             self._log(f"ERROR: {e}")
@@ -696,6 +772,260 @@ class App(tk.Tk):
         self._update_summary()
 
     # ── Delete ────────────────────────────────────────────────────────────────
+
+    # ── Edit scan parameters ──────────────────────────────────────────────────
+
+    def _on_double_click(self, event):
+        if self.tree.identify_region(event.x, event.y) != 'cell':
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        pos      = list(self.tree.get_children()).index(iid)
+        scan_idx = self._visible_idx[pos]
+        self._open_edit_dialog(scan_idx)
+
+    def _open_edit_dialog(self, scan_idx):
+        scan = self._scans[scan_idx]
+        dlg  = tk.Toplevel(self)
+        dlg.title("Edit scan parameters")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        fields = [
+            ('Energy',   'energy',   str),
+            ('SSD',      'ssd',      str),
+            ('FS',       'fs',       str),
+            ('Axis',     'axis',     str),
+            ('Depth',    'depth',    str),
+            ('Detector', 'detector', str),
+        ]
+
+        entries = {}
+        for row, (label, key, _) in enumerate(fields):
+            ttk.Label(dlg, text=f"{label}:").grid(row=row, column=0, sticky='w',
+                                                   padx=(12, 4), pady=4)
+            var = tk.StringVar(value=str(scan[key]) if scan[key] != '' else '')
+            ent = ttk.Entry(dlg, textvariable=var, width=20)
+            ent.grid(row=row, column=1, padx=(0, 12), pady=4)
+            entries[key] = var
+
+        note = ttk.Label(dlg,
+                         text="Changes apply to all rows in this scan.\n"
+                              "Save edits → writes to disk.",
+                         foreground='gray', justify='left')
+        note.grid(row=len(fields), column=0, columnspan=2, padx=12, pady=(0, 6))
+
+        def _apply():
+            df = self._source_df
+            row_idx = scan['row_indices']
+            col_map = {
+                'energy':   'Energy',
+                'ssd':      'SSD',
+                'fs':       'FS',
+                'axis':     'Axis',
+                'depth':    'Depth',
+                'detector': 'Detector',
+            }
+            for key, var in entries.items():
+                col = col_map[key]
+                if col not in df.columns:
+                    continue
+                raw = var.get().strip()
+                # Try to coerce numeric columns back to float
+                if col in ('SSD', 'FS', 'Depth'):
+                    try:
+                        val = float(raw)
+                    except ValueError:
+                        val = raw
+                else:
+                    val = raw
+                df.loc[row_idx, col] = val
+
+            # Re-parse so groups update (a changed FS splits/merges groups)
+            self._scans = parse_scans(df)
+            self._sort_col = None
+            self._sort_asc = True
+            self._refresh_filter_values()
+            self._apply_view()
+            self._mark_dirty()
+            dlg.destroy()
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.grid(row=len(fields) + 1, column=0, columnspan=2, pady=8)
+        ttk.Button(btn_frame, text="Apply", command=_apply).pack(side='left', padx=6)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side='left', padx=6)
+
+        dlg.bind('<Return>', lambda *_: _apply())
+        dlg.bind('<Escape>', lambda *_: dlg.destroy())
+
+    def _mark_dirty(self):
+        self._dirty = True
+        self.save_edits_btn.config(state='normal', text='Save edits ●')
+
+    def _save_edits(self):
+        if not self._dirty or self._source_df is None:
+            return
+        src       = Path(self._source_path)
+        do_backup = self._do_backup.get()
+        backup_note = f"Original backed up as:  Backups/{src.stem}_orig.xlsx\n\n" if do_backup \
+                      else "NO BACKUP will be made.\n\n"
+
+        if not messagebox.askyesno('Save edits',
+                f"Write edited data to:\n{src.name}\n\n"
+                f"{backup_note}Continue?"):
+            return
+
+        self._log(f"Saving edits to {src.name}…")
+        self.save_edits_btn.config(state='disabled')
+
+        source_df   = self._source_df
+        source_path = self._source_path
+        sheet_name  = self._sheet_name
+
+        def worker():
+            try:
+                backup_path = write_sheet_inplace(source_path, sheet_name,
+                                                  source_df, backup=do_backup)
+                if backup_path:
+                    msg = f"Saved edits.\nBackup: Backups/{backup_path.name}"
+                else:
+                    msg = "Saved edits.  (no backup)"
+                self.after(0, lambda m=msg: self._log(m))
+                self.after(0, lambda m=msg: messagebox.showinfo('Done', m))
+                self.after(0, self._clear_dirty)
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda m=err: self._log(f"ERROR: {m}"))
+                self.after(0, lambda m=err: messagebox.showerror('Error', m))
+                self.after(0, lambda: self.save_edits_btn.config(state='normal'))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _clear_dirty(self):
+        self._dirty = False
+        self.save_edits_btn.config(state='disabled', text='Save edits')
+
+    def _rename_tab(self):
+        if not self._source_path or not self._sheet_name:
+            messagebox.showinfo('Nothing loaded', 'Load a sheet first.')
+            return
+
+        new_name = simpledialog.askstring(
+            'Rename tab',
+            f"New name for sheet '{self._sheet_name}':",
+            initialvalue=self._sheet_name,
+            parent=self,
+        )
+        if not new_name or new_name.strip() == self._sheet_name:
+            return
+        new_name = new_name.strip()
+
+        src       = Path(self._source_path)
+        do_backup = self._do_backup.get()
+
+        self._log(f"Renaming tab '{self._sheet_name}' → '{new_name}' in {src.name}…")
+        self.rename_tab_btn.config(state='disabled')
+
+        source_path = self._source_path
+        old_name    = self._sheet_name
+
+        def worker():
+            try:
+                backup_path = rename_tab_inplace(source_path, old_name, new_name,
+                                                 backup=do_backup)
+                if backup_path:
+                    msg = (f"Renamed '{old_name}' → '{new_name}'.\n"
+                           f"Backup: Backups/{backup_path.name}\n"
+                           f"Saved:  {src.name}")
+                else:
+                    msg = (f"Renamed '{old_name}' → '{new_name}'.\n"
+                           f"Saved:  {src.name}  (no backup)")
+                self.after(0, lambda m=msg: self._log(m))
+                self.after(0, lambda m=msg: messagebox.showinfo('Done', m))
+                self.after(0, lambda: self._reload_after_rename(source_path, new_name))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda m=err: self._log(f"ERROR: {m}"))
+                self.after(0, lambda m=err: messagebox.showerror('Error', m))
+            finally:
+                self.after(0, lambda: self.rename_tab_btn.config(state='normal'))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _reload_after_rename(self, source_path, new_name):
+        """Refresh sheet dropdown and reload the renamed sheet."""
+        try:
+            xl = pd.ExcelFile(source_path)
+            self.sheet_cb['values'] = xl.sheet_names
+        except Exception:
+            pass
+        self.sheet_var.set(new_name)
+        self._load()
+
+    def _delete_tab(self):
+        if not self._source_path or not self._sheet_name:
+            messagebox.showinfo('Nothing loaded', 'Load a sheet first.')
+            return
+
+        src       = Path(self._source_path)
+        do_backup = self._do_backup.get()
+        backup_note = f"Original backed up as:  Backups/{src.stem}_orig.xlsx\n\n" if do_backup \
+                      else "NO BACKUP will be made.\n\n"
+
+        if not messagebox.askyesno('Confirm delete tab',
+                f"Permanently delete sheet '{self._sheet_name}' from:\n"
+                f"{src.name}\n\n"
+                f"{backup_note}"
+                f"This removes ALL {len(self._scans)} scans in this tab.\n\n"
+                f"Continue?"):
+            return
+
+        self._log(f"Deleting tab '{self._sheet_name}' from {src.name}…")
+        self.delete_tab_btn.config(state='disabled')
+
+        source_path = self._source_path
+        sheet_name  = self._sheet_name
+
+        def worker():
+            try:
+                backup_path = delete_tab_inplace(source_path, sheet_name, backup=do_backup)
+                if backup_path:
+                    msg = (f"Tab '{sheet_name}' deleted.\n"
+                           f"Backup: Backups/{backup_path.name}\n"
+                           f"Saved:  {src.name}")
+                else:
+                    msg = (f"Tab '{sheet_name}' deleted.\n"
+                           f"Saved:  {src.name}  (no backup)")
+                self.after(0, lambda m=msg: self._log(m))
+                self.after(0, lambda m=msg: messagebox.showinfo('Done', m))
+                # Reload the file so the sheet list updates
+                self.after(0, lambda: self._reload_file_after_tab_delete(source_path))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda m=err: self._log(f"ERROR: {m}"))
+                self.after(0, lambda m=err: messagebox.showerror('Error', m))
+            finally:
+                self.after(0, lambda: self.delete_tab_btn.config(state='normal'))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _reload_file_after_tab_delete(self, source_path):
+        """Refresh the sheet dropdown after a tab deletion and clear the loaded data."""
+        try:
+            xl = pd.ExcelFile(source_path)
+            self.sheet_cb['values'] = xl.sheet_names
+            if xl.sheet_names:
+                self.sheet_var.set(xl.sheet_names[0])
+        except Exception:
+            pass
+        # Clear the editor state
+        self._source_df   = None
+        self._scans       = []
+        self._visible_idx = []
+        self._sheet_name  = None
+        self.tree.delete(*self.tree.get_children())
+        self._update_summary()
 
     def _delete(self):
         if not self._scans:

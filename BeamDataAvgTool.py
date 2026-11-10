@@ -369,7 +369,15 @@ def plot_data():
         ax_profiles.set_ylabel('Dose [%]')
         ax_profiles.set_xlabel('Off Axis Position [cm]')
         max_field_size = max(fsl) if fsl else 0
-        ax_profiles.set_xlim([-max_field_size/2-20, max_field_size/2+20])
+        try:
+            _pxmin = float(profile_xmin_entry.get())
+        except ValueError:
+            _pxmin = -max_field_size / 2 - 20
+        try:
+            _pxmax = float(profile_xmax_entry.get())
+        except ValueError:
+            _pxmax = max_field_size / 2 + 20
+        ax_profiles.set_xlim([_pxmin, _pxmax])
         ax_profiles.set_ylim([0, 110])
 
     # Set up plotting for Z profiles
@@ -380,7 +388,15 @@ def plot_data():
         ax_z.set_title("Z Profiles")
         ax_z.set_ylabel('Percentage Depth Dose [%]')
         ax_z.set_xlabel('Position [cm]')
-        ax_z.set_xlim([0, 30])
+        try:
+            _zxmin = float(z_xmin_entry.get())
+        except ValueError:
+            _zxmin = 0
+        try:
+            _zxmax = float(z_xmax_entry.get())
+        except ValueError:
+            _zxmax = 30
+        ax_z.set_xlim([_zxmin, _zxmax])
         ax_z.set_ylim([0, 110])
 
     # Define a color map for sheets
@@ -429,10 +445,10 @@ def plot_data():
                                 avg_dose = avg_dose_global[combination_key]
                                 fixed_pos = fixed_pos_global[combination_key]
                                 # Only label the first average plot once
-                                label = f"Average FS: {fs}, Axis: {axis}, Depth: {depth}" if fs == fsl[0] and axis == scl[0] and depth == dl[0] else None
+                                label = "Average" if fs == fsl[0] and axis == scl[0] and depth == dl[0] else None
                                 ax_profiles.plot(fixed_pos, avg_dose, '-k', label=label, linewidth=2)
 
-                                # Plot clinical tolerance envelope (combined dose and positional tolerance)
+                                # Plot tolerance envelope
                                 dose_tolerance, pos_tolerance = get_clinical_criteria()  # Assuming clinical criteria function
 
                                 # Convert positional tolerance from mm to cm
@@ -456,7 +472,7 @@ def plot_data():
 
                                 # Plot the final envelope
                                 if show_band_var.get():
-                                    ax_profiles.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'Clinical Tolerance Envelope ({dose_tolerance}%/{pos_tolerance}mm)' if label else None)
+                                    ax_profiles.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'({dose_tolerance}%/{pos_tolerance}mm) Envelope' if label else None)
 
                     elif axis == 'Z':
                         combination_key = (fs, axis, None)
@@ -467,7 +483,7 @@ def plot_data():
                             label = "Average" if fs == fsl[0] and axis == 'Z' else None
                             ax_z.plot(fixed_pos, avg_dose, '-k', label=label, linewidth=2)
 
-                            # Plot clinical tolerance envelope (combined dose and positional tolerance)
+                            # Plot tolerance envelope
                             dose_tolerance, pos_tolerance = get_clinical_criteria()  # Assuming clinical criteria function
 
                             # Convert positional tolerance from mm to cm
@@ -491,7 +507,7 @@ def plot_data():
 
                             # Plot the final envelope
                             if show_band_var.get():
-                                ax_z.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'Clinical Tolerance Envelope ({dose_tolerance}%/{pos_tolerance}mm)' if label else None)
+                                ax_z.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'({dose_tolerance}%/{pos_tolerance}mm) Envelope' if label else None)
     except NameError:
         print("Average data does not exist. Run make_avg first to calculate averages.")
 
@@ -719,6 +735,22 @@ font_size_entry.grid(row=0, column=9, sticky="w", padx=(0, 20))
 show_band_var = tk.BooleanVar(value=True)
 ttk.Checkbutton(controls_frame, text="Show uncertainty band", variable=show_band_var).grid(
     row=0, column=10, sticky="w")
+
+ttk.Label(controls_frame, text="Profile x [cm]:").grid(row=1, column=0, sticky="w", padx=(0, 5))
+profile_xmin_entry = ttk.Entry(controls_frame, width=6)
+profile_xmin_entry.grid(row=1, column=1, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="to").grid(row=1, column=2, sticky="w")
+profile_xmax_entry = ttk.Entry(controls_frame, width=6)
+profile_xmax_entry.grid(row=1, column=3, sticky="w", padx=(0, 20))
+
+ttk.Label(controls_frame, text="PDD x [cm]:").grid(row=1, column=4, sticky="w", padx=(0, 5))
+z_xmin_entry = ttk.Entry(controls_frame, width=6)
+z_xmin_entry.insert(0, "0")
+z_xmin_entry.grid(row=1, column=5, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="to").grid(row=1, column=6, sticky="w")
+z_xmax_entry = ttk.Entry(controls_frame, width=6)
+z_xmax_entry.insert(0, "30")
+z_xmax_entry.grid(row=1, column=7, sticky="w", padx=(0, 20))
 
 # Pre-processing frame
 preproc_frame = ttk.LabelFrame(root, text="Pre-processing", padding="5")

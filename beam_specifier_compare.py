@@ -1271,7 +1271,7 @@ def run_compare():
             except Exception:
                 pass
 
-            if show_detector_var.get():
+            if show_detector_var.get() or apply_pion_var.get():
                 sub = df[df['FS'] == fs_ref]
                 if file_kw == 'PDD':
                     sub = sub[sub['Axis'] == 'Z']

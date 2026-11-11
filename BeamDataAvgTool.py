@@ -1,10 +1,12 @@
 # Script to make AVG PDDs from multiple data sets and output the avg and plot that plus a confidence interval
 import pandas as pd
 from matplotlib import pyplot as plt
+from matplotlib.patches import Patch as _MPatch
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, ttk
 from scipy.interpolate import interp1d, PchipInterpolator
+from scipy.stats import norm as _norm
 
 # Function to handle file selection and populate sheet names
 
@@ -217,7 +219,45 @@ def save_average():
 
     print(f"Average data saved to {output_file}")
 
-_manual_shifts = {}   # {sheet_name: x_shift_cm}
+_manual_shifts      = {}   # {sheet_name: x_shift_cm}
+std_dose_global     = {}   # {combination: std_array}
+_raw_stacks_global  = {}   # {combination: {sheet_name: resampled_array}}
+
+
+def _compute_dta(sheet_dose, avg_dose, fixed_pos, pos_tol_cm):
+    """DTA (cm) at each position: smallest shift of avg that matches sheet_dose.
+    Search is capped at ±(pos_tol_cm + 0.1 cm), matching the comp.py convention."""
+    valid = ~np.isnan(avg_dose) & ~np.isnan(sheet_dose)
+    if not valid.any():
+        return np.full(len(fixed_pos), np.nan)
+    avg_int = PchipInterpolator(fixed_pos[valid], avg_dose[valid], extrapolate=False)
+    search   = np.arange(-(pos_tol_cm + 0.1), pos_tol_cm + 0.11, 0.01)
+    avg_grid     = avg_int(fixed_pos[:, None] + search[None, :])   # (N, S)
+    diffs        = np.abs(sheet_dose[:, None] - avg_grid)          # (N, S)
+    diffs_filled = np.where(np.isnan(diffs), np.inf, diffs)        # replace NaN so argmin works
+    best_ix      = np.argmin(diffs_filled, axis=1)
+    dta_out      = np.abs(search[best_ix])
+    # positions where the entire search row was NaN → cap at search boundary
+    dta_out[np.all(np.isnan(diffs), axis=1)] = pos_tol_cm + 0.1
+    return dta_out   # cm
+
+
+def _compute_envelope(avg_dose, fixed_pos, dose_tolerance, pos_tolerance, axis):
+    """Return (upper_envelope, lower_envelope) for the tolerance band."""
+    tol_cm = pos_tolerance / 10.0
+    if axis in ('X', 'Y', 'XY', 'YX'):
+        sh_l = np.interp(fixed_pos, fixed_pos - tol_cm, avg_dose, left=np.nan, right=np.nan)
+        sh_r = np.interp(fixed_pos, fixed_pos + tol_cm, avg_dose, left=np.nan, right=np.nan)
+        upper = np.fmax(avg_dose + dose_tolerance, np.fmax(sh_l, sh_r))
+        lower = np.fmin(avg_dose - dose_tolerance, np.fmin(sh_l, sh_r))
+        upper = np.nan_to_num(upper, nan=avg_dose[-1])
+        lower = np.nan_to_num(lower, nan=avg_dose[0])
+    else:
+        up_shift = np.interp(fixed_pos + tol_cm, fixed_pos, avg_dose, left=np.nan, right=np.nan)
+        lo_shift = np.interp(fixed_pos - tol_cm, fixed_pos, avg_dose, left=np.nan, right=np.nan)
+        upper = np.fmax(avg_dose + dose_tolerance, np.nan_to_num(up_shift, nan=avg_dose[-1]))
+        lower = np.fmin(avg_dose - dose_tolerance, np.nan_to_num(lo_shift, nan=avg_dose[0]))
+    return upper, lower
 
 
 def _preprocess(pos, dose, axis, sheet):
@@ -400,14 +440,22 @@ def plot_data():
         ax_z.set_ylim([0, 110])
 
     # Define a color map for sheets
-    color_map = plt.cm.get_cmap("tab20", len(selected_sheets))
+    color_map = plt.colormaps["tab20"].resampled(len(selected_sheets))
+
+    highlight_sheet = highlight_var.get() if highlight_var.get() != "None" else None
 
     # Plot actual data from sheets
     for sheet_idx, sheet in enumerate(selected_sheets):
         df = excel_data[sheet].sort_values(by=['FS', 'Axis', 'Pos'])
-        color = color_map(sheet_idx)
+        color  = color_map(sheet_idx)
         marker = markers[sheet_idx % len(markers)]
-        sheet_labeled = False  # To label the sheet only once in the legend
+        is_highlight = (sheet == highlight_sheet)
+        ls    = 'None'
+        color = 'red'    if is_highlight else color_map(sheet_idx)
+        alpha = 1.0      if is_highlight else 0.5
+        ms    = _ms * 2  if is_highlight else _ms
+        zord  = 5        if is_highlight else 2
+        sheet_labeled = False
         for fs in fsl:
             for axis in scl:
                 if axis in ['X', 'Y', 'XY', 'YX']:
@@ -417,10 +465,10 @@ def plot_data():
                             dose = df.loc[(df['FS'] == fs) & (df['Axis'] == axis) & (df['Depth'] == depth), 'Dose'].values
                             pos, dose = _preprocess(pos, dose, axis, sheet)
                             if not sheet_labeled:
-                                ax_profiles.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=_ms, alpha=0.5, label=sheet)
+                                ax_profiles.plot(pos, dose, linestyle=ls, marker=marker, color=color, ms=ms, alpha=alpha, zorder=zord, label=sheet)
                                 sheet_labeled = True
                             else:
-                                ax_profiles.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=_ms, alpha=0.5, label=None)
+                                ax_profiles.plot(pos, dose, linestyle=ls, marker=marker, color=color, ms=ms, alpha=alpha, zorder=zord, label=None)
 
                 elif axis == 'Z':
                     if not df[(df['FS'] == fs) & (df['Axis'] == axis)].empty:
@@ -428,10 +476,10 @@ def plot_data():
                         dose = df.loc[(df['FS'] == fs) & (df['Axis'] == axis), 'Dose'].values
                         pos, dose = _preprocess(pos, dose, axis, sheet)
                         if not sheet_labeled:
-                            ax_z.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=_ms, alpha=0.5, label=sheet)
+                            ax_z.plot(pos, dose, linestyle=ls, marker=marker, color=color, ms=ms, alpha=alpha, zorder=zord, label=sheet)
                             sheet_labeled = True
                         else:
-                            ax_z.plot(pos, dose, linestyle='None', marker=marker, color=color, ms=_ms, alpha=0.5, label=None)
+                            ax_z.plot(pos, dose, linestyle=ls, marker=marker, color=color, ms=ms, alpha=alpha, zorder=zord, label=None)
 
     # Now plot the averages if they exist
     try:
@@ -448,31 +496,22 @@ def plot_data():
                                 label = "Average" if fs == fsl[0] and axis == scl[0] and depth == dl[0] else None
                                 ax_profiles.plot(fixed_pos, avg_dose, '-k', label=label, linewidth=2)
 
-                                # Plot tolerance envelope
-                                dose_tolerance, pos_tolerance = get_clinical_criteria()  # Assuming clinical criteria function
-
-                                # Convert positional tolerance from mm to cm
-                                pos_tolerance_cm = pos_tolerance / 10.0
-
-                                # Shift the entire profile to the left and right by positional tolerance
-                                pos_shift_left = fixed_pos - pos_tolerance_cm
-                                pos_shift_right = fixed_pos + pos_tolerance_cm
-
-                                # Interpolate to create the shifted curves
-                                avg_shift_left = np.interp(fixed_pos, pos_shift_left, avg_dose, left=np.nan, right=np.nan)
-                                avg_shift_right = np.interp(fixed_pos, pos_shift_right, avg_dose, left=np.nan, right=np.nan)
-
-                                # Combine the dose tolerance and positional shifts to create the final envelope
-                                upper_envelope = np.fmax(avg_dose + dose_tolerance, np.fmax(avg_shift_left, avg_shift_right))
-                                lower_envelope = np.fmin(avg_dose - dose_tolerance, np.fmin(avg_shift_left, avg_shift_right))
-
-                                # Ensure that NaN values at edges do not cause asymmetry in the envelope
-                                upper_envelope = np.nan_to_num(upper_envelope, nan=avg_dose[-1])
-                                lower_envelope = np.nan_to_num(lower_envelope, nan=avg_dose[0])
-
-                                # Plot the final envelope
+                                dose_tolerance, pos_tolerance = get_clinical_criteria()
+                                upper_envelope, lower_envelope = _compute_envelope(
+                                    avg_dose, fixed_pos, dose_tolerance, pos_tolerance, axis)
                                 if show_band_var.get():
-                                    ax_profiles.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'({dose_tolerance}%/{pos_tolerance}mm) Envelope' if label else None)
+                                    ax_profiles.fill_between(fixed_pos, lower_envelope, upper_envelope, facecolor='0.85', edgecolor='none', alpha=1.0)
+                                    ax_profiles.plot(fixed_pos, upper_envelope, '--k', linewidth=1)
+                                    ax_profiles.plot(fixed_pos, lower_envelope, '--k', linewidth=1)
+                                if show_sd_var.get() and combination_key in std_dose_global:
+                                    try:
+                                        _k = float(sd_mult_entry.get())
+                                    except ValueError:
+                                        _k = 2.326
+                                    _std = std_dose_global[combination_key]
+                                    ax_profiles.fill_between(fixed_pos, avg_dose - _k * _std, avg_dose + _k * _std, facecolor='0.75', edgecolor='none', alpha=1.0)
+                                    ax_profiles.plot(fixed_pos, avg_dose + _k * _std, '--k', linewidth=1)
+                                    ax_profiles.plot(fixed_pos, avg_dose - _k * _std, '--k', linewidth=1)
 
                     elif axis == 'Z':
                         combination_key = (fs, axis, None)
@@ -483,41 +522,131 @@ def plot_data():
                             label = "Average" if fs == fsl[0] and axis == 'Z' else None
                             ax_z.plot(fixed_pos, avg_dose, '-k', label=label, linewidth=2)
 
-                            # Plot tolerance envelope
-                            dose_tolerance, pos_tolerance = get_clinical_criteria()  # Assuming clinical criteria function
-
-                            # Convert positional tolerance from mm to cm
-                            pos_tolerance_cm = pos_tolerance / 10.0
-
-                            # Shift the average curve by dose tolerance (up and down)
-                            upper_bound = avg_dose + dose_tolerance
-                            lower_bound = avg_dose - dose_tolerance
-
-                            # Shift the average curve by position tolerance (left and right)
-                            upper_pos_shift_right = np.interp(fixed_pos + pos_tolerance_cm, fixed_pos, avg_dose, left=np.nan, right=np.nan)
-                            lower_pos_shift_left = np.interp(fixed_pos - pos_tolerance_cm, fixed_pos, avg_dose, left=np.nan, right=np.nan)
-
-                            # Ensure that NaN values at edges do not cause asymmetry in the envelope
-                            upper_pos_shift_right = np.nan_to_num(upper_pos_shift_right, nan=avg_dose[-1])
-                            lower_pos_shift_left = np.nan_to_num(lower_pos_shift_left, nan=avg_dose[0])
-
-                            # Combine all bounds to create the final envelope
-                            upper_envelope = np.fmax(upper_bound, upper_pos_shift_right)
-                            lower_envelope = np.fmin(lower_bound, lower_pos_shift_left)
-
-                            # Plot the final envelope
+                            dose_tolerance, pos_tolerance = get_clinical_criteria()
+                            upper_envelope, lower_envelope = _compute_envelope(
+                                avg_dose, fixed_pos, dose_tolerance, pos_tolerance, axis)
                             if show_band_var.get():
-                                ax_z.fill_between(fixed_pos, lower_envelope, upper_envelope, color='gray', alpha=0.2, label=f'({dose_tolerance}%/{pos_tolerance}mm) Envelope' if label else None)
+                                ax_z.fill_between(fixed_pos, lower_envelope, upper_envelope, facecolor='0.85', edgecolor='none', alpha=1.0)
+                                ax_z.plot(fixed_pos, upper_envelope, '--k', linewidth=1)
+                                ax_z.plot(fixed_pos, lower_envelope, '--k', linewidth=1)
+                            if show_sd_var.get() and combination_key in std_dose_global:
+                                try:
+                                    _k = float(sd_mult_entry.get())
+                                except ValueError:
+                                    _k = 2.326
+                                _std = std_dose_global[combination_key]
+                                ax_z.fill_between(fixed_pos, avg_dose - _k * _std, avg_dose + _k * _std, facecolor='0.75', edgecolor='none', alpha=1.0)
+                                ax_z.plot(fixed_pos, avg_dose + _k * _std, '--k', linewidth=1)
+                                ax_z.plot(fixed_pos, avg_dose - _k * _std, '--k', linewidth=1)
     except NameError:
         print("Average data does not exist. Run make_avg first to calculate averages.")
 
+    # --- Zoom insets ---
+    def _populate_inset(ins, axis_filter):
+        """Re-plot all data onto an inset axis (no labels/legend)."""
+        for _si, _sh in enumerate(selected_sheets):
+            _df  = excel_data[_sh].sort_values(by=['FS', 'Axis', 'Pos'])
+            _col = 'red' if _sh == highlight_sheet else color_map(_si)
+            _msi = _ms * 2 if _sh == highlight_sheet else _ms
+            _alp = 1.0 if _sh == highlight_sheet else 0.5
+            _mkr = markers[_si % len(markers)]
+            for _fs in fsl:
+                for _ax in [a for a in scl if axis_filter(a)]:
+                    _dl_loop = dl if _ax in ('X', 'Y', 'XY', 'YX') else [None]
+                    for _dep in _dl_loop:
+                        if _dep is not None:
+                            _sub = _df[(_df['FS'] == _fs) & (_df['Axis'] == _ax) & (_df['Depth'] == _dep)]
+                        else:
+                            _sub = _df[(_df['FS'] == _fs) & (_df['Axis'] == _ax)]
+                        if _sub.empty:
+                            continue
+                        _p, _d = _preprocess(_sub['Pos'].values, _sub['Dose'].values, _ax, _sh)
+                        ins.plot(_p, _d, linestyle='None', marker=_mkr, color=_col, ms=_msi, alpha=_alp)
+        if avg_dose_global:
+            _dt, _pt = get_clinical_criteria()
+            try: _ki = float(sd_mult_entry.get())
+            except ValueError: _ki = 2.326
+            for _fs in fsl:
+                for _ax in [a for a in scl if axis_filter(a)]:
+                    _dep = None if _ax == 'Z' else None
+                    _dl_loop = dl if _ax in ('X', 'Y', 'XY', 'YX') else [None]
+                    for _dep in _dl_loop:
+                        _key = (_fs, _ax, _dep)
+                        if _key not in avg_dose_global:
+                            continue
+                        _avg, _fp = avg_dose_global[_key], fixed_pos_global[_key]
+                        ins.plot(_fp, _avg, '-k', linewidth=2)
+                        if show_band_var.get():
+                            _ue, _le = _compute_envelope(_avg, _fp, _dt, _pt, _ax)
+                            ins.fill_between(_fp, _le, _ue, facecolor='0.85', edgecolor='none')
+                            ins.plot(_fp, _ue, '--k', linewidth=1)
+                            ins.plot(_fp, _le, '--k', linewidth=1)
+                        if show_sd_var.get() and _key in std_dose_global:
+                            _st = std_dose_global[_key]
+                            ins.fill_between(_fp, _avg - _ki*_st, _avg + _ki*_st, facecolor='0.75', edgecolor='none')
+                            ins.plot(_fp, _avg + _ki*_st, '--k', linewidth=1)
+                            ins.plot(_fp, _avg - _ki*_st, '--k', linewidth=1)
+
+    try:
+        _pix1, _pix2 = float(profile_inset_xmin.get()), float(profile_inset_xmax.get())
+    except ValueError:
+        _pix1 = _pix2 = None
+
+    try:
+        _zix1, _zix2 = float(pdd_inset_xmin.get()), float(pdd_inset_xmax.get())
+    except ValueError:
+        _zix1 = _zix2 = None
+
+    if fig_profiles and _pix1 is not None and _pix1 < _pix2:
+        _p_bounds = _INSET_POSITIONS.get(profile_inset_pos_var.get(), [0.53, 0.37, 0.45, 0.58])
+        ins_p = ax_profiles.inset_axes(_p_bounds)
+        _populate_inset(ins_p, lambda a: a in ('X', 'Y', 'XY', 'YX'))
+        ins_p.set_xlim([_pix1, _pix2])
+        try:
+            ins_p.set_ylim([float(profile_inset_ymin.get()), float(profile_inset_ymax.get())])
+        except ValueError:
+            pass
+        ins_p.tick_params(labelsize=max(8, _fs - 4))
+        ax_profiles.indicate_inset_zoom(ins_p, edgecolor='black')
+
+    if fig_z and _zix1 is not None and _zix1 < _zix2:
+        _z_bounds = _INSET_POSITIONS.get(pdd_inset_pos_var.get(), [0.53, 0.37, 0.45, 0.58])
+        ins_z = ax_z.inset_axes(_z_bounds)
+        _populate_inset(ins_z, lambda a: a == 'Z')
+        ins_z.set_xlim([_zix1, _zix2])
+        try:
+            ins_z.set_ylim([float(pdd_inset_ymin.get()), float(pdd_inset_ymax.get())])
+        except ValueError:
+            pass
+        ins_z.tick_params(labelsize=max(8, _fs - 4))
+        ax_z.indicate_inset_zoom(ins_z, edgecolor='black')
+
+    # Build proxy patch handles for bands
+    _band_patch = _MPatch(facecolor='0.85', edgecolor='black', linestyle='--', linewidth=1)
+    _sd_patch   = _MPatch(facecolor='0.75', edgecolor='black', linestyle='--', linewidth=1)
+    try:
+        _k_leg = float(sd_mult_entry.get())
+    except ValueError:
+        _k_leg = 2.326
+    dose_tolerance_leg, pos_tolerance_leg = get_clinical_criteria()
+
     # Finalize the plots
     if fig_profiles:
-        ax_profiles.legend(loc='upper right', fontsize=_fs, markerscale=1.5)
+        h, l = ax_profiles.get_legend_handles_labels()
+        if show_band_var.get() and avg_dose_global:
+            h.append(_band_patch); l.append(f'({dose_tolerance_leg}%/{pos_tolerance_leg}mm) Envelope')
+        if show_sd_var.get() and std_dose_global:
+            h.append(_sd_patch);   l.append(f'±{_k_leg} SD')
+        ax_profiles.legend(h, l, loc='upper right', fontsize=_fs, markerscale=1.5)
         fig_profiles.show()
 
     if fig_z:
-        ax_z.legend(loc='upper right', fontsize=_fs, markerscale=1.5)
+        h, l = ax_z.get_legend_handles_labels()
+        if show_band_var.get() and avg_dose_global:
+            h.append(_band_patch); l.append(f'({dose_tolerance_leg}%/{pos_tolerance_leg}mm) Envelope')
+        if show_sd_var.get() and std_dose_global:
+            h.append(_sd_patch);   l.append(f'±{_k_leg} SD')
+        ax_z.legend(h, l, loc='upper right', fontsize=_fs, markerscale=1.5)
         fig_z.show()
 
     plt.tight_layout()
@@ -526,9 +655,189 @@ def plot_data():
 
 
     
+def _build_report_lines(dose_tolerance, pos_tolerance, sd_mult):
+    ci_pct      = float((2 * _norm.cdf(sd_mult) - 1) * 100)
+    pos_tol_cm  = pos_tolerance / 10.0
+    tol_hdr     = f"Tol ({dose_tolerance}%/{pos_tolerance}mm)"
+    ci_hdr      = f"CI ({ci_pct:.1f}%)"
+    sep         = f"  {'-'*32}  {'-'*6}  {'-'*8}  {'-'*8}  {'-'*10}  {'-'*14}  {'-'*12}"
+
+    lines = []
+    lines.append("=" * 96)
+    lines.append("BEAM DATA SPREAD REPORT")
+    lines.append(f"Tolerance: {dose_tolerance}% / {pos_tolerance} mm   |   "
+                 f"SD band: ±{sd_mult:.4f} SD  ({ci_pct:.1f}% CI)")
+    lines.append(f"† Max dev† = max deviation at points where DTA > {pos_tolerance} mm "
+                 f"(search cap ±{pos_tolerance/10+0.1:.2f} cm); "
+                 f"if all points are within {pos_tolerance} mm DTA, reports deviation at the point of maximum DTA")
+    lines.append("=" * 96)
+
+    # accumulators for summary: {sheet: [sq_devs, max_devs, dta_max_devs, n_in_tol, n_in_ci, n_tot]}
+    summary = {}
+
+    for combination in sorted(avg_dose_global.keys(), key=lambda c: (c[0], c[1], c[2] or 0)):
+        fs, axis, depth = combination
+        avg_dose  = avg_dose_global[combination]
+        fixed_pos = fixed_pos_global[combination]
+        std       = std_dose_global.get(combination, np.zeros_like(avg_dose))
+        sheets    = _raw_stacks_global.get(combination, {})
+
+        if axis == 'Z':
+            lines.append(f"\nFS={fs}, Axis={axis}")
+        else:
+            lines.append(f"\nFS={fs}, Axis={axis}, Depth={depth} cm")
+
+        valid_mask = ~np.isnan(avg_dose)
+        mean_sd = float(np.nanmean(std[valid_mask])) if valid_mask.any() else float('nan')
+        max_sd  = float(np.nanmax(std[valid_mask]))  if valid_mask.any() else float('nan')
+        lines.append(f"  Spread across datasets:  mean SD = {mean_sd:.3f}%  |  max SD = {max_sd:.3f}%")
+
+        if sheets:
+            upper_env, lower_env = _compute_envelope(avg_dose, fixed_pos, dose_tolerance, pos_tolerance, axis)
+            hdr = (f"  {'Sheet':<32}  {'n':>6}  {'RMS dev':>8}  {'Max dev':>8}  "
+                   f"{'Max dev†':>10}  {tol_hdr:>14}  {ci_hdr:>12}")
+            lines.append(hdr)
+            lines.append(sep)
+            comb_sq, comb_mx, comb_dta_mx, comb_tol, comb_ci, comb_n = [], [], [], 0, 0, 0
+            for sn in sorted(sheets.keys()):
+                sheet_dose = sheets[sn]
+                valid = ~np.isnan(avg_dose) & ~np.isnan(sheet_dose)
+                if not valid.any():
+                    continue
+                diff  = sheet_dose[valid] - avg_dose[valid]
+                rms   = float(np.sqrt(np.mean(diff ** 2)))
+                mxd   = float(np.max(np.abs(diff)))
+                n_tot = int(valid.sum())
+
+                # DTA-filtered max dev
+                dta_val    = _compute_dta(sheet_dose, avg_dose, fixed_pos, pos_tol_cm)
+                dta_filter = dta_val > pos_tol_cm
+                combo_filt = valid & dta_filter
+                if combo_filt.any():
+                    mxd_dta = float(np.max(np.abs((sheet_dose - avg_dose)[combo_filt])))
+                else:
+                    # All points pass DTA — report deviation at the point of highest DTA
+                    masked_dta = np.where(valid, dta_val, -np.inf)
+                    worst_idx  = int(np.argmax(masked_dta))
+                    mxd_dta    = float(np.abs(sheet_dose[worst_idx] - avg_dose[worst_idx]))
+
+                n_in_tol = int(np.sum(
+                    (sheet_dose[valid] >= lower_env[valid]) &
+                    (sheet_dose[valid] <= upper_env[valid])))
+                pct_tol = 100.0 * n_in_tol / n_tot if n_tot > 0 else float('nan')
+
+                ci_upper = avg_dose[valid] + sd_mult * std[valid]
+                ci_lower = avg_dose[valid] - sd_mult * std[valid]
+                n_in_ci  = int(np.sum((sheet_dose[valid] >= ci_lower) & (sheet_dose[valid] <= ci_upper)))
+                pct_ci   = 100.0 * n_in_ci / n_tot if n_tot > 0 else float('nan')
+
+                lines.append(f"  {sn:<32}  {n_tot:>6}  {rms:>8.3f}%  {mxd:>8.3f}%  "
+                             f"{mxd_dta:>9.3f}%  {pct_tol:>13.1f}%  {pct_ci:>11.1f}%")
+
+                # accumulate combination ALL
+                comb_sq.extend(diff ** 2)
+                comb_mx.append(mxd)
+                comb_dta_mx.append(mxd_dta)
+                comb_tol += n_in_tol
+                comb_ci  += n_in_ci
+                comb_n   += n_tot
+
+                # accumulate summary
+                acc = summary.setdefault(sn, [[], [], [], 0, 0, 0])
+                acc[0].extend(diff ** 2)
+                acc[1].append(mxd)
+                acc[2].append(mxd_dta)
+                acc[3] += n_in_tol
+                acc[4] += n_in_ci
+                acc[5] += n_tot
+
+            # ALL row for this combination
+            if comb_n > 0:
+                rms_c     = float(np.sqrt(np.mean(comb_sq)))
+                mxd_c     = float(np.max(comb_mx))
+                mxd_dta_c = float(np.max(comb_dta_mx)) if comb_dta_mx else float('nan')
+                pct_tol_c = 100.0 * comb_tol / comb_n
+                pct_ci_c  = 100.0 * comb_ci  / comb_n
+                lines.append(sep)
+                lines.append(f"  {'ALL':<32}  {comb_n:>6}  {rms_c:>8.3f}%  {mxd_c:>8.3f}%  "
+                              f"{mxd_dta_c:>9.3f}%  {pct_tol_c:>13.1f}%  {pct_ci_c:>11.1f}%")
+
+        lines.append("")
+
+    # --- Overall summary ---
+    if summary:
+        lines.append("=" * 96)
+        lines.append("SUMMARY (all combinations)")
+        hdr = (f"  {'Sheet':<32}  {'n':>6}  {'RMS dev':>8}  {'Max dev':>8}  "
+               f"{'Max dev†':>10}  {tol_hdr:>14}  {ci_hdr:>12}")
+        lines.append(hdr)
+        lines.append(sep)
+        all_sq, all_mx, all_dta_mx, all_tol, all_ci, all_n = [], [], [], 0, 0, 0
+        for sn in sorted(summary.keys()):
+            sq_devs, max_devs, dta_max_devs, n_in_tol, n_in_ci, n_tot = summary[sn]
+            rms_all   = float(np.sqrt(np.mean(sq_devs))) if sq_devs       else float('nan')
+            mxd_all   = float(np.max(max_devs))          if max_devs      else float('nan')
+            mxd_dta_a = float(np.max(dta_max_devs))      if dta_max_devs  else float('nan')
+            pct_tol   = 100.0 * n_in_tol / n_tot if n_tot > 0 else float('nan')
+            pct_ci    = 100.0 * n_in_ci  / n_tot if n_tot > 0 else float('nan')
+            lines.append(f"  {sn:<32}  {n_tot:>6}  {rms_all:>8.3f}%  {mxd_all:>8.3f}%  "
+                         f"{mxd_dta_a:>9.3f}%  {pct_tol:>13.1f}%  {pct_ci:>11.1f}%")
+            all_sq.extend(sq_devs)
+            all_mx.append(mxd_all)
+            all_dta_mx.append(mxd_dta_a)
+            all_tol += n_in_tol
+            all_ci  += n_in_ci
+            all_n   += n_tot
+
+        rms_tot     = float(np.sqrt(np.mean(all_sq))) if all_sq      else float('nan')
+        mxd_tot     = float(np.max(all_mx))           if all_mx      else float('nan')
+        mxd_dta_tot = float(np.max(all_dta_mx))       if all_dta_mx  else float('nan')
+        pct_tol_tot = 100.0 * all_tol / all_n if all_n > 0 else float('nan')
+        pct_ci_tot  = 100.0 * all_ci  / all_n if all_n > 0 else float('nan')
+        lines.append(sep)
+        lines.append(f"  {'ALL':<32}  {all_n:>6}  {rms_tot:>8.3f}%  {mxd_tot:>8.3f}%  "
+                     f"{mxd_dta_tot:>9.3f}%  {pct_tol_tot:>13.1f}%  {pct_ci_tot:>11.1f}%")
+        lines.append("")
+
+    lines.append("=" * 96)
+    return lines
+
+
+def _get_sd_mult():
+    try:
+        return float(sd_mult_entry.get())
+    except (ValueError, tk.TclError):
+        return 2.326
+
+
+def print_report():
+    if not avg_dose_global:
+        print("No average data. Run Make Avg first.")
+        return
+    dose_tolerance, pos_tolerance = get_clinical_criteria()
+    for line in _build_report_lines(dose_tolerance, pos_tolerance, _get_sd_mult()):
+        print(line)
+
+
+def save_report():
+    if not avg_dose_global:
+        print("No average data. Run Make Avg first.")
+        return
+    dose_tolerance, pos_tolerance = get_clinical_criteria()
+    out_path = filedialog.asksaveasfilename(
+        defaultextension=".txt",
+        filetypes=[("Text Files", "*.txt")],
+        title="Save Report As")
+    if not out_path:
+        return
+    with open(out_path, 'w') as f:
+        f.write('\n'.join(_build_report_lines(dose_tolerance, pos_tolerance, _get_sd_mult())))
+    print(f"Report saved to {out_path}")
+
+
 def make_avg():
     dose_tolerance, pos_tolerance = get_clinical_criteria()
-    global avg_dose_global, fixed_pos_global, fsl, scl, dl
+    global avg_dose_global, fixed_pos_global, std_dose_global, _raw_stacks_global, fsl, scl, dl
 
     selected_fsl_indices = fsl_listbox.curselection()
     selected_scl_indices = scl_listbox.curselection()
@@ -563,7 +872,7 @@ def make_avg():
     max_field_size = max([int(fs) for fs in fsl]) if fsl else 0
     fixed_pos_profiles = np.arange(-max_field_size / 2 - 20, max_field_size / 2 + 20, 0.05)
 
-    resampled_doses_by_combination = {}
+    resampled_doses_by_combination = {}   # {combination: {sheet: array}}
 
     for sheet in avg_sheets:
         df = excel_data[sheet].sort_values(by=['FS', 'Axis', 'Pos'])
@@ -577,8 +886,8 @@ def make_avg():
                             dose = subset['Dose'].values
                             pos, dose = _preprocess(pos, dose, axis, sheet)
                             interpolator = interp1d(pos, dose, bounds_error=False, fill_value=np.nan)
-                            resampled_doses_by_combination.setdefault((fs, axis, depth), []).append(
-                                interpolator(fixed_pos_profiles))
+                            resampled_doses_by_combination.setdefault((fs, axis, depth), {})[sheet] = \
+                                interpolator(fixed_pos_profiles)
                 elif axis == 'Z':
                     subset = df[(df['FS'] == fs) & (df['Axis'] == axis)]
                     if not subset.empty:
@@ -586,28 +895,35 @@ def make_avg():
                         dose = subset['Dose'].values
                         pos, dose = _preprocess(pos, dose, axis, sheet)
                         interpolator = interp1d(pos, dose, bounds_error=False, fill_value=np.nan)
-                        resampled_doses_by_combination.setdefault((fs, axis, None), []).append(
-                            interpolator(fixed_pos_z))
+                        resampled_doses_by_combination.setdefault((fs, axis, None), {})[sheet] = \
+                            interpolator(fixed_pos_z)
 
     avg_dose_global  = {}
     fixed_pos_global = {}
+    std_dose_global  = {}
+    _raw_stacks_global = {}
 
-    for combination, doses in resampled_doses_by_combination.items():
+    for combination, sheet_doses in resampled_doses_by_combination.items():
         fs, axis, depth = combination
         fixed_pos = fixed_pos_profiles if axis in ['X', 'Y', 'XY', 'YX'] else fixed_pos_z
 
-        stack  = np.array(doses)                          # (n_sheets, n_pos)
-        counts = np.sum(~np.isnan(stack), axis=0)         # how many datasets at each point
-        avg    = np.nanmean(stack, axis=0)
-        avg[counts < min_n] = np.nan                      # blank positions below threshold
+        sheet_names = list(sheet_doses.keys())
+        stack  = np.array(list(sheet_doses.values()))     # (n_sheets, n_pos)
+        counts = np.sum(~np.isnan(stack), axis=0)
+        with np.errstate(all='ignore'):
+            avg = np.nanmean(stack, axis=0)
+            std = np.nanstd(stack, axis=0, ddof=1) if stack.shape[0] > 1 else np.zeros_like(avg)
+        avg[counts < min_n] = np.nan
 
-        # Trim to the contiguous valid extent
         valid = ~np.isnan(avg)
         if valid.any():
             start = int(np.argmax(valid))
             end   = int(len(valid) - np.argmax(valid[::-1]))
-            fixed_pos_global[combination] = fixed_pos[start:end]
-            avg_dose_global[combination]  = avg[start:end]
+            fixed_pos_global[combination]  = fixed_pos[start:end]
+            avg_dose_global[combination]   = avg[start:end]
+            std_dose_global[combination]   = std[start:end]
+            _raw_stacks_global[combination] = {sn: stack[i, start:end]
+                                               for i, sn in enumerate(sheet_names)}
 
     print(f"Average calculation completed! (min datasets = {min_n})")
 
@@ -633,7 +949,7 @@ sheet_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))  # Padding to separ
 ttk.Label(sheet_frame, text="Select Sheets:").grid(row=0, column=0, sticky="w")
 sheet_listbox = tk.Listbox(sheet_frame, selectmode="multiple", width=40, height=10, exportselection=0)
 sheet_listbox.grid(row=1, column=0, padx=5, pady=5)
-sheet_listbox.bind("<<ListboxSelect>>", lambda _: (populate_fsl(), populate_scl(), populate_dl()))
+sheet_listbox.bind("<<ListboxSelect>>", lambda _: (populate_fsl(), populate_scl(), populate_dl(), _update_highlight_combo()))
 
 def toggle_sheets():
     if sheet_listbox.curselection() == tuple(range(sheet_listbox.size())):
@@ -733,7 +1049,7 @@ font_size_entry.insert(0, "16")
 font_size_entry.grid(row=0, column=9, sticky="w", padx=(0, 20))
 
 show_band_var = tk.BooleanVar(value=True)
-ttk.Checkbutton(controls_frame, text="Show uncertainty band", variable=show_band_var).grid(
+ttk.Checkbutton(controls_frame, text="Show tolerance band", variable=show_band_var).grid(
     row=0, column=10, sticky="w")
 
 ttk.Label(controls_frame, text="Profile x [cm]:").grid(row=1, column=0, sticky="w", padx=(0, 5))
@@ -751,6 +1067,96 @@ ttk.Label(controls_frame, text="to").grid(row=1, column=6, sticky="w")
 z_xmax_entry = ttk.Entry(controls_frame, width=6)
 z_xmax_entry.insert(0, "30")
 z_xmax_entry.grid(row=1, column=7, sticky="w", padx=(0, 20))
+
+show_sd_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(controls_frame, text="Show SD band", variable=show_sd_var).grid(
+    row=1, column=8, sticky="w", padx=(0, 8))
+
+ttk.Label(controls_frame, text="CI [%]:").grid(row=1, column=9, sticky="w", padx=(0, 3))
+ci_entry = ttk.Entry(controls_frame, width=6)
+ci_entry.insert(0, "98")
+ci_entry.grid(row=1, column=10, sticky="w", padx=(0, 8))
+
+ttk.Label(controls_frame, text="SD mult:").grid(row=1, column=11, sticky="w", padx=(0, 3))
+sd_mult_entry = ttk.Entry(controls_frame, width=6)
+sd_mult_entry.insert(0, "2.326")
+sd_mult_entry.grid(row=1, column=12, sticky="w", padx=(0, 8))
+
+def _ci_changed(*_):
+    try:
+        ci = float(ci_entry.get())
+        z = float(_norm.ppf((1 + ci / 100) / 2))
+        sd_mult_entry.delete(0, tk.END)
+        sd_mult_entry.insert(0, f"{z:.4f}")
+    except Exception:
+        pass
+
+def _sdmult_changed(*_):
+    try:
+        z = float(sd_mult_entry.get())
+        ci = float((2 * _norm.cdf(z) - 1) * 100)
+        ci_entry.delete(0, tk.END)
+        ci_entry.insert(0, f"{ci:.2f}")
+    except Exception:
+        pass
+
+ci_entry.bind("<FocusOut>", _ci_changed)
+ci_entry.bind("<Return>", _ci_changed)
+sd_mult_entry.bind("<FocusOut>", _sdmult_changed)
+sd_mult_entry.bind("<Return>", _sdmult_changed)
+
+_INSET_POSITIONS = {
+    "Upper Right": [0.53, 0.37, 0.45, 0.58],
+    "Upper Left":  [0.02, 0.37, 0.45, 0.58],
+    "Lower Right": [0.53, 0.04, 0.45, 0.55],
+    "Lower Left":  [0.02, 0.04, 0.45, 0.55],
+}
+
+ttk.Label(controls_frame, text="Profile inset x [cm]:").grid(row=3, column=0, sticky="w", padx=(0, 4))
+profile_inset_xmin = ttk.Entry(controls_frame, width=6)
+profile_inset_xmin.grid(row=3, column=1, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=3, column=2, sticky="w")
+profile_inset_xmax = ttk.Entry(controls_frame, width=6)
+profile_inset_xmax.grid(row=3, column=3, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="y [%]:").grid(row=3, column=4, sticky="w", padx=(0, 4))
+profile_inset_ymin = ttk.Entry(controls_frame, width=6)
+profile_inset_ymin.grid(row=3, column=5, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=3, column=6, sticky="w")
+profile_inset_ymax = ttk.Entry(controls_frame, width=6)
+profile_inset_ymax.grid(row=3, column=7, sticky="w", padx=(0, 10))
+profile_inset_pos_var = tk.StringVar(value="Upper Right")
+ttk.Combobox(controls_frame, textvariable=profile_inset_pos_var,
+             values=list(_INSET_POSITIONS.keys()), width=12, state="readonly").grid(
+    row=3, column=8, sticky="w", padx=(0, 10))
+
+ttk.Label(controls_frame, text="PDD inset x [cm]:").grid(row=4, column=0, sticky="w", padx=(0, 4))
+pdd_inset_xmin = ttk.Entry(controls_frame, width=6)
+pdd_inset_xmin.grid(row=4, column=1, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=4, column=2, sticky="w")
+pdd_inset_xmax = ttk.Entry(controls_frame, width=6)
+pdd_inset_xmax.grid(row=4, column=3, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="y [%]:").grid(row=4, column=4, sticky="w", padx=(0, 4))
+pdd_inset_ymin = ttk.Entry(controls_frame, width=6)
+pdd_inset_ymin.grid(row=4, column=5, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=4, column=6, sticky="w")
+pdd_inset_ymax = ttk.Entry(controls_frame, width=6)
+pdd_inset_ymax.grid(row=4, column=7, sticky="w", padx=(0, 10))
+pdd_inset_pos_var = tk.StringVar(value="Upper Right")
+ttk.Combobox(controls_frame, textvariable=pdd_inset_pos_var,
+             values=list(_INSET_POSITIONS.keys()), width=12, state="readonly").grid(
+    row=4, column=8, sticky="w", padx=(0, 10))
+
+ttk.Label(controls_frame, text="Highlight machine:").grid(row=5, column=0, sticky="w", padx=(0, 5))
+highlight_var = tk.StringVar(value="None")
+highlight_combo = ttk.Combobox(controls_frame, textvariable=highlight_var, width=28, state="readonly")
+highlight_combo['values'] = ["None"]
+highlight_combo.grid(row=4, column=1, columnspan=4, sticky="w", padx=(0, 20))
+
+def _update_highlight_combo(*_):
+    selected = [sheet_listbox.get(i) for i in sheet_listbox.curselection()]
+    cur = highlight_var.get()
+    highlight_combo['values'] = ["None"] + selected
+    highlight_var.set(cur if cur in selected else "None")
 
 # Pre-processing frame
 preproc_frame = ttk.LabelFrame(root, text="Pre-processing", padding="5")
@@ -834,13 +1240,21 @@ save_avg_button = ttk.Button(root, text="Save Avg", command=save_average)
 save_avg_button.grid(row=10, column=0, pady=10)
 
 def clear_avg():
-    global avg_dose_global, fixed_pos_global
-    avg_dose_global  = {}
-    fixed_pos_global = {}
+    global avg_dose_global, fixed_pos_global, std_dose_global, _raw_stacks_global
+    avg_dose_global    = {}
+    fixed_pos_global   = {}
+    std_dose_global    = {}
+    _raw_stacks_global = {}
     print("Average cleared.")
 
 clear_avg_button = ttk.Button(root, text="Clear Avg", command=clear_avg)
 clear_avg_button.grid(row=11, column=0, pady=10)
+
+report_button = ttk.Button(root, text="Print Report", command=print_report)
+report_button.grid(row=12, column=0, pady=10)
+
+save_report_button = ttk.Button(root, text="Save Report", command=save_report)
+save_report_button.grid(row=13, column=0, pady=10)
 
 # Start the GUI loop
 root.mainloop()

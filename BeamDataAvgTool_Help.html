@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BeamDataAvgTool Help</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky left nav + scrollable content */
+:root {
+  --bg:         #f4f6f9;
+  --surface:    #ffffff;
+  --border:     #dde2ea;
+  --fg:         #1a2332;
+  --muted:      #5a6a7e;
+  --accent:     #1d5bbf;
+  --accent-bg:  #eef3fc;
+  --tag-bg:     #e8ecf4;
+  --mono:       'IBM Plex Mono', 'Courier New', monospace;
+  --sans:       'Inter', system-ui, sans-serif;
+  --nav-width:  220px;
+  --radius:     6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:        #0d1420;
+    --surface:   #161e2e;
+    --border:    #263047;
+    --fg:        #dce4f0;
+    --muted:     #8899b4;
+    --accent:    #5a9af0;
+    --accent-bg: #162040;
+    --tag-bg:    #1e2a40;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:        #0d1420;
+  --surface:   #161e2e;
+  --border:    #263047;
+  --fg:        #dce4f0;
+  --muted:     #8899b4;
+  --accent:    #5a9af0;
+  --accent-bg: #162040;
+  --tag-bg:    #1e2a40;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--fg);
+  background: var(--bg);
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ── Navigation ── */
+nav {
+  width: var(--nav-width);
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 24px 0 32px;
+}
+
+.nav-brand {
+  padding: 0 20px 20px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+.nav-brand h1 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 2px;
+}
+.nav-brand p {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 0;
+}
+
+nav a {
+  display: block;
+  padding: 6px 20px;
+  font-size: 13px;
+  color: var(--muted);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  transition: color .15s, border-color .15s, background .15s;
+}
+nav a:hover { color: var(--fg); background: var(--accent-bg); }
+nav a.active { color: var(--accent); border-left-color: var(--accent); font-weight: 500; }
+nav .nav-section {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 16px 20px 4px;
+}
+
+/* ── Main content ── */
+main {
+  flex: 1;
+  min-width: 0;
+  max-width: 820px;
+  padding: 40px 48px 80px;
+}
+
+section { padding-top: 8px; margin-bottom: 56px; }
+section:first-of-type { padding-top: 0; }
+
+h2 {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: var(--fg);
+  text-wrap: balance;
+}
+h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 24px 0 8px;
+  color: var(--fg);
+  text-wrap: balance;
+}
+.section-rule {
+  border: none;
+  border-top: 2px solid var(--border);
+  margin: 0 0 24px;
+}
+
+p { margin: 0 0 12px; color: var(--fg); }
+p:last-child { margin-bottom: 0; }
+
+/* hero lede */
+.lede {
+  font-size: 17px;
+  color: var(--muted);
+  margin-bottom: 20px;
+  line-height: 1.55;
+}
+
+/* ── Callout box ── */
+.callout {
+  background: var(--accent-bg);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 12px 16px;
+  margin: 16px 0;
+  font-size: 14px;
+}
+.callout strong { color: var(--accent); }
+
+/* ── Code / mono inline ── */
+code {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--tag-bg);
+  color: var(--fg);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* ── Definition / parameter tables ── */
+.def-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0 20px;
+  font-size: 14px;
+}
+.def-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 2px solid var(--border);
+  padding: 6px 12px 6px 0;
+}
+.def-table td {
+  vertical-align: top;
+  padding: 9px 12px 9px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+}
+.def-table td:first-child {
+  font-family: var(--mono);
+  font-size: 13px;
+  white-space: nowrap;
+  color: var(--accent);
+  font-weight: 500;
+  width: 1%;
+  padding-right: 20px;
+}
+.def-table tr:last-child td { border-bottom: none; }
+
+/* ── Workflow steps ── */
+.steps { list-style: none; margin: 16px 0; padding: 0; counter-reset: step; }
+.steps li {
+  counter-increment: step;
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+  align-items: flex-start;
+}
+.steps li::before {
+  content: counter(step);
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+.steps li .step-body { flex: 1; min-width: 0; }
+.steps li .step-title { font-weight: 600; margin-bottom: 2px; }
+
+/* ── Band legend ── */
+.band-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 16px 0;
+}
+.band-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 14px;
+}
+.band-swatch {
+  flex-shrink: 0;
+  width: 44px;
+  height: 20px;
+  border-radius: 3px;
+  border: 1.5px dashed var(--fg);
+  opacity: .85;
+}
+
+/* ── M-score table ── */
+.m-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.m-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 2px solid var(--border);
+  padding: 6px 12px 6px 0;
+}
+.m-table td {
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.m-table tr:last-child td { border-bottom: none; }
+.m-table .flag { color: #c0392b; font-weight: 600; }
+.m-table .ok { color: var(--muted); }
+
+/* ── Formula display ── */
+.formula {
+  font-family: var(--mono);
+  font-size: 14px;
+  background: var(--tag-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin: 12px 0;
+  overflow-x: auto;
+  line-height: 1.8;
+}
+
+/* ── Responsive ── */
+@media (max-width: 700px) {
+  body { flex-direction: column; }
+  nav {
+    width: 100%;
+    height: auto;
+    position: relative;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    padding: 12px 0;
+  }
+  .nav-brand { border-bottom: none; margin-bottom: 0; padding: 8px 16px; }
+  .nav-brand h1 { font-size: 12px; }
+  .nav-section { display: none; }
+  nav a { padding: 4px 14px; font-size: 12px; }
+  main { padding: 24px 20px 60px; }
+}
+</style>
+</head>
+<body>
+
+<nav id="sidebar">
+  <div class="nav-brand">
+    <h1>BeamDataAvgTool</h1>
+    <p>Help &amp; Reference</p>
+  </div>
+
+  <span class="nav-section">Getting started</span>
+  <a href="#overview">Overview</a>
+  <a href="#workflow">Workflow</a>
+
+  <span class="nav-section">Controls</span>
+  <a href="#data-controls">Data &amp; tolerances</a>
+  <a href="#plot-controls">Plot settings</a>
+
+  <span class="nav-section">Output</span>
+  <a href="#plot-window">Plot window</a>
+  <a href="#report-columns">Report columns</a>
+  <a href="#statistics">Statistical flags</a>
+</nav>
+
+<main>
+
+  <!-- ── Overview ── -->
+  <section id="overview">
+    <h2>Overview</h2>
+    <hr class="section-rule">
+    <p class="lede">BeamDataAvgTool builds a fleet average beam profile from multiple machines, quantifies how well each machine tracks that average, and flags clinical and statistical outliers.</p>
+    <p>The tool loads a multi-sheet Excel file where each sheet is one machine's measurement. It resamples all profiles to a common position grid, computes a mean and standard deviation at each point, and plots prediction bands and confidence intervals around the average. A text report summarises per-machine deviation statistics and applies a fleet-relative outlier test.</p>
+    <div class="callout">
+      <strong>Typical use:</strong> annual or quarterly linac QA — load measurements from your fleet, generate the average as a reference, then compare any new measurement against that reference.
+    </div>
+  </section>
+
+  <!-- ── Workflow ── -->
+  <section id="workflow">
+    <h2>Workflow</h2>
+    <hr class="section-rule">
+    <ol class="steps">
+      <li>
+        <div class="step-body">
+          <div class="step-title">Load a file</div>
+          Use <strong>Browse</strong> to select an Excel workbook. Each sheet should contain one machine's beam data (profiles or PDDs).
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <div class="step-title">Select sheets, field sizes, and depths</div>
+          Check or uncheck sheets in the Sheet Selection list. Use the Field Size and Depth lists to filter which combinations are processed.
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <div class="step-title">Set tolerances and plot parameters</div>
+          Adjust Dose Tol, Pos Tol, SD mult, and CI% in the control row before plotting (see <a href="#data-controls">Controls</a> below).
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <div class="step-title">Plot Data</div>
+          Click <strong>Plot Data</strong> to view the raw profiles overlaid on the same axes. No averaging is done yet.
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <div class="step-title">Make Avg</div>
+          Click <strong>Make Avg</strong> to compute the fleet mean, SD, and confidence bands. The plot updates with shaded bands around the mean.
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <div class="step-title">Save Avg</div>
+          Optionally save the averaged profile to a new Excel file for use as a reference baseline.
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <div class="step-title">Print / Save Report</div>
+          Click <strong>Print Report</strong> to display the deviation table and outlier flags in the console, or <strong>Save Report</strong> to write it to a text file.
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ── Controls ── -->
+  <section id="data-controls">
+    <h2>Data &amp; tolerance controls</h2>
+    <hr class="section-rule">
+
+    <table class="def-table">
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Min datasets</td>
+          <td>Minimum number of machine sheets required before a combination (field size + axis + depth) is included in the average. Combinations with fewer sheets are skipped.</td>
+        </tr>
+        <tr>
+          <td>Dose Tol</td>
+          <td>Clinical dose tolerance in %. A point is "within tolerance" when its deviation from the fleet mean is less than this value. Drives the <code>Tol%</code> column in the report.</td>
+        </tr>
+        <tr>
+          <td>Pos Tol</td>
+          <td>Clinical position tolerance in mm. Used in the DTA (distance-to-agreement) search for the <code>Max dev†</code> column: a point's DTA must exceed this threshold before it is considered a position-driven outlier rather than a dose outlier.</td>
+        </tr>
+        <tr>
+          <td>SD mult (k)</td>
+          <td>Multiplier on the standard deviation for the prediction band. <code>k = 2.326</code> gives 98% coverage under a normal distribution; <code>k = 2.0</code> gives ~95%. Controls both the shaded band on the plot and the <code>Pred%</code> column in the report.</td>
+        </tr>
+        <tr>
+          <td>CI%</td>
+          <td>Confidence level for the CI-on-mean band (t-distribution). Shared with the prediction band percentage. The CI on mean shrinks as more machines are added; the prediction band does not.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Preprocessing</h3>
+    <table class="def-table">
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>PDD normalisation</td>
+          <td>Choose the depth or percentage at which each PDD is normalised before averaging. This ensures all machines contribute equally regardless of absolute output differences.</td>
+        </tr>
+        <tr>
+          <td>Manual Profile Shifts…</td>
+          <td>Opens a dialog to apply a manual lateral shift (in cm) to individual machine profiles. Use this to correct for known couch or detector positioning offsets before computing the average.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="plot-controls">
+    <h2>Plot settings</h2>
+    <hr class="section-rule">
+
+    <table class="def-table">
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Marker size</td>
+          <td>Size of the scatter markers for individual machine profiles in the plot.</td>
+        </tr>
+        <tr>
+          <td>Font size</td>
+          <td>Base font size for all plot text (axis labels, tick labels, legend).</td>
+        </tr>
+        <tr>
+          <td>Show tolerance band</td>
+          <td>Overlay a light gray band at ±Dose Tol% around the mean. Shows visually which deviations exceed the clinical threshold.</td>
+        </tr>
+        <tr>
+          <td>Show SD band</td>
+          <td>Show or hide the prediction interval band (±k·SD). The band represents where a typical machine's profile is expected to fall based on fleet spread.</td>
+        </tr>
+        <tr>
+          <td>Show CI on mean</td>
+          <td>Overlay the confidence interval on the mean (darker inner band). This band reflects uncertainty in the mean itself, not spread around it. It shrinks as more machines are included.</td>
+        </tr>
+        <tr>
+          <td>Highlight machine</td>
+          <td>Select a specific machine sheet to draw its profile in a distinct colour on top of the others.</td>
+        </tr>
+        <tr>
+          <td>Profile / PDD inset</td>
+          <td>Add a zoom inset to the profile or PDD plot. Set x-range, y-range, and corner position for the inset axes.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── Plot window ── -->
+  <section id="plot-window">
+    <h2>Plot window</h2>
+    <hr class="section-rule">
+    <p>After <strong>Make Avg</strong>, the plot shows three overlapping bands around the fleet mean:</p>
+
+    <div class="band-legend">
+      <div class="band-row">
+        <div class="band-swatch" style="background: #d9d9d9;"></div>
+        <div><strong>Tolerance band</strong> — ±Dose Tol% around the mean. Points outside this band fail the clinical criterion.</div>
+      </div>
+      <div class="band-row">
+        <div class="band-swatch" style="background: #bfbfbf;"></div>
+        <div><strong>Prediction band</strong> — ±k·SD around the mean. Represents where a randomly drawn machine from the fleet is expected to fall. Does not shrink as n increases.</div>
+      </div>
+      <div class="band-row">
+        <div class="band-swatch" style="background: #9a9a9a;"></div>
+        <div><strong>CI on mean</strong> — ±t·SE around the mean (SE = SD/√n). Represents uncertainty in the mean itself. Shrinks as more machines are added. Uses the t-distribution to account for small n.</div>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>Prediction vs CI on mean:</strong> if a machine's profile falls outside the prediction band, it's unusual relative to the fleet. If the CI on mean is wide, the fleet average itself is not well-determined — you need more machines.
+    </div>
+
+    <p>The dashed black lines mark the outer edges of whichever bands are enabled. Individual machine profiles are plotted as scatter points; the fleet mean is a solid line.</p>
+  </section>
+
+  <!-- ── Report columns ── -->
+  <section id="report-columns">
+    <h2>Report columns</h2>
+    <hr class="section-rule">
+    <p>Each row in the report corresponds to one machine (sheet). Deviations are computed point-by-point against the fleet mean at the resampled grid positions.</p>
+
+    <table class="def-table">
+      <thead><tr><th>Column</th><th>Definition</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>n</td>
+          <td>Number of valid (non-NaN) comparison points for this machine in this combination.</td>
+        </tr>
+        <tr>
+          <td>Mean dev</td>
+          <td>Signed mean of all point deviations: <code>mean(machine − avg)</code>. A non-zero value indicates a systematic bias — the machine runs high or low relative to the fleet on average.</td>
+        </tr>
+        <tr>
+          <td>RMS dev</td>
+          <td>Root-mean-square deviation: <code>√mean((machine − avg)²)</code>. Sensitive to both systematic offset and random spread. The primary metric for statistical outlier detection.</td>
+        </tr>
+        <tr>
+          <td>P95 dev</td>
+          <td>95th percentile of <code>|machine − avg|</code>. A robust near-maximum: 95% of points fall within this deviation. Less affected by a single extreme point than Max dev.</td>
+        </tr>
+        <tr>
+          <td>Max dev</td>
+          <td>Maximum absolute deviation across all points. Corresponds to the worst single-point disagreement regardless of position.</td>
+        </tr>
+        <tr>
+          <td>Max dev†</td>
+          <td>Maximum deviation restricted to points where DTA &gt; Pos Tol. DTA is computed by searching along the average profile for the nearest point with the same dose value. If all points are within Pos Tol, the value is reported at the point of maximum DTA instead. This isolates dose errors from position errors in the high-gradient penumbra region.</td>
+        </tr>
+        <tr>
+          <td>Tol%</td>
+          <td>Percentage of points within the clinical dose tolerance (Dose Tol). A value of 100% means the machine meets the dose criterion at every comparison point.</td>
+        </tr>
+        <tr>
+          <td>Pred%</td>
+          <td>Percentage of points within the prediction band (±k·SD). Values below 100% indicate points that fall outside the range expected for a typical fleet member.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── Statistical flags ── -->
+  <section id="statistics">
+    <h2>Statistical outlier flags</h2>
+    <hr class="section-rule">
+    <p class="lede">The FLAGS section at the bottom of the report uses the <em>modified Z-score</em> (Iglewicz–Hoaglin method) to identify machines that are statistically unusual relative to the rest of the fleet.</p>
+
+    <h3>Why not just a clinical threshold?</h3>
+    <p>A clinical threshold (e.g. "fail if &gt;1% deviation") answers a fixed question: does this machine meet the specification? The statistical test asks a different question: is this machine behaving differently from its peers, even if it technically passes? A machine can pass the clinical criterion and still be an outlier if the rest of the fleet is performing better.</p>
+
+    <h3>The modified Z-score (M)</h3>
+    <p>For a set of values across the fleet, the M score for one machine is:</p>
+    <div class="formula">
+      M = 0.6745 × (x − median) / MAD
+    </div>
+    <p>where <strong>MAD</strong> is the median absolute deviation from the median. The 0.6745 factor scales M so that it matches a standard Z-score for normally distributed data.</p>
+
+    <div class="callout">
+      <strong>Key advantage:</strong> the MAD uses the median, not the mean, so an outlier machine does not inflate the reference statistics and partially hide itself. Each machine is compared to the fleet without its own value distorting the yardstick.
+    </div>
+
+    <h3>Interpreting M scores</h3>
+    <table class="m-table">
+      <thead><tr><th>|M|</th><th>Interpretation</th></tr></thead>
+      <tbody>
+        <tr><td class="ok">0 – 1</td><td>Well within normal fleet variation</td></tr>
+        <tr><td class="ok">1 – 2</td><td>Slightly elevated, not remarkable</td></tr>
+        <tr><td class="ok">2 – 3</td><td>Elevated; worth watching</td></tr>
+        <tr><td>3 – 3.5</td><td>Near threshold; monitor closely</td></tr>
+        <tr><td class="flag">3.5+</td><td><strong>Flagged</strong> — statistically unusual relative to fleet</td></tr>
+        <tr><td class="flag">7+</td><td>Strongly unusual — fleet distribution would need to shift dramatically for this machine to look typical</td></tr>
+      </tbody>
+    </table>
+
+    <h3>What gets tested</h3>
+    <p>The FLAGS section runs the modified Z-score independently on three metrics from the summary table, using the per-machine values across all combinations:</p>
+    <ul>
+      <li><strong>Mean dev</strong> — detects systematic bias (machine consistently high or low)</li>
+      <li><strong>RMS dev</strong> — detects excess random variation or combined bias + noise</li>
+      <li><strong>P95 dev</strong> — detects machines with frequent large-magnitude excursions</li>
+    </ul>
+    <p>A machine is flagged if it exceeds the threshold (|M| &gt; 3.5) on any of the three. The report shows which metric triggered and the exact M value. If no machine exceeds the threshold, the section prints "No statistical outliers detected."</p>
+
+    <div class="callout">
+      <strong>Minimum fleet size:</strong> the FLAGS section requires at least 3 machines. With fewer than 3 machines the section is omitted — there is no meaningful fleet distribution to compare against. The test becomes increasingly reliable as the fleet grows.
+    </div>
+
+    <h3>Two-failure-mode interpretation</h3>
+    <p>The report supports two independent assessments that complement each other:</p>
+    <table class="def-table">
+      <thead><tr><th>Failure mode</th><th>Column to watch</th><th>What it means</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Clinical</td>
+          <td><code>Tol%</code>, <code>Max dev†</code></td>
+          <td>Machine deviates from the average by more than the specified clinical criterion. Action may be required regardless of fleet context.</td>
+        </tr>
+        <tr>
+          <td>Statistical</td>
+          <td><code>FLAGS section</code></td>
+          <td>Machine behaves differently from its peers, even if it passes the clinical threshold. Warrants investigation before clinical limits are reached.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+</main>
+
+<script>
+// Active nav link tracking
+const sections = document.querySelectorAll('section[id]');
+const links = document.querySelectorAll('nav a');
+
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      links.forEach(l => l.classList.remove('active'));
+      const active = document.querySelector(`nav a[href="#${e.target.id}"]`);
+      if (active) active.classList.add('active');
+    }
+  });
+}, { rootMargin: '-20% 0px -70% 0px' });
+
+sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>

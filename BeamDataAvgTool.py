@@ -415,11 +415,15 @@ def plot_data():
         try:
             _pxmin = float(profile_xmin_entry.get())
         except ValueError:
-            _pxmin = -max_field_size / 2 - 20
+            _pxmin = -max_field_size / 2 - 2
+            profile_xmin_entry.delete(0, tk.END)
+            profile_xmin_entry.insert(0, f"{_pxmin:.2f}")
         try:
             _pxmax = float(profile_xmax_entry.get())
         except ValueError:
-            _pxmax = max_field_size / 2 + 20
+            _pxmax = max_field_size / 2 + 2
+            profile_xmax_entry.delete(0, tk.END)
+            profile_xmax_entry.insert(0, f"{_pxmax:.2f}")
         ax_profiles.set_xlim([_pxmin, _pxmax])
         ax_profiles.set_ylim([0, 110])
 
@@ -434,10 +438,14 @@ def plot_data():
             _zxmin = float(z_xmin_entry.get())
         except ValueError:
             _zxmin = 0
+            z_xmin_entry.delete(0, tk.END)
+            z_xmin_entry.insert(0, "0")
         try:
             _zxmax = float(z_xmax_entry.get())
         except ValueError:
             _zxmax = 30
+            z_xmax_entry.delete(0, tk.END)
+            z_xmax_entry.insert(0, "30")
         ax_z.set_xlim([_zxmin, _zxmax])
         ax_z.set_ylim([0, 110])
 
@@ -635,8 +643,16 @@ def plot_data():
     except ValueError:
         _zix1 = _zix2 = None
 
-    if fig_profiles and _pix1 is not None and _pix1 < _pix2:
-        _p_bounds = _INSET_POSITIONS.get(profile_inset_pos_var.get(), [0.53, 0.37, 0.45, 0.58])
+    if fig_profiles and show_profile_inset_var.get() and _pix1 is not None and _pix1 < _pix2:
+        _p_bounds = list(_INSET_POSITIONS.get(profile_inset_pos_var.get(), [0.53, 0.37, 0.45, 0.58]))
+        try: _p_bounds[0] = float(profile_inset_x0.get())
+        except ValueError: pass
+        try: _p_bounds[1] = float(profile_inset_y0.get())
+        except ValueError: pass
+        try: _p_bounds[2] = float(profile_inset_w.get())
+        except ValueError: pass
+        try: _p_bounds[3] = float(profile_inset_h.get())
+        except ValueError: pass
         ins_p = ax_profiles.inset_axes(_p_bounds)
         _populate_inset(ins_p, lambda a: a in ('X', 'Y', 'XY', 'YX'))
         ins_p.set_xlim([_pix1, _pix2])
@@ -645,10 +661,20 @@ def plot_data():
         except ValueError:
             pass
         ins_p.tick_params(labelsize=max(8, _fs - 4))
-        ax_profiles.indicate_inset_zoom(ins_p, edgecolor='black')
+        _, _p_connectors = ax_profiles.indicate_inset_zoom(ins_p, edgecolor='black')
+        for _c in _p_connectors:
+            _c.set_visible(True)
 
-    if fig_z and _zix1 is not None and _zix1 < _zix2:
-        _z_bounds = _INSET_POSITIONS.get(pdd_inset_pos_var.get(), [0.53, 0.37, 0.45, 0.58])
+    if fig_z and show_pdd_inset_var.get() and _zix1 is not None and _zix1 < _zix2:
+        _z_bounds = list(_INSET_POSITIONS.get(pdd_inset_pos_var.get(), [0.53, 0.37, 0.45, 0.58]))
+        try: _z_bounds[0] = float(pdd_inset_x0.get())
+        except ValueError: pass
+        try: _z_bounds[1] = float(pdd_inset_y0.get())
+        except ValueError: pass
+        try: _z_bounds[2] = float(pdd_inset_w.get())
+        except ValueError: pass
+        try: _z_bounds[3] = float(pdd_inset_h.get())
+        except ValueError: pass
         ins_z = ax_z.inset_axes(_z_bounds)
         _populate_inset(ins_z, lambda a: a == 'Z')
         ins_z.set_xlim([_zix1, _zix2])
@@ -657,7 +683,117 @@ def plot_data():
         except ValueError:
             pass
         ins_z.tick_params(labelsize=max(8, _fs - 4))
-        ax_z.indicate_inset_zoom(ins_z, edgecolor='black')
+        _, _z_connectors = ax_z.indicate_inset_zoom(ins_z, edgecolor='black')
+        for _c in _z_connectors:
+            _c.set_visible(True)
+
+    try:
+        _pix1b, _pix2b = float(profile_inset2_xmin.get()), float(profile_inset2_xmax.get())
+    except ValueError:
+        _pix1b = _pix2b = None
+
+    try:
+        _zix1b, _zix2b = float(pdd_inset2_xmin.get()), float(pdd_inset2_xmax.get())
+    except ValueError:
+        _zix1b = _zix2b = None
+
+    if fig_profiles and show_profile_inset2_var.get() and _pix1b is not None and _pix1b < _pix2b:
+        _p2_bounds = list(_INSET_POSITIONS.get(profile_inset2_pos_var.get(), [0.02, 0.37, 0.45, 0.58]))
+        try: _p2_bounds[0] = float(profile_inset2_x0.get())
+        except ValueError: pass
+        try: _p2_bounds[1] = float(profile_inset2_y0.get())
+        except ValueError: pass
+        try: _p2_bounds[2] = float(profile_inset2_w.get())
+        except ValueError: pass
+        try: _p2_bounds[3] = float(profile_inset2_h.get())
+        except ValueError: pass
+        ins_p2 = ax_profiles.inset_axes(_p2_bounds)
+        _populate_inset(ins_p2, lambda a: a in ('X', 'Y', 'XY', 'YX'))
+        ins_p2.set_xlim([_pix1b, _pix2b])
+        try:
+            ins_p2.set_ylim([float(profile_inset2_ymin.get()), float(profile_inset2_ymax.get())])
+        except ValueError:
+            pass
+        ins_p2.tick_params(labelsize=max(8, _fs - 4))
+        _, _p2_connectors = ax_profiles.indicate_inset_zoom(ins_p2, edgecolor='black')
+        for _c in _p2_connectors:
+            _c.set_visible(True)
+
+    if fig_z and show_pdd_inset2_var.get() and _zix1b is not None and _zix1b < _zix2b:
+        _z2_bounds = list(_INSET_POSITIONS.get(pdd_inset2_pos_var.get(), [0.53, 0.04, 0.45, 0.55]))
+        try: _z2_bounds[0] = float(pdd_inset2_x0.get())
+        except ValueError: pass
+        try: _z2_bounds[1] = float(pdd_inset2_y0.get())
+        except ValueError: pass
+        try: _z2_bounds[2] = float(pdd_inset2_w.get())
+        except ValueError: pass
+        try: _z2_bounds[3] = float(pdd_inset2_h.get())
+        except ValueError: pass
+        ins_z2 = ax_z.inset_axes(_z2_bounds)
+        _populate_inset(ins_z2, lambda a: a == 'Z')
+        ins_z2.set_xlim([_zix1b, _zix2b])
+        try:
+            ins_z2.set_ylim([float(pdd_inset2_ymin.get()), float(pdd_inset2_ymax.get())])
+        except ValueError:
+            pass
+        ins_z2.tick_params(labelsize=max(8, _fs - 4))
+        _, _z2_connectors = ax_z.indicate_inset_zoom(ins_z2, edgecolor='black')
+        for _c in _z2_connectors:
+            _c.set_visible(True)
+
+    try:
+        _pix1c, _pix2c = float(profile_inset3_xmin.get()), float(profile_inset3_xmax.get())
+    except ValueError:
+        _pix1c = _pix2c = None
+
+    try:
+        _zix1c, _zix2c = float(pdd_inset3_xmin.get()), float(pdd_inset3_xmax.get())
+    except ValueError:
+        _zix1c = _zix2c = None
+
+    if fig_profiles and show_profile_inset3_var.get() and _pix1c is not None and _pix1c < _pix2c:
+        _p3_bounds = list(_INSET_POSITIONS.get(profile_inset3_pos_var.get(), [0.27, 0.37, 0.45, 0.58]))
+        try: _p3_bounds[0] = float(profile_inset3_x0.get())
+        except ValueError: pass
+        try: _p3_bounds[1] = float(profile_inset3_y0.get())
+        except ValueError: pass
+        try: _p3_bounds[2] = float(profile_inset3_w.get())
+        except ValueError: pass
+        try: _p3_bounds[3] = float(profile_inset3_h.get())
+        except ValueError: pass
+        ins_p3 = ax_profiles.inset_axes(_p3_bounds)
+        _populate_inset(ins_p3, lambda a: a in ('X', 'Y', 'XY', 'YX'))
+        ins_p3.set_xlim([_pix1c, _pix2c])
+        try:
+            ins_p3.set_ylim([float(profile_inset3_ymin.get()), float(profile_inset3_ymax.get())])
+        except ValueError:
+            pass
+        ins_p3.tick_params(labelsize=max(8, _fs - 4))
+        _, _p3_connectors = ax_profiles.indicate_inset_zoom(ins_p3, edgecolor='black')
+        for _c in _p3_connectors:
+            _c.set_visible(True)
+
+    if fig_z and show_pdd_inset3_var.get() and _zix1c is not None and _zix1c < _zix2c:
+        _z3_bounds = list(_INSET_POSITIONS.get(pdd_inset3_pos_var.get(), [0.27, 0.04, 0.45, 0.55]))
+        try: _z3_bounds[0] = float(pdd_inset3_x0.get())
+        except ValueError: pass
+        try: _z3_bounds[1] = float(pdd_inset3_y0.get())
+        except ValueError: pass
+        try: _z3_bounds[2] = float(pdd_inset3_w.get())
+        except ValueError: pass
+        try: _z3_bounds[3] = float(pdd_inset3_h.get())
+        except ValueError: pass
+        ins_z3 = ax_z.inset_axes(_z3_bounds)
+        _populate_inset(ins_z3, lambda a: a == 'Z')
+        ins_z3.set_xlim([_zix1c, _zix2c])
+        try:
+            ins_z3.set_ylim([float(pdd_inset3_ymin.get()), float(pdd_inset3_ymax.get())])
+        except ValueError:
+            pass
+        ins_z3.tick_params(labelsize=max(8, _fs - 4))
+        _, _z3_connectors = ax_z.indicate_inset_zoom(ins_z3, edgecolor='black')
+        for _c in _z3_connectors:
+            _c.set_visible(True)
 
     # Build proxy patch handles for bands
     _band_patch    = _MPatch(facecolor='0.85', edgecolor='black', linestyle='--', linewidth=1)
@@ -1227,13 +1363,65 @@ ttk.Checkbutton(controls_frame, text="Show CI on mean (t-dist)", variable=show_c
     row=1, column=13, sticky="w", padx=(8, 0))
 
 _INSET_POSITIONS = {
-    "Upper Right": [0.53, 0.37, 0.45, 0.58],
-    "Upper Left":  [0.02, 0.37, 0.45, 0.58],
-    "Lower Right": [0.53, 0.04, 0.45, 0.55],
-    "Lower Left":  [0.02, 0.04, 0.45, 0.55],
+    "Upper Right":  [0.53, 0.37, 0.45, 0.58],
+    "Upper Left":   [0.02, 0.37, 0.45, 0.58],
+    "Upper Center": [0.27, 0.37, 0.45, 0.58],
+    "Lower Right":  [0.53, 0.04, 0.45, 0.55],
+    "Lower Left":   [0.02, 0.04, 0.45, 0.55],
+    "Lower Center": [0.27, 0.04, 0.45, 0.55],
 }
 
-ttk.Label(controls_frame, text="Profile inset x [cm]:").grid(row=3, column=0, sticky="w", padx=(0, 4))
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "BeamDataAvgTool_config.json")
+
+def _inset_dict(show_var, xmin, xmax, ymin, ymax, pos_var, x0, y0, w, h):
+    return {"show": show_var.get(), "xmin": xmin.get(), "xmax": xmax.get(),
+            "ymin": ymin.get(), "ymax": ymax.get(), "pos": pos_var.get(),
+            "x0": x0.get(), "y0": y0.get(), "w": w.get(), "h": h.get()}
+
+def _load_inset_dict(d, show_var, xmin, xmax, ymin, ymax, pos_var, x0, y0, w, h):
+    def _set(entry, val):
+        entry.delete(0, tk.END)
+        if val: entry.insert(0, val)
+    show_var.set(d.get("show", False))
+    _set(xmin, d.get("xmin", "")); _set(xmax, d.get("xmax", ""))
+    _set(ymin, d.get("ymin", "")); _set(ymax, d.get("ymax", ""))
+    if d.get("pos") in _INSET_POSITIONS: pos_var.set(d["pos"])
+    _set(x0, d.get("x0", "")); _set(y0, d.get("y0", ""))
+    _set(w,  d.get("w",  "")); _set(h,  d.get("h",  ""))
+
+def _save_inset_config():
+    import json
+    cfg = {
+        "profile_inset":  _inset_dict(show_profile_inset_var,  profile_inset_xmin,  profile_inset_xmax,  profile_inset_ymin,  profile_inset_ymax,  profile_inset_pos_var,  profile_inset_x0,  profile_inset_y0,  profile_inset_w,  profile_inset_h),
+        "pdd_inset":      _inset_dict(show_pdd_inset_var,      pdd_inset_xmin,      pdd_inset_xmax,      pdd_inset_ymin,      pdd_inset_ymax,      pdd_inset_pos_var,      pdd_inset_x0,      pdd_inset_y0,      pdd_inset_w,      pdd_inset_h),
+        "profile_inset2": _inset_dict(show_profile_inset2_var, profile_inset2_xmin, profile_inset2_xmax, profile_inset2_ymin, profile_inset2_ymax, profile_inset2_pos_var, profile_inset2_x0, profile_inset2_y0, profile_inset2_w, profile_inset2_h),
+        "pdd_inset2":     _inset_dict(show_pdd_inset2_var,     pdd_inset2_xmin,     pdd_inset2_xmax,     pdd_inset2_ymin,     pdd_inset2_ymax,     pdd_inset2_pos_var,     pdd_inset2_x0,     pdd_inset2_y0,     pdd_inset2_w,     pdd_inset2_h),
+        "profile_inset3": _inset_dict(show_profile_inset3_var, profile_inset3_xmin, profile_inset3_xmax, profile_inset3_ymin, profile_inset3_ymax, profile_inset3_pos_var, profile_inset3_x0, profile_inset3_y0, profile_inset3_w, profile_inset3_h),
+        "pdd_inset3":     _inset_dict(show_pdd_inset3_var,     pdd_inset3_xmin,     pdd_inset3_xmax,     pdd_inset3_ymin,     pdd_inset3_ymax,     pdd_inset3_pos_var,     pdd_inset3_x0,     pdd_inset3_y0,     pdd_inset3_w,     pdd_inset3_h),
+    }
+    try:
+        with open(_CONFIG_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+        print(f"Inset settings saved to {_CONFIG_PATH}")
+    except Exception as e:
+        print(f"Could not save inset settings: {e}")
+
+def _load_inset_config():
+    import json
+    try:
+        with open(_CONFIG_PATH) as f:
+            cfg = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    _load_inset_dict(cfg.get("profile_inset",  {}), show_profile_inset_var,  profile_inset_xmin,  profile_inset_xmax,  profile_inset_ymin,  profile_inset_ymax,  profile_inset_pos_var,  profile_inset_x0,  profile_inset_y0,  profile_inset_w,  profile_inset_h)
+    _load_inset_dict(cfg.get("pdd_inset",      {}), show_pdd_inset_var,      pdd_inset_xmin,      pdd_inset_xmax,      pdd_inset_ymin,      pdd_inset_ymax,      pdd_inset_pos_var,      pdd_inset_x0,      pdd_inset_y0,      pdd_inset_w,      pdd_inset_h)
+    _load_inset_dict(cfg.get("profile_inset2", {}), show_profile_inset2_var, profile_inset2_xmin, profile_inset2_xmax, profile_inset2_ymin, profile_inset2_ymax, profile_inset2_pos_var, profile_inset2_x0, profile_inset2_y0, profile_inset2_w, profile_inset2_h)
+    _load_inset_dict(cfg.get("pdd_inset2",     {}), show_pdd_inset2_var,     pdd_inset2_xmin,     pdd_inset2_xmax,     pdd_inset2_ymin,     pdd_inset2_ymax,     pdd_inset2_pos_var,     pdd_inset2_x0,     pdd_inset2_y0,     pdd_inset2_w,     pdd_inset2_h)
+    _load_inset_dict(cfg.get("profile_inset3", {}), show_profile_inset3_var, profile_inset3_xmin, profile_inset3_xmax, profile_inset3_ymin, profile_inset3_ymax, profile_inset3_pos_var, profile_inset3_x0, profile_inset3_y0, profile_inset3_w, profile_inset3_h)
+    _load_inset_dict(cfg.get("pdd_inset3",     {}), show_pdd_inset3_var,     pdd_inset3_xmin,     pdd_inset3_xmax,     pdd_inset3_ymin,     pdd_inset3_ymax,     pdd_inset3_pos_var,     pdd_inset3_x0,     pdd_inset3_y0,     pdd_inset3_w,     pdd_inset3_h)
+
+show_profile_inset_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(controls_frame, text="Profile inset x [cm]:", variable=show_profile_inset_var).grid(row=3, column=0, sticky="w", padx=(0, 4))
 profile_inset_xmin = ttk.Entry(controls_frame, width=6)
 profile_inset_xmin.grid(row=3, column=1, sticky="w", padx=(0, 3))
 ttk.Label(controls_frame, text="to").grid(row=3, column=2, sticky="w")
@@ -1249,8 +1437,22 @@ profile_inset_pos_var = tk.StringVar(value="Upper Right")
 ttk.Combobox(controls_frame, textvariable=profile_inset_pos_var,
              values=list(_INSET_POSITIONS.keys()), width=12, state="readonly").grid(
     row=3, column=8, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="pos x:").grid(row=3, column=9, sticky="w", padx=(0, 2))
+profile_inset_x0 = ttk.Entry(controls_frame, width=5)
+profile_inset_x0.grid(row=3, column=10, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="y:").grid(row=3, column=11, sticky="w", padx=(0, 2))
+profile_inset_y0 = ttk.Entry(controls_frame, width=5)
+profile_inset_y0.grid(row=3, column=12, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="w:").grid(row=3, column=13, sticky="w", padx=(0, 2))
+profile_inset_w = ttk.Entry(controls_frame, width=5)
+profile_inset_w.grid(row=3, column=14, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="h:").grid(row=3, column=15, sticky="w", padx=(0, 2))
+profile_inset_h = ttk.Entry(controls_frame, width=5)
+profile_inset_h.grid(row=3, column=16, sticky="w", padx=(0, 4))
+ttk.Button(controls_frame, text="Save", command=_save_inset_config).grid(row=3, column=17, padx=(4, 0))
 
-ttk.Label(controls_frame, text="PDD inset x [cm]:").grid(row=4, column=0, sticky="w", padx=(0, 4))
+show_pdd_inset_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(controls_frame, text="PDD inset x [cm]:", variable=show_pdd_inset_var).grid(row=4, column=0, sticky="w", padx=(0, 4))
 pdd_inset_xmin = ttk.Entry(controls_frame, width=6)
 pdd_inset_xmin.grid(row=4, column=1, sticky="w", padx=(0, 3))
 ttk.Label(controls_frame, text="to").grid(row=4, column=2, sticky="w")
@@ -1266,6 +1468,143 @@ pdd_inset_pos_var = tk.StringVar(value="Upper Right")
 ttk.Combobox(controls_frame, textvariable=pdd_inset_pos_var,
              values=list(_INSET_POSITIONS.keys()), width=12, state="readonly").grid(
     row=4, column=8, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="pos x:").grid(row=4, column=9, sticky="w", padx=(0, 2))
+pdd_inset_x0 = ttk.Entry(controls_frame, width=5)
+pdd_inset_x0.grid(row=4, column=10, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="y:").grid(row=4, column=11, sticky="w", padx=(0, 2))
+pdd_inset_y0 = ttk.Entry(controls_frame, width=5)
+pdd_inset_y0.grid(row=4, column=12, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="w:").grid(row=4, column=13, sticky="w", padx=(0, 2))
+pdd_inset_w = ttk.Entry(controls_frame, width=5)
+pdd_inset_w.grid(row=4, column=14, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="h:").grid(row=4, column=15, sticky="w", padx=(0, 2))
+pdd_inset_h = ttk.Entry(controls_frame, width=5)
+pdd_inset_h.grid(row=4, column=16, sticky="w", padx=(0, 4))
+ttk.Button(controls_frame, text="Save", command=_save_inset_config).grid(row=4, column=17, padx=(4, 0))
+
+show_profile_inset2_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(controls_frame, text="Profile inset 2 x [cm]:", variable=show_profile_inset2_var).grid(row=5, column=0, sticky="w", padx=(0, 4))
+profile_inset2_xmin = ttk.Entry(controls_frame, width=6)
+profile_inset2_xmin.grid(row=5, column=1, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=5, column=2, sticky="w")
+profile_inset2_xmax = ttk.Entry(controls_frame, width=6)
+profile_inset2_xmax.grid(row=5, column=3, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="y [%]:").grid(row=5, column=4, sticky="w", padx=(0, 4))
+profile_inset2_ymin = ttk.Entry(controls_frame, width=6)
+profile_inset2_ymin.grid(row=5, column=5, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=5, column=6, sticky="w")
+profile_inset2_ymax = ttk.Entry(controls_frame, width=6)
+profile_inset2_ymax.grid(row=5, column=7, sticky="w", padx=(0, 10))
+profile_inset2_pos_var = tk.StringVar(value="Upper Left")
+ttk.Combobox(controls_frame, textvariable=profile_inset2_pos_var,
+             values=list(_INSET_POSITIONS.keys()), width=12, state="readonly").grid(
+    row=5, column=8, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="pos x:").grid(row=5, column=9, sticky="w", padx=(0, 2))
+profile_inset2_x0 = ttk.Entry(controls_frame, width=5)
+profile_inset2_x0.grid(row=5, column=10, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="y:").grid(row=5, column=11, sticky="w", padx=(0, 2))
+profile_inset2_y0 = ttk.Entry(controls_frame, width=5)
+profile_inset2_y0.grid(row=5, column=12, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="w:").grid(row=5, column=13, sticky="w", padx=(0, 2))
+profile_inset2_w = ttk.Entry(controls_frame, width=5)
+profile_inset2_w.grid(row=5, column=14, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="h:").grid(row=5, column=15, sticky="w", padx=(0, 2))
+profile_inset2_h = ttk.Entry(controls_frame, width=5)
+profile_inset2_h.grid(row=5, column=16, sticky="w", padx=(0, 4))
+ttk.Button(controls_frame, text="Save", command=_save_inset_config).grid(row=5, column=17, padx=(4, 0))
+
+show_pdd_inset2_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(controls_frame, text="PDD inset 2 x [cm]:", variable=show_pdd_inset2_var).grid(row=6, column=0, sticky="w", padx=(0, 4))
+pdd_inset2_xmin = ttk.Entry(controls_frame, width=6)
+pdd_inset2_xmin.grid(row=6, column=1, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=6, column=2, sticky="w")
+pdd_inset2_xmax = ttk.Entry(controls_frame, width=6)
+pdd_inset2_xmax.grid(row=6, column=3, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="y [%]:").grid(row=6, column=4, sticky="w", padx=(0, 4))
+pdd_inset2_ymin = ttk.Entry(controls_frame, width=6)
+pdd_inset2_ymin.grid(row=6, column=5, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=6, column=6, sticky="w")
+pdd_inset2_ymax = ttk.Entry(controls_frame, width=6)
+pdd_inset2_ymax.grid(row=6, column=7, sticky="w", padx=(0, 10))
+pdd_inset2_pos_var = tk.StringVar(value="Lower Right")
+ttk.Combobox(controls_frame, textvariable=pdd_inset2_pos_var,
+             values=list(_INSET_POSITIONS.keys()), width=12, state="readonly").grid(
+    row=6, column=8, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="pos x:").grid(row=6, column=9, sticky="w", padx=(0, 2))
+pdd_inset2_x0 = ttk.Entry(controls_frame, width=5)
+pdd_inset2_x0.grid(row=6, column=10, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="y:").grid(row=6, column=11, sticky="w", padx=(0, 2))
+pdd_inset2_y0 = ttk.Entry(controls_frame, width=5)
+pdd_inset2_y0.grid(row=6, column=12, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="w:").grid(row=6, column=13, sticky="w", padx=(0, 2))
+pdd_inset2_w = ttk.Entry(controls_frame, width=5)
+pdd_inset2_w.grid(row=6, column=14, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="h:").grid(row=6, column=15, sticky="w", padx=(0, 2))
+pdd_inset2_h = ttk.Entry(controls_frame, width=5)
+pdd_inset2_h.grid(row=6, column=16, sticky="w", padx=(0, 4))
+ttk.Button(controls_frame, text="Save", command=_save_inset_config).grid(row=6, column=17, padx=(4, 0))
+
+show_profile_inset3_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(controls_frame, text="Profile inset 3 x [cm]:", variable=show_profile_inset3_var).grid(row=7, column=0, sticky="w", padx=(0, 4))
+profile_inset3_xmin = ttk.Entry(controls_frame, width=6)
+profile_inset3_xmin.grid(row=7, column=1, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=7, column=2, sticky="w")
+profile_inset3_xmax = ttk.Entry(controls_frame, width=6)
+profile_inset3_xmax.grid(row=7, column=3, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="y [%]:").grid(row=7, column=4, sticky="w", padx=(0, 4))
+profile_inset3_ymin = ttk.Entry(controls_frame, width=6)
+profile_inset3_ymin.grid(row=7, column=5, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=7, column=6, sticky="w")
+profile_inset3_ymax = ttk.Entry(controls_frame, width=6)
+profile_inset3_ymax.grid(row=7, column=7, sticky="w", padx=(0, 10))
+profile_inset3_pos_var = tk.StringVar(value="Upper Center")
+ttk.Combobox(controls_frame, textvariable=profile_inset3_pos_var,
+             values=list(_INSET_POSITIONS.keys()), width=12, state="readonly").grid(
+    row=7, column=8, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="pos x:").grid(row=7, column=9, sticky="w", padx=(0, 2))
+profile_inset3_x0 = ttk.Entry(controls_frame, width=5)
+profile_inset3_x0.grid(row=7, column=10, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="y:").grid(row=7, column=11, sticky="w", padx=(0, 2))
+profile_inset3_y0 = ttk.Entry(controls_frame, width=5)
+profile_inset3_y0.grid(row=7, column=12, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="w:").grid(row=7, column=13, sticky="w", padx=(0, 2))
+profile_inset3_w = ttk.Entry(controls_frame, width=5)
+profile_inset3_w.grid(row=7, column=14, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="h:").grid(row=7, column=15, sticky="w", padx=(0, 2))
+profile_inset3_h = ttk.Entry(controls_frame, width=5)
+profile_inset3_h.grid(row=7, column=16, sticky="w", padx=(0, 4))
+ttk.Button(controls_frame, text="Save", command=_save_inset_config).grid(row=7, column=17, padx=(4, 0))
+
+show_pdd_inset3_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(controls_frame, text="PDD inset 3 x [cm]:", variable=show_pdd_inset3_var).grid(row=8, column=0, sticky="w", padx=(0, 4))
+pdd_inset3_xmin = ttk.Entry(controls_frame, width=6)
+pdd_inset3_xmin.grid(row=8, column=1, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=8, column=2, sticky="w")
+pdd_inset3_xmax = ttk.Entry(controls_frame, width=6)
+pdd_inset3_xmax.grid(row=8, column=3, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="y [%]:").grid(row=8, column=4, sticky="w", padx=(0, 4))
+pdd_inset3_ymin = ttk.Entry(controls_frame, width=6)
+pdd_inset3_ymin.grid(row=8, column=5, sticky="w", padx=(0, 3))
+ttk.Label(controls_frame, text="to").grid(row=8, column=6, sticky="w")
+pdd_inset3_ymax = ttk.Entry(controls_frame, width=6)
+pdd_inset3_ymax.grid(row=8, column=7, sticky="w", padx=(0, 10))
+pdd_inset3_pos_var = tk.StringVar(value="Lower Center")
+ttk.Combobox(controls_frame, textvariable=pdd_inset3_pos_var,
+             values=list(_INSET_POSITIONS.keys()), width=12, state="readonly").grid(
+    row=8, column=8, sticky="w", padx=(0, 10))
+ttk.Label(controls_frame, text="pos x:").grid(row=8, column=9, sticky="w", padx=(0, 2))
+pdd_inset3_x0 = ttk.Entry(controls_frame, width=5)
+pdd_inset3_x0.grid(row=8, column=10, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="y:").grid(row=8, column=11, sticky="w", padx=(0, 2))
+pdd_inset3_y0 = ttk.Entry(controls_frame, width=5)
+pdd_inset3_y0.grid(row=8, column=12, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="w:").grid(row=8, column=13, sticky="w", padx=(0, 2))
+pdd_inset3_w = ttk.Entry(controls_frame, width=5)
+pdd_inset3_w.grid(row=8, column=14, sticky="w", padx=(0, 4))
+ttk.Label(controls_frame, text="h:").grid(row=8, column=15, sticky="w", padx=(0, 2))
+pdd_inset3_h = ttk.Entry(controls_frame, width=5)
+pdd_inset3_h.grid(row=8, column=16, sticky="w", padx=(0, 4))
+ttk.Button(controls_frame, text="Save", command=_save_inset_config).grid(row=8, column=17, padx=(4, 0))
 
 ttk.Label(controls_frame, text="Highlight machine:").grid(row=2, column=0, sticky="w", padx=(0, 5))
 highlight_var = tk.StringVar(value="None")
@@ -1283,11 +1622,11 @@ def _update_highlight_combo(*_):
 preproc_frame = ttk.LabelFrame(root, text="Pre-processing", padding="5")
 preproc_frame.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 6))
 
-auto_center_var = tk.BooleanVar(value=False)
+auto_center_var = tk.BooleanVar(value=True)
 ttk.Checkbutton(preproc_frame, text="Auto-center profiles (FWHM)", variable=auto_center_var).grid(
     row=0, column=0, sticky="w", padx=(0, 16))
 
-cax_norm_var = tk.BooleanVar(value=False)
+cax_norm_var = tk.BooleanVar(value=True)
 ttk.Checkbutton(preproc_frame, text="Normalize profiles to CAX", variable=cax_norm_var).grid(
     row=0, column=1, sticky="w", padx=(0, 16))
 
@@ -1367,6 +1706,9 @@ ttk.Button(buttons_frame, text="Clear Avg",    command=clear_avg).grid(   row=0,
 ttk.Button(buttons_frame, text="Print Report", command=print_report).grid(row=0, column=4, padx=4)
 ttk.Button(buttons_frame, text="Save Report",  command=save_report).grid( row=0, column=5, padx=4)
 ttk.Button(buttons_frame, text="Help",         command=open_help).grid(   row=0, column=6, padx=4)
+
+# Restore saved inset settings (if any)
+_load_inset_config()
 
 # Start the GUI loop
 root.mainloop()

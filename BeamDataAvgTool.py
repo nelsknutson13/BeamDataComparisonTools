@@ -1,4 +1,6 @@
 # Script to make AVG PDDs from multiple data sets and output the avg and plot that plus a confidence interval
+import os
+import webbrowser
 import pandas as pd
 from matplotlib import pyplot as plt
 from matplotlib.patches import Patch as _MPatch
@@ -6,7 +8,7 @@ import numpy as np
 import tkinter as tk
 from tkinter import filedialog, ttk
 from scipy.interpolate import interp1d, PchipInterpolator
-from scipy.stats import norm as _norm
+from scipy.stats import norm as _norm, t as _t
 
 # Function to handle file selection and populate sheet names
 
@@ -220,6 +222,8 @@ def save_average():
     print(f"Average data saved to {output_file}")
 
 _manual_shifts      = {}   # {sheet_name: x_shift_cm}
+avg_dose_global     = {}   # {combination: avg_array}
+fixed_pos_global    = {}   # {combination: position_array}
 std_dose_global     = {}   # {combination: std_array}
 _raw_stacks_global  = {}   # {combination: {sheet_name: resampled_array}}
 
@@ -404,8 +408,7 @@ def plot_data():
     # Set up plotting for profiles (X, Y, XY, YX)
     fig_profiles, ax_profiles = None, None
     if any(axis in ['X', 'Y', 'XY', 'YX'] for axis in scl):
-        fig_profiles, ax_profiles = plt.subplots(figsize=(10, 5))
-        ax_profiles.set_title("Profile Scans (X, Y, XY, YX)")
+        fig_profiles, ax_profiles = plt.subplots(figsize=(10, 5), constrained_layout=True)
         ax_profiles.set_ylabel('Dose [%]')
         ax_profiles.set_xlabel('Off Axis Position [cm]')
         max_field_size = max(fsl) if fsl else 0
@@ -423,9 +426,8 @@ def plot_data():
     # Set up plotting for Z profiles
     fig_z, ax_z = None, None
     if 'Z' in scl:
-        fig_z = plt.figure(figsize=(10, 5))
+        fig_z = plt.figure(figsize=(10, 5), constrained_layout=True)
         ax_z = fig_z.add_subplot(111)
-        ax_z.set_title("Z Profiles")
         ax_z.set_ylabel('Percentage Depth Dose [%]')
         ax_z.set_xlabel('Position [cm]')
         try:
@@ -512,6 +514,18 @@ def plot_data():
                                     ax_profiles.fill_between(fixed_pos, avg_dose - _k * _std, avg_dose + _k * _std, facecolor='0.75', edgecolor='none', alpha=1.0)
                                     ax_profiles.plot(fixed_pos, avg_dose + _k * _std, '--k', linewidth=1)
                                     ax_profiles.plot(fixed_pos, avg_dose - _k * _std, '--k', linewidth=1)
+                                if show_ci_mean_var.get() and combination_key in std_dose_global:
+                                    _n_ci = len(_raw_stacks_global.get(combination_key, {}))
+                                    if _n_ci >= 2:
+                                        try:
+                                            _ci_pct_m = float(ci_entry.get())
+                                        except ValueError:
+                                            _ci_pct_m = 98.0
+                                        _t_val = float(_t.ppf((1 + _ci_pct_m / 100) / 2, df=_n_ci - 1))
+                                        _sem = std_dose_global[combination_key] / np.sqrt(_n_ci)
+                                        ax_profiles.fill_between(fixed_pos, avg_dose - _t_val * _sem, avg_dose + _t_val * _sem, facecolor='0.60', edgecolor='none', alpha=1.0)
+                                        ax_profiles.plot(fixed_pos, avg_dose + _t_val * _sem, '--k', linewidth=1)
+                                        ax_profiles.plot(fixed_pos, avg_dose - _t_val * _sem, '--k', linewidth=1)
 
                     elif axis == 'Z':
                         combination_key = (fs, axis, None)
@@ -538,6 +552,18 @@ def plot_data():
                                 ax_z.fill_between(fixed_pos, avg_dose - _k * _std, avg_dose + _k * _std, facecolor='0.75', edgecolor='none', alpha=1.0)
                                 ax_z.plot(fixed_pos, avg_dose + _k * _std, '--k', linewidth=1)
                                 ax_z.plot(fixed_pos, avg_dose - _k * _std, '--k', linewidth=1)
+                            if show_ci_mean_var.get() and combination_key in std_dose_global:
+                                _n_ci = len(_raw_stacks_global.get(combination_key, {}))
+                                if _n_ci >= 2:
+                                    try:
+                                        _ci_pct_m = float(ci_entry.get())
+                                    except ValueError:
+                                        _ci_pct_m = 98.0
+                                    _t_val = float(_t.ppf((1 + _ci_pct_m / 100) / 2, df=_n_ci - 1))
+                                    _sem = std_dose_global[combination_key] / np.sqrt(_n_ci)
+                                    ax_z.fill_between(fixed_pos, avg_dose - _t_val * _sem, avg_dose + _t_val * _sem, facecolor='0.60', edgecolor='none', alpha=1.0)
+                                    ax_z.plot(fixed_pos, avg_dose + _t_val * _sem, '--k', linewidth=1)
+                                    ax_z.plot(fixed_pos, avg_dose - _t_val * _sem, '--k', linewidth=1)
     except NameError:
         print("Average data does not exist. Run make_avg first to calculate averages.")
 
@@ -586,6 +612,18 @@ def plot_data():
                             ins.fill_between(_fp, _avg - _ki*_st, _avg + _ki*_st, facecolor='0.75', edgecolor='none')
                             ins.plot(_fp, _avg + _ki*_st, '--k', linewidth=1)
                             ins.plot(_fp, _avg - _ki*_st, '--k', linewidth=1)
+                        if show_ci_mean_var.get() and _key in std_dose_global:
+                            _n_ci = len(_raw_stacks_global.get(_key, {}))
+                            if _n_ci >= 2:
+                                try:
+                                    _ci_pct_m = float(ci_entry.get())
+                                except ValueError:
+                                    _ci_pct_m = 98.0
+                                _t_val = float(_t.ppf((1 + _ci_pct_m / 100) / 2, df=_n_ci - 1))
+                                _sem = std_dose_global[_key] / np.sqrt(_n_ci)
+                                ins.fill_between(_fp, _avg - _t_val*_sem, _avg + _t_val*_sem, facecolor='0.60', edgecolor='none')
+                                ins.plot(_fp, _avg + _t_val*_sem, '--k', linewidth=1)
+                                ins.plot(_fp, _avg - _t_val*_sem, '--k', linewidth=1)
 
     try:
         _pix1, _pix2 = float(profile_inset_xmin.get()), float(profile_inset_xmax.get())
@@ -622,12 +660,18 @@ def plot_data():
         ax_z.indicate_inset_zoom(ins_z, edgecolor='black')
 
     # Build proxy patch handles for bands
-    _band_patch = _MPatch(facecolor='0.85', edgecolor='black', linestyle='--', linewidth=1)
-    _sd_patch   = _MPatch(facecolor='0.75', edgecolor='black', linestyle='--', linewidth=1)
+    _band_patch    = _MPatch(facecolor='0.85', edgecolor='black', linestyle='--', linewidth=1)
+    _sd_patch      = _MPatch(facecolor='0.75', edgecolor='black', linestyle='--', linewidth=1)
+    _ci_mean_patch = _MPatch(facecolor='0.60', edgecolor='black', linestyle='--', linewidth=1)
     try:
         _k_leg = float(sd_mult_entry.get())
     except ValueError:
         _k_leg = 2.326
+    try:
+        _ci_pct_leg = float(ci_entry.get())
+    except ValueError:
+        _ci_pct_leg = 98.0
+    _cov_pct_leg = float((2 * _norm.cdf(_k_leg) - 1) * 100)
     dose_tolerance_leg, pos_tolerance_leg = get_clinical_criteria()
 
     # Finalize the plots
@@ -636,7 +680,9 @@ def plot_data():
         if show_band_var.get() and avg_dose_global:
             h.append(_band_patch); l.append(f'({dose_tolerance_leg}%/{pos_tolerance_leg}mm) Envelope')
         if show_sd_var.get() and std_dose_global:
-            h.append(_sd_patch);   l.append(f'±{_k_leg} SD')
+            h.append(_sd_patch);      l.append(f'±{_k_leg:.3f}·SD (Prediction, {_cov_pct_leg:.0f}%)')
+        if show_ci_mean_var.get() and std_dose_global:
+            h.append(_ci_mean_patch); l.append(f'{_ci_pct_leg:.0f}% CI on mean (t-dist)')
         ax_profiles.legend(h, l, loc='upper right', fontsize=_fs, markerscale=1.5)
         fig_profiles.show()
 
@@ -645,32 +691,47 @@ def plot_data():
         if show_band_var.get() and avg_dose_global:
             h.append(_band_patch); l.append(f'({dose_tolerance_leg}%/{pos_tolerance_leg}mm) Envelope')
         if show_sd_var.get() and std_dose_global:
-            h.append(_sd_patch);   l.append(f'±{_k_leg} SD')
+            h.append(_sd_patch);      l.append(f'±{_k_leg:.3f}·SD (Prediction, {_cov_pct_leg:.0f}%)')
+        if show_ci_mean_var.get() and std_dose_global:
+            h.append(_ci_mean_patch); l.append(f'{_ci_pct_leg:.0f}% CI on mean (t-dist)')
         ax_z.legend(h, l, loc='upper right', fontsize=_fs, markerscale=1.5)
         fig_z.show()
-
-    plt.tight_layout()
     print("Data plotting completed!")
 
 
 
     
+def _modified_zscore(values):
+    """Iglewicz-Hoaglin modified Z-score. Returns array of M scores; |M| > 3.5 flags an outlier."""
+    vals = np.array(values, dtype=float)
+    med  = np.median(vals)
+    mad  = np.median(np.abs(vals - med))
+    if mad == 0:
+        std = np.std(vals)
+        return np.zeros_like(vals) if std == 0 else (vals - np.mean(vals)) / std
+    return 0.6745 * (vals - med) / mad
+
+
 def _build_report_lines(dose_tolerance, pos_tolerance, sd_mult):
     ci_pct      = float((2 * _norm.cdf(sd_mult) - 1) * 100)
     pos_tol_cm  = pos_tolerance / 10.0
     tol_hdr     = f"Tol ({dose_tolerance}%/{pos_tolerance}mm)"
-    ci_hdr      = f"CI ({ci_pct:.1f}%)"
-    sep         = f"  {'-'*32}  {'-'*6}  {'-'*8}  {'-'*8}  {'-'*10}  {'-'*14}  {'-'*12}"
+    ci_hdr      = f"Pred ({ci_pct:.0f}%)"
+    tol_w       = max(14, len(tol_hdr))
+    ci_w        = max(12, len(ci_hdr))
+    _total_w    = 2 + 32 + 2 + 6 + 2 + 9 + 2 + 9 + 2 + 9 + 2 + 9 + 2 + 10 + 2 + tol_w + 2 + ci_w
+    sep         = f"  {'-'*32}  {'-'*6}  {'-'*9}  {'-'*9}  {'-'*9}  {'-'*9}  {'-'*10}  {'-'*tol_w}  {'-'*ci_w}"
 
     lines = []
-    lines.append("=" * 96)
+    lines.append("=" * _total_w)
     lines.append("BEAM DATA SPREAD REPORT")
     lines.append(f"Tolerance: {dose_tolerance}% / {pos_tolerance} mm   |   "
-                 f"SD band: ±{sd_mult:.4f} SD  ({ci_pct:.1f}% CI)")
+                 f"Prediction band: ±{sd_mult:.4f}·SD ({ci_pct:.1f}% coverage)   |   "
+                 f"CI on mean: {ci_pct:.1f}% (t-dist, n varies per combination)")
     lines.append(f"† Max dev† = max deviation at points where DTA > {pos_tolerance} mm "
                  f"(search cap ±{pos_tolerance/10+0.1:.2f} cm); "
                  f"if all points are within {pos_tolerance} mm DTA, reports deviation at the point of maximum DTA")
-    lines.append("=" * 96)
+    lines.append("=" * _total_w)
 
     # accumulators for summary: {sheet: [sq_devs, max_devs, dta_max_devs, n_in_tol, n_in_ci, n_tot]}
     summary = {}
@@ -691,23 +752,33 @@ def _build_report_lines(dose_tolerance, pos_tolerance, sd_mult):
         mean_sd = float(np.nanmean(std[valid_mask])) if valid_mask.any() else float('nan')
         max_sd  = float(np.nanmax(std[valid_mask]))  if valid_mask.any() else float('nan')
         lines.append(f"  Spread across datasets:  mean SD = {mean_sd:.3f}%  |  max SD = {max_sd:.3f}%")
+        n_combo = len(sheets)
+        if n_combo >= 2 and valid_mask.any():
+            _t_ci      = float(_t.ppf((1 + ci_pct / 100) / 2, df=n_combo - 1))
+            _sem_ci    = std / np.sqrt(n_combo)
+            ci_hw_mean = float(np.nanmean(_t_ci * _sem_ci[valid_mask]))
+            ci_hw_max  = float(np.nanmax(_t_ci * _sem_ci[valid_mask]))
+            lines.append(f"  CI on mean ({ci_pct:.0f}%, t={_t_ci:.3f}, n={n_combo}):  "
+                         f"mean ±{ci_hw_mean:.3f}%  |  max ±{ci_hw_max:.3f}%")
 
         if sheets:
             upper_env, lower_env = _compute_envelope(avg_dose, fixed_pos, dose_tolerance, pos_tolerance, axis)
-            hdr = (f"  {'Sheet':<32}  {'n':>6}  {'RMS dev':>8}  {'Max dev':>8}  "
-                   f"{'Max dev†':>10}  {tol_hdr:>14}  {ci_hdr:>12}")
+            hdr = (f"  {'Sheet':<32}  {'n':>6}  {'Mean dev':>9}  {'RMS dev':>9}  "
+                   f"{'P95 dev':>9}  {'Max dev':>9}  {'Max dev†':>10}  {tol_hdr:>{tol_w}}  {ci_hdr:>{ci_w}}")
             lines.append(hdr)
             lines.append(sep)
-            comb_sq, comb_mx, comb_dta_mx, comb_tol, comb_ci, comb_n = [], [], [], 0, 0, 0
+            comb_sq, comb_mx, comb_dta_mx, comb_tol, comb_ci, comb_n, comb_diffs = [], [], [], 0, 0, 0, []
             for sn in sorted(sheets.keys()):
                 sheet_dose = sheets[sn]
                 valid = ~np.isnan(avg_dose) & ~np.isnan(sheet_dose)
                 if not valid.any():
                     continue
-                diff  = sheet_dose[valid] - avg_dose[valid]
-                rms   = float(np.sqrt(np.mean(diff ** 2)))
-                mxd   = float(np.max(np.abs(diff)))
-                n_tot = int(valid.sum())
+                diff   = sheet_dose[valid] - avg_dose[valid]
+                mean_d = float(np.mean(diff))
+                rms    = float(np.sqrt(np.mean(diff ** 2)))
+                p95_d  = float(np.percentile(np.abs(diff), 95))
+                mxd    = float(np.max(np.abs(diff)))
+                n_tot  = int(valid.sum())
 
                 # DTA-filtered max dev
                 dta_val    = _compute_dta(sheet_dose, avg_dose, fixed_pos, pos_tol_cm)
@@ -731,11 +802,13 @@ def _build_report_lines(dose_tolerance, pos_tolerance, sd_mult):
                 n_in_ci  = int(np.sum((sheet_dose[valid] >= ci_lower) & (sheet_dose[valid] <= ci_upper)))
                 pct_ci   = 100.0 * n_in_ci / n_tot if n_tot > 0 else float('nan')
 
-                lines.append(f"  {sn:<32}  {n_tot:>6}  {rms:>8.3f}%  {mxd:>8.3f}%  "
-                             f"{mxd_dta:>9.3f}%  {pct_tol:>13.1f}%  {pct_ci:>11.1f}%")
+                lines.append(f"  {sn:<32}  {n_tot:>6}  {mean_d:>+8.3f}%  {rms:>8.3f}%  "
+                             f"{p95_d:>8.3f}%  {mxd:>8.3f}%  "
+                             f"{mxd_dta:>9.3f}%  {pct_tol:>{tol_w-1}.1f}%  {pct_ci:>{ci_w-1}.1f}%")
 
                 # accumulate combination ALL
                 comb_sq.extend(diff ** 2)
+                comb_diffs.extend(diff)
                 comb_mx.append(mxd)
                 comb_dta_mx.append(mxd_dta)
                 comb_tol += n_in_tol
@@ -743,63 +816,107 @@ def _build_report_lines(dose_tolerance, pos_tolerance, sd_mult):
                 comb_n   += n_tot
 
                 # accumulate summary
-                acc = summary.setdefault(sn, [[], [], [], 0, 0, 0])
+                acc = summary.setdefault(sn, [[], [], [], 0, 0, 0, []])
                 acc[0].extend(diff ** 2)
                 acc[1].append(mxd)
                 acc[2].append(mxd_dta)
                 acc[3] += n_in_tol
                 acc[4] += n_in_ci
                 acc[5] += n_tot
+                acc[6].extend(diff)
 
             # ALL row for this combination
             if comb_n > 0:
+                mean_d_c  = float(np.mean(comb_diffs))
                 rms_c     = float(np.sqrt(np.mean(comb_sq)))
+                p95_d_c   = float(np.percentile(np.abs(comb_diffs), 95))
                 mxd_c     = float(np.max(comb_mx))
                 mxd_dta_c = float(np.max(comb_dta_mx)) if comb_dta_mx else float('nan')
                 pct_tol_c = 100.0 * comb_tol / comb_n
                 pct_ci_c  = 100.0 * comb_ci  / comb_n
                 lines.append(sep)
-                lines.append(f"  {'ALL':<32}  {comb_n:>6}  {rms_c:>8.3f}%  {mxd_c:>8.3f}%  "
-                              f"{mxd_dta_c:>9.3f}%  {pct_tol_c:>13.1f}%  {pct_ci_c:>11.1f}%")
+                lines.append(f"  {'ALL':<32}  {comb_n:>6}  {mean_d_c:>+8.3f}%  {rms_c:>8.3f}%  "
+                              f"{p95_d_c:>8.3f}%  {mxd_c:>8.3f}%  "
+                              f"{mxd_dta_c:>9.3f}%  {pct_tol_c:>{tol_w-1}.1f}%  {pct_ci_c:>{ci_w-1}.1f}%")
 
         lines.append("")
 
     # --- Overall summary ---
     if summary:
-        lines.append("=" * 96)
+        lines.append("=" * _total_w)
         lines.append("SUMMARY (all combinations)")
-        hdr = (f"  {'Sheet':<32}  {'n':>6}  {'RMS dev':>8}  {'Max dev':>8}  "
-               f"{'Max dev†':>10}  {tol_hdr:>14}  {ci_hdr:>12}")
+        hdr = (f"  {'Sheet':<32}  {'n':>6}  {'Mean dev':>9}  {'RMS dev':>9}  "
+               f"{'P95 dev':>9}  {'Max dev':>9}  {'Max dev†':>10}  {tol_hdr:>{tol_w}}  {ci_hdr:>{ci_w}}")
         lines.append(hdr)
         lines.append(sep)
-        all_sq, all_mx, all_dta_mx, all_tol, all_ci, all_n = [], [], [], 0, 0, 0
+        all_sq, all_mx, all_dta_mx, all_tol, all_ci, all_n, all_diffs = [], [], [], 0, 0, 0, []
+        fleet_metrics = {}   # {sheet_name: (mean_d, rms, p95)}
         for sn in sorted(summary.keys()):
-            sq_devs, max_devs, dta_max_devs, n_in_tol, n_in_ci, n_tot = summary[sn]
-            rms_all   = float(np.sqrt(np.mean(sq_devs))) if sq_devs       else float('nan')
-            mxd_all   = float(np.max(max_devs))          if max_devs      else float('nan')
-            mxd_dta_a = float(np.max(dta_max_devs))      if dta_max_devs  else float('nan')
-            pct_tol   = 100.0 * n_in_tol / n_tot if n_tot > 0 else float('nan')
-            pct_ci    = 100.0 * n_in_ci  / n_tot if n_tot > 0 else float('nan')
-            lines.append(f"  {sn:<32}  {n_tot:>6}  {rms_all:>8.3f}%  {mxd_all:>8.3f}%  "
-                         f"{mxd_dta_a:>9.3f}%  {pct_tol:>13.1f}%  {pct_ci:>11.1f}%")
+            sq_devs, max_devs, dta_max_devs, n_in_tol, n_in_ci, n_tot, diffs_all = summary[sn]
+            mean_d_all = float(np.mean(diffs_all))                              if diffs_all else float('nan')
+            rms_all    = float(np.sqrt(np.mean(sq_devs)))                       if sq_devs   else float('nan')
+            p95_d_all  = float(np.percentile(np.abs(diffs_all), 95))            if diffs_all else float('nan')
+            mxd_all    = float(np.max(max_devs))                                if max_devs  else float('nan')
+            mxd_dta_a  = float(np.max(dta_max_devs))                            if dta_max_devs else float('nan')
+            pct_tol    = 100.0 * n_in_tol / n_tot if n_tot > 0 else float('nan')
+            pct_ci     = 100.0 * n_in_ci  / n_tot if n_tot > 0 else float('nan')
+            lines.append(f"  {sn:<32}  {n_tot:>6}  {mean_d_all:>+8.3f}%  {rms_all:>8.3f}%  "
+                         f"{p95_d_all:>8.3f}%  {mxd_all:>8.3f}%  "
+                         f"{mxd_dta_a:>9.3f}%  {pct_tol:>{tol_w-1}.1f}%  {pct_ci:>{ci_w-1}.1f}%")
+            fleet_metrics[sn] = (mean_d_all, rms_all, p95_d_all)
             all_sq.extend(sq_devs)
+            all_diffs.extend(diffs_all)
             all_mx.append(mxd_all)
             all_dta_mx.append(mxd_dta_a)
             all_tol += n_in_tol
             all_ci  += n_in_ci
             all_n   += n_tot
 
-        rms_tot     = float(np.sqrt(np.mean(all_sq))) if all_sq      else float('nan')
-        mxd_tot     = float(np.max(all_mx))           if all_mx      else float('nan')
-        mxd_dta_tot = float(np.max(all_dta_mx))       if all_dta_mx  else float('nan')
+        mean_d_tot  = float(np.mean(all_diffs))                   if all_diffs   else float('nan')
+        rms_tot     = float(np.sqrt(np.mean(all_sq)))             if all_sq      else float('nan')
+        p95_d_tot   = float(np.percentile(np.abs(all_diffs), 95)) if all_diffs   else float('nan')
+        mxd_tot     = float(np.max(all_mx))                       if all_mx      else float('nan')
+        mxd_dta_tot = float(np.max(all_dta_mx))                   if all_dta_mx  else float('nan')
         pct_tol_tot = 100.0 * all_tol / all_n if all_n > 0 else float('nan')
         pct_ci_tot  = 100.0 * all_ci  / all_n if all_n > 0 else float('nan')
         lines.append(sep)
-        lines.append(f"  {'ALL':<32}  {all_n:>6}  {rms_tot:>8.3f}%  {mxd_tot:>8.3f}%  "
-                     f"{mxd_dta_tot:>9.3f}%  {pct_tol_tot:>13.1f}%  {pct_ci_tot:>11.1f}%")
+        lines.append(f"  {'ALL':<32}  {all_n:>6}  {mean_d_tot:>+8.3f}%  {rms_tot:>8.3f}%  "
+                     f"{p95_d_tot:>8.3f}%  {mxd_tot:>8.3f}%  "
+                     f"{mxd_dta_tot:>9.3f}%  {pct_tol_tot:>{tol_w-1}.1f}%  {pct_ci_tot:>{ci_w-1}.1f}%")
         lines.append("")
 
-    lines.append("=" * 96)
+        # --- Statistical outlier FLAGS (modified Z-score, Iglewicz-Hoaglin threshold 3.5) ---
+        if len(fleet_metrics) >= 3:
+            sheet_names = sorted(fleet_metrics.keys())
+            means = [fleet_metrics[s][0] for s in sheet_names]
+            rmss  = [fleet_metrics[s][1] for s in sheet_names]
+            p95s  = [fleet_metrics[s][2] for s in sheet_names]
+            z_mean = _modified_zscore(means)
+            z_rms  = _modified_zscore(rmss)
+            z_p95  = _modified_zscore(p95s)
+            _THRESH = 3.5
+            flags = {}
+            for i, sn in enumerate(sheet_names):
+                triggers = []
+                if abs(z_mean[i]) > _THRESH:
+                    triggers.append(f"Mean dev (M={z_mean[i]:+.1f})")
+                if abs(z_rms[i]) > _THRESH:
+                    triggers.append(f"RMS dev (M={z_rms[i]:+.1f})")
+                if abs(z_p95[i]) > _THRESH:
+                    triggers.append(f"P95 dev (M={z_p95[i]:+.1f})")
+                if triggers:
+                    flags[sn] = triggers
+            lines.append("=" * _total_w)
+            lines.append("STATISTICAL OUTLIER FLAGS  (modified Z-score threshold: |M| > 3.5)")
+            lines.append("-" * _total_w)
+            if flags:
+                for sn, triggers in sorted(flags.items()):
+                    lines.append(f"  *** {sn:<32}  {', '.join(triggers)}")
+            else:
+                lines.append("  No statistical outliers detected.")
+            lines.append("")
+
+    lines.append("=" * _total_w)
     return lines
 
 
@@ -947,7 +1064,7 @@ sheet_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))  # Padding to separ
 
 # Listbox for selecting multiple sheets
 ttk.Label(sheet_frame, text="Select Sheets:").grid(row=0, column=0, sticky="w")
-sheet_listbox = tk.Listbox(sheet_frame, selectmode="multiple", width=40, height=10, exportselection=0)
+sheet_listbox = tk.Listbox(sheet_frame, selectmode="multiple", width=40, height=6, exportselection=0)
 sheet_listbox.grid(row=1, column=0, padx=5, pady=5)
 sheet_listbox.bind("<<ListboxSelect>>", lambda _: (populate_fsl(), populate_scl(), populate_dl(), _update_highlight_combo()))
 
@@ -971,7 +1088,7 @@ data_selection_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))  # Adjust 
 
 # Field Size Selection
 ttk.Label(data_selection_frame, text="Select Field Sizes").grid(row=0, column=0, sticky="w")
-fsl_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
+fsl_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=6, exportselection=0)
 fsl_listbox.grid(row=1, column=0, padx=5, pady=5)
 
 def toggle_fsl():
@@ -987,7 +1104,7 @@ fsl_toggle_btn.grid(row=2, column=0, pady=2)
 
 # Scan Types Selection
 ttk.Label(data_selection_frame, text="Select Scan Types").grid(row=0, column=1, sticky="w", padx=20)
-scl_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
+scl_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=6, exportselection=0)
 scl_listbox.grid(row=1, column=1, padx=5, pady=5)
 
 def toggle_scl():
@@ -1003,7 +1120,7 @@ scl_toggle_btn.grid(row=2, column=1, pady=2)
 
 # Depth Selection
 ttk.Label(data_selection_frame, text="Select Depths").grid(row=0, column=2, sticky="w", padx=20)
-depth_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=10, exportselection=0)
+depth_listbox = tk.Listbox(data_selection_frame, selectmode="multiple", width=20, height=6, exportselection=0)
 depth_listbox.grid(row=1, column=2, padx=5, pady=5)
 
 def toggle_depth():
@@ -1105,6 +1222,10 @@ ci_entry.bind("<Return>", _ci_changed)
 sd_mult_entry.bind("<FocusOut>", _sdmult_changed)
 sd_mult_entry.bind("<Return>", _sdmult_changed)
 
+show_ci_mean_var = tk.BooleanVar(value=False)
+ttk.Checkbutton(controls_frame, text="Show CI on mean (t-dist)", variable=show_ci_mean_var).grid(
+    row=1, column=13, sticky="w", padx=(8, 0))
+
 _INSET_POSITIONS = {
     "Upper Right": [0.53, 0.37, 0.45, 0.58],
     "Upper Left":  [0.02, 0.37, 0.45, 0.58],
@@ -1146,11 +1267,11 @@ ttk.Combobox(controls_frame, textvariable=pdd_inset_pos_var,
              values=list(_INSET_POSITIONS.keys()), width=12, state="readonly").grid(
     row=4, column=8, sticky="w", padx=(0, 10))
 
-ttk.Label(controls_frame, text="Highlight machine:").grid(row=5, column=0, sticky="w", padx=(0, 5))
+ttk.Label(controls_frame, text="Highlight machine:").grid(row=2, column=0, sticky="w", padx=(0, 5))
 highlight_var = tk.StringVar(value="None")
 highlight_combo = ttk.Combobox(controls_frame, textvariable=highlight_var, width=28, state="readonly")
 highlight_combo['values'] = ["None"]
-highlight_combo.grid(row=4, column=1, columnspan=4, sticky="w", padx=(0, 20))
+highlight_combo.grid(row=2, column=1, columnspan=4, sticky="w", padx=(0, 20))
 
 def _update_highlight_combo(*_):
     selected = [sheet_listbox.get(i) for i in sheet_listbox.curselection()]
@@ -1225,20 +1346,6 @@ exclude_tps_var = tk.BooleanVar(value=True)
 ttk.Checkbutton(preproc_frame, text="Exclude TPS tabs from avg", variable=exclude_tps_var).grid(
     row=0, column=10, sticky="w", padx=(16, 0))
 
-# Adding the buttons to the GUI
-
-# Button to plot data (without affecting the average)
-plot_button = ttk.Button(root, text="Plot Data", command=plot_data)
-plot_button.grid(row=8, column=0, pady=10)
-
-# Button to calculate the average and plot it
-make_avg_button = ttk.Button(root, text="Make Avg", command=make_avg)
-make_avg_button.grid(row=9, column=0, pady=10)
-
-# Button to save the average data
-save_avg_button = ttk.Button(root, text="Save Avg", command=save_average)
-save_avg_button.grid(row=10, column=0, pady=10)
-
 def clear_avg():
     global avg_dose_global, fixed_pos_global, std_dose_global, _raw_stacks_global
     avg_dose_global    = {}
@@ -1247,14 +1354,19 @@ def clear_avg():
     _raw_stacks_global = {}
     print("Average cleared.")
 
-clear_avg_button = ttk.Button(root, text="Clear Avg", command=clear_avg)
-clear_avg_button.grid(row=11, column=0, pady=10)
+def open_help():
+    help_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "BeamDataAvgTool_Help.html")
+    webbrowser.open(f"file:///{help_path.replace(os.sep, '/')}")
 
-report_button = ttk.Button(root, text="Print Report", command=print_report)
-report_button.grid(row=12, column=0, pady=10)
-
-save_report_button = ttk.Button(root, text="Save Report", command=save_report)
-save_report_button.grid(row=13, column=0, pady=10)
+buttons_frame = ttk.Frame(root, padding="5")
+buttons_frame.grid(row=8, column=0, sticky="w", padx=10, pady=5)
+ttk.Button(buttons_frame, text="Plot Data",    command=plot_data).grid(   row=0, column=0, padx=4)
+ttk.Button(buttons_frame, text="Make Avg",     command=make_avg).grid(    row=0, column=1, padx=4)
+ttk.Button(buttons_frame, text="Save Avg",     command=save_average).grid(row=0, column=2, padx=4)
+ttk.Button(buttons_frame, text="Clear Avg",    command=clear_avg).grid(   row=0, column=3, padx=4)
+ttk.Button(buttons_frame, text="Print Report", command=print_report).grid(row=0, column=4, padx=4)
+ttk.Button(buttons_frame, text="Save Report",  command=save_report).grid( row=0, column=5, padx=4)
+ttk.Button(buttons_frame, text="Help",         command=open_help).grid(   row=0, column=6, padx=4)
 
 # Start the GUI loop
 root.mainloop()

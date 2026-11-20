@@ -408,7 +408,7 @@ def plot_data():
     # Set up plotting for profiles (X, Y, XY, YX)
     fig_profiles, ax_profiles = None, None
     if any(axis in ['X', 'Y', 'XY', 'YX'] for axis in scl):
-        fig_profiles, ax_profiles = plt.subplots(figsize=(10, 5), constrained_layout=True)
+        fig_profiles, ax_profiles = plt.subplots(figsize=(12, 6), constrained_layout=True)
         ax_profiles.set_ylabel('Dose [%]')
         ax_profiles.set_xlabel('Off Axis Position [cm]')
         max_field_size = max(fsl) if fsl else 0
@@ -661,9 +661,12 @@ def plot_data():
         except ValueError:
             pass
         ins_p.tick_params(labelsize=max(8, _fs - 4))
-        _, _p_connectors = ax_profiles.indicate_inset_zoom(ins_p, edgecolor='black')
-        for _c in _p_connectors:
-            _c.set_visible(True)
+        ins_p.yaxis.tick_right()
+        _axp_xl, _axp_xr = ax_profiles.get_xlim()
+        if _pix1 >= _axp_xl and _pix2 <= _axp_xr:
+            _, _p_connectors = ax_profiles.indicate_inset_zoom(ins_p, edgecolor='black')
+            for _c in _p_connectors:
+                _c.set_visible(True)
 
     if fig_z and show_pdd_inset_var.get() and _zix1 is not None and _zix1 < _zix2:
         _z_bounds = list(_INSET_POSITIONS.get(pdd_inset_pos_var.get(), [0.53, 0.37, 0.45, 0.58]))
@@ -683,9 +686,12 @@ def plot_data():
         except ValueError:
             pass
         ins_z.tick_params(labelsize=max(8, _fs - 4))
-        _, _z_connectors = ax_z.indicate_inset_zoom(ins_z, edgecolor='black')
-        for _c in _z_connectors:
-            _c.set_visible(True)
+        ins_z.yaxis.tick_right()
+        _axz_xl, _axz_xr = ax_z.get_xlim()
+        if _zix1 >= _axz_xl and _zix2 <= _axz_xr:
+            _, _z_connectors = ax_z.indicate_inset_zoom(ins_z, edgecolor='black')
+            for _c in _z_connectors:
+                _c.set_visible(True)
 
     try:
         _pix1b, _pix2b = float(profile_inset2_xmin.get()), float(profile_inset2_xmax.get())
@@ -715,9 +721,12 @@ def plot_data():
         except ValueError:
             pass
         ins_p2.tick_params(labelsize=max(8, _fs - 4))
-        _, _p2_connectors = ax_profiles.indicate_inset_zoom(ins_p2, edgecolor='black')
-        for _c in _p2_connectors:
-            _c.set_visible(True)
+        ins_p2.yaxis.tick_right()
+        _axp_xl, _axp_xr = ax_profiles.get_xlim()
+        if _pix1b >= _axp_xl and _pix2b <= _axp_xr:
+            _, _p2_connectors = ax_profiles.indicate_inset_zoom(ins_p2, edgecolor='black')
+            for _c in _p2_connectors:
+                _c.set_visible(True)
 
     if fig_z and show_pdd_inset2_var.get() and _zix1b is not None and _zix1b < _zix2b:
         _z2_bounds = list(_INSET_POSITIONS.get(pdd_inset2_pos_var.get(), [0.53, 0.04, 0.45, 0.55]))
@@ -737,9 +746,12 @@ def plot_data():
         except ValueError:
             pass
         ins_z2.tick_params(labelsize=max(8, _fs - 4))
-        _, _z2_connectors = ax_z.indicate_inset_zoom(ins_z2, edgecolor='black')
-        for _c in _z2_connectors:
-            _c.set_visible(True)
+        ins_z2.yaxis.tick_right()
+        _axz_xl, _axz_xr = ax_z.get_xlim()
+        if _zix1b >= _axz_xl and _zix2b <= _axz_xr:
+            _, _z2_connectors = ax_z.indicate_inset_zoom(ins_z2, edgecolor='black')
+            for _c in _z2_connectors:
+                _c.set_visible(True)
 
     try:
         _pix1c, _pix2c = float(profile_inset3_xmin.get()), float(profile_inset3_xmax.get())
@@ -769,9 +781,12 @@ def plot_data():
         except ValueError:
             pass
         ins_p3.tick_params(labelsize=max(8, _fs - 4))
-        _, _p3_connectors = ax_profiles.indicate_inset_zoom(ins_p3, edgecolor='black')
-        for _c in _p3_connectors:
-            _c.set_visible(True)
+        ins_p3.yaxis.tick_right()
+        _axp_xl, _axp_xr = ax_profiles.get_xlim()
+        if _pix1c >= _axp_xl and _pix2c <= _axp_xr:
+            _, _p3_connectors = ax_profiles.indicate_inset_zoom(ins_p3, edgecolor='black')
+            for _c in _p3_connectors:
+                _c.set_visible(True)
 
     if fig_z and show_pdd_inset3_var.get() and _zix1c is not None and _zix1c < _zix2c:
         _z3_bounds = list(_INSET_POSITIONS.get(pdd_inset3_pos_var.get(), [0.27, 0.04, 0.45, 0.55]))
@@ -791,9 +806,12 @@ def plot_data():
         except ValueError:
             pass
         ins_z3.tick_params(labelsize=max(8, _fs - 4))
-        _, _z3_connectors = ax_z.indicate_inset_zoom(ins_z3, edgecolor='black')
-        for _c in _z3_connectors:
-            _c.set_visible(True)
+        ins_z3.yaxis.tick_right()
+        _axz_xl, _axz_xr = ax_z.get_xlim()
+        if _zix1c >= _axz_xl and _zix2c <= _axz_xr:
+            _, _z3_connectors = ax_z.indicate_inset_zoom(ins_z3, edgecolor='black')
+            for _c in _z3_connectors:
+                _c.set_visible(True)
 
     # Build proxy patch handles for bands
     _band_patch    = _MPatch(facecolor='0.85', edgecolor='black', linestyle='--', linewidth=1)
@@ -1363,12 +1381,12 @@ ttk.Checkbutton(controls_frame, text="Show CI on mean (t-dist)", variable=show_c
     row=1, column=13, sticky="w", padx=(8, 0))
 
 _INSET_POSITIONS = {
-    "Upper Right":  [0.53, 0.37, 0.45, 0.58],
-    "Upper Left":   [0.02, 0.37, 0.45, 0.58],
-    "Upper Center": [0.27, 0.37, 0.45, 0.58],
-    "Lower Right":  [0.53, 0.04, 0.45, 0.55],
-    "Lower Left":   [0.02, 0.04, 0.45, 0.55],
-    "Lower Center": [0.27, 0.04, 0.45, 0.55],
+    "Upper Right":  [0.60, 0.42, 0.37, 0.52],
+    "Upper Left":   [0.03, 0.42, 0.37, 0.52],
+    "Upper Center": [0.31, 0.42, 0.37, 0.52],
+    "Lower Right":  [0.60, 0.04, 0.37, 0.48],
+    "Lower Left":   [0.03, 0.04, 0.37, 0.48],
+    "Lower Center": [0.31, 0.04, 0.37, 0.48],
 }
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "BeamDataAvgTool_config.json")
